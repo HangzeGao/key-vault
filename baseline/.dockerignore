@@ -1,0 +1,7 @@
+.git
+.idea
+web/frontend/node_modules
+web/frontend/dist
+web/dist
+test-ui.py
+start.sh

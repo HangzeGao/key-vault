@@ -1,0 +1,7 @@
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tpm2-tools
+WORKDIR /app
+COPY .docker/key-vault /app/key-vault
+RUN mkdir -p /tmp/kvlt-tpm /tmp/kvlt-wal
+EXPOSE 8080
+ENTRYPOINT ["/app/key-vault"]

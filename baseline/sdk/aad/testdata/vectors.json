@@ -1,0 +1,7 @@
+{
+  "json_input": "{\"z\":3,\"a\":{\"β\":2,\"x\":1}}",
+  "json_canonical_utf8": "{\"a\":{\"x\":1,\"β\":2},\"z\":3}",
+  "headers": {"X-Request-ID":[" req-1 "],"Content-Type":[" application/json "]},
+  "header_allowlist": ["content-type","x-request-id"],
+  "headers_canonical_utf8": "content-type:application/json\nx-request-id:req-1"
+}

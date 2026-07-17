@@ -1,0 +1,13 @@
+{
+  "entries": [
+    {
+      "ciphertext": "REPLACE_WITH_BASE64_ENVELOPE_FROM_ENCRYPT_RESPONSE",
+      "aad": "{\"object\":\"order-001\"}",
+      "aad_mode": "utf8"
+    },
+    {
+      "ciphertext": "REPLACE_WITH_BASE64_ENVELOPE_FROM_ENCRYPT_RESPONSE",
+      "aad_b64": "eyJvYmplY3QiOiJvcmRlci0wMDIifQ=="
+    }
+  ]
+}

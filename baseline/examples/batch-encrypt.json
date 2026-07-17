@@ -1,0 +1,16 @@
+{
+  "tenant_id": "t-default",
+  "entries": [
+    {
+      "key_id": "demo-orders-aes",
+      "plaintext": "order-001:approved",
+      "aad": "{\"object\":\"order-001\"}",
+      "aad_mode": "utf8"
+    },
+    {
+      "key_id": "demo-orders-aes",
+      "plaintext": "order-002:pending",
+      "aad_b64": "eyJvYmplY3QiOiJvcmRlci0wMDIifQ=="
+    }
+  ]
+}

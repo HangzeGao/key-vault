@@ -1,0 +1,34 @@
+{
+  "tenant_id": "t-default",
+  "entries": [
+    {
+      "name": "orders-demo-aes",
+      "key_id": "demo-orders-aes",
+      "policy_id": "<active-signed-policy-id>",
+      "suite_id": "AES_256_GCM",
+      "external_dek": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    },
+    {
+      "name": "ledger-demo-sm4",
+      "key_id": "demo-ledger-sm4",
+      "policy_id": "<active-signed-policy-id>",
+      "suite_id": "SM4_GCM",
+      "external_dek": "MDEyMzQ1Njc4OWFiY2RlZg==",
+      "expires_at": "2030-01-01T00:00:00Z"
+    },
+    {
+      "name": "legacy-aes-ecb",
+      "key_id": "demo-legacy-aes-ecb",
+      "policy_id": "<active-signed-policy-id>",
+      "suite_id": "AES_256_ECB",
+      "external_dek": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    },
+    {
+      "name": "legacy-sm4-ecb",
+      "key_id": "demo-legacy-sm4-ecb",
+      "policy_id": "<active-signed-policy-id>",
+      "suite_id": "SM4_ECB",
+      "external_dek": "MDEyMzQ1Njc4OWFiY2RlZg=="
+    }
+  ]
+}

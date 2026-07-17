@@ -1,0 +1,28 @@
+name: kvlt-baseline
+
+services:
+  key-vault:
+    build:
+      context: .
+      dockerfile: Dockerfile.offline
+    image: kvlt-baseline:local
+    ports: !override
+      - "8081:8080"
+    environment:
+      KVLT_HTTP_ADDR: ":8080"
+      KVLT_TPM_PROVIDER: "tpm2"
+      KVLT_TPM_STATE_DIR: "/tmp/kvlt-tpm"
+      TPM2TOOLS_TCTI: "device:/dev/tpmrm0"
+      KVLT_LOG_LEVEL: "INFO"
+      KVLT_STATIC_TOKENS: >-
+        [{"token":"admin-token-baseline","tenant_id":"t-default","scopes":["keys:manage","tenant:read","tenant:manage"],"roles":["admin"],"plane":"management"},{"token":"data-token-baseline","tenant_id":"t-default","scopes":["crypto:encrypt","crypto:decrypt"],"roles":["data"],"plane":"data"},{"token":"ops-token-baseline","tenant_id":"t-default","scopes":["ops:read","ops:repair"],"roles":["ops"],"plane":"ops"}]
+    devices:
+      - "/dev/tpmrm0:/dev/tpmrm0"
+    volumes:
+      - kvlt_tpm_state:/tmp/kvlt-tpm
+      - kvlt_audit_wal:/tmp/kvlt-wal
+    restart: unless-stopped
+
+volumes:
+  kvlt_tpm_state:
+  kvlt_audit_wal:
