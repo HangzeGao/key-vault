@@ -6,6 +6,8 @@ export function statusPillClass(status: string): string {
   switch (status) {
     case "ACTIVE":
     case "READY":
+    case "CONFIRMED":
+    case "IMPORTED":
       return "pill pill-success";
     case "DISABLED":
     case "DEGRADED":
@@ -17,6 +19,8 @@ export function statusPillClass(status: string): string {
       return "pill pill-danger";
     case "PRE_ACTIVE":
     case "REGISTERED":
+    case "UPLOAD_PENDING":
+    case "RECEIVED":
       return "pill pill-info";
     default:
       return "pill pill-neutral";

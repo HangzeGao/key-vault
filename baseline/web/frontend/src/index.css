@@ -1358,6 +1358,27 @@ body::after {
   flex-direction: column;
   gap: 12px;
 }
+.transfer-mode {
+  display: flex;
+  gap: 8px;
+  padding-top: 4px;
+}
+.transfer-hint {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+.transfer-divider {
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
 .compact-grid-2 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

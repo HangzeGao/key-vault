@@ -27,6 +27,8 @@ type Store struct {
 	keysByTenant     map[string][]string    // tenantID -> keyIDs
 	keyVersions      map[string]*models.KeyVersion
 	keyVersionsByKey map[string][]string // keyID -> versionIDs
+	keyUploads       map[string]*models.KeyUpload
+	keyDownloads     map[string]*models.KeyDownload
 
 	crkVersions      map[string]*models.CRKVersion
 	crkNodeEnvelopes map[string]*models.CRKNodeEnvelope
@@ -67,6 +69,8 @@ func New() *Store {
 		keysByTenant:          make(map[string][]string),
 		keyVersions:           make(map[string]*models.KeyVersion),
 		keyVersionsByKey:      make(map[string][]string),
+		keyUploads:            make(map[string]*models.KeyUpload),
+		keyDownloads:          make(map[string]*models.KeyDownload),
 		crkVersions:           make(map[string]*models.CRKVersion),
 		crkNodeEnvelopes:      make(map[string]*models.CRKNodeEnvelope),
 		nodes:                 make(map[string]*models.Node),
@@ -339,26 +343,51 @@ func (s *Store) LockKeyForUpdate(ctx context.Context, keyID string) (func(), err
 	return func() {}, nil
 }
 
-// RotateKey atomically: locks key, inserts new version, switches current_version,
-// marks old version DECRYPT_ONLY.
-func (s *Store) RotateKey(ctx context.Context, keyID string, newVersion *models.KeyVersion) error {
+func (s *Store) CreatePendingKeyVersion(ctx context.Context, keyID string, newVersion *models.KeyVersion) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k, ok := s.keys[keyID]
 	if !ok {
 		return ErrNotFound
 	}
-	// Mark old current version DECRYPT_ONLY.
-	for _, vid := range s.keyVersionsByKey[keyID] {
-		kv := s.keyVersions[vid]
+	if newVersion.VersionNo != k.CurrentVersion+1 || newVersion.Status != "PRE_ACTIVE" {
+		return ErrConflict
+	}
+	for _, id := range s.keyVersionsByKey[keyID] {
+		if s.keyVersions[id].VersionNo == newVersion.VersionNo {
+			return ErrConflict
+		}
+	}
+	s.keyVersions[newVersion.ID] = cloneKeyVersion(newVersion)
+	s.keyVersionsByKey[keyID] = append(s.keyVersionsByKey[keyID], newVersion.ID)
+	return nil
+}
+
+func (s *Store) ActivateKeyVersion(ctx context.Context, keyID string, versionNo uint32) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k, ok := s.keys[keyID]
+	if !ok {
+		return ErrNotFound
+	}
+	var target *models.KeyVersion
+	for _, id := range s.keyVersionsByKey[keyID] {
+		kv := s.keyVersions[id]
+		if kv.VersionNo == versionNo {
+			target = kv
+		}
+	}
+	if target == nil || target.Status != "PRE_ACTIVE" {
+		return ErrConflict
+	}
+	for _, id := range s.keyVersionsByKey[keyID] {
+		kv := s.keyVersions[id]
 		if kv.VersionNo == k.CurrentVersion {
 			kv.Status = "DECRYPT_ONLY"
 		}
 	}
-	newVersion.CreatedAt = time.Now().UTC()
-	s.keyVersions[newVersion.ID] = newVersion
-	s.keyVersionsByKey[keyID] = append(s.keyVersionsByKey[keyID], newVersion.ID)
-	k.CurrentVersion = newVersion.VersionNo
+	target.Status = "ACTIVE"
+	k.CurrentVersion = versionNo
 	k.UpdatedAt = time.Now().UTC()
 	return nil
 }
@@ -402,6 +431,94 @@ func (s *Store) GetCurrentKeyVersion(ctx context.Context, keyID string) (*models
 		}
 	}
 	return nil, ErrNotFound
+}
+
+func (s *Store) CreateKeyUpload(ctx context.Context, p *models.KeyUpload) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.keyUploads[p.ID]; exists {
+		return ErrConflict
+	}
+	for _, existing := range s.keyUploads {
+		if existing.TenantID == p.TenantID && existing.TargetID == p.TargetID && existing.Sequence == p.Sequence {
+			return ErrConflict
+		}
+	}
+	s.keyUploads[p.ID] = cloneKeyUpload(p)
+	return nil
+}
+
+func (s *Store) GetKeyUpload(ctx context.Context, tenantID, uploadID string) (*models.KeyUpload, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.keyUploads[uploadID]
+	if !ok || p.TenantID != tenantID {
+		return nil, ErrNotFound
+	}
+	return cloneKeyUpload(p), nil
+}
+
+func (s *Store) ConfirmKeyUpload(ctx context.Context, tenantID, uploadID, principalID string, confirmedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.keyUploads[uploadID]
+	if !ok || p.TenantID != tenantID {
+		return ErrNotFound
+	}
+	if p.Status == "CONFIRMED" {
+		return nil
+	}
+	if p.Status != "UPLOAD_PENDING" {
+		return ErrConflict
+	}
+	p.Status = "CONFIRMED"
+	p.ConfirmedAt = confirmedAt
+	p.ConfirmedBy = principalID
+	return nil
+}
+
+func (s *Store) CreateKeyDownload(ctx context.Context, d *models.KeyDownload) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.keyDownloads[d.ID]; exists {
+		return ErrConflict
+	}
+	for _, existing := range s.keyDownloads {
+		if existing.TenantID == d.TenantID && existing.TargetID == d.TargetID && existing.Sequence == d.Sequence {
+			return ErrConflict
+		}
+	}
+	s.keyDownloads[d.ID] = cloneKeyDownload(d)
+	return nil
+}
+
+func (s *Store) GetKeyDownload(ctx context.Context, tenantID, downloadID string) (*models.KeyDownload, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.keyDownloads[downloadID]
+	if !ok || d.TenantID != tenantID {
+		return nil, ErrNotFound
+	}
+	return cloneKeyDownload(d), nil
+}
+
+func (s *Store) CompleteKeyDownload(ctx context.Context, tenantID, downloadID, principalID string, importedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.keyDownloads[downloadID]
+	if !ok || d.TenantID != tenantID {
+		return ErrNotFound
+	}
+	if d.Status == "IMPORTED" {
+		return nil
+	}
+	if d.Status != "RECEIVED" {
+		return ErrConflict
+	}
+	d.Status = "IMPORTED"
+	d.ImportedAt = importedAt
+	d.ImportedBy = principalID
+	return nil
 }
 
 // --- CRK ---
@@ -1218,12 +1335,12 @@ func (s *Store) DatabaseDiagnostics(ctx context.Context) (*repository.DatabaseDi
 	}
 
 	return &repository.DatabaseDiagnostics{
-		ObservedAt: now,
-		Role:       "memory",
-		Schema:     repository.DatabaseSchemaStats{Current: 0, Expected: 0},
-		Protection: repository.DatabaseProtectionStats{BackupStatus: "not_applicable"},
-		Integrity:  integrity,
-		Tables:     tables,
+		ObservedAt:  now,
+		Role:        "memory",
+		Schema:      repository.DatabaseSchemaStats{Current: 0, Expected: 0},
+		Protection:  repository.DatabaseProtectionStats{BackupStatus: "not_applicable"},
+		Integrity:   integrity,
+		Tables:      tables,
 		Unavailable: []string{"capacity", "workload", "replication"},
 	}, nil
 }
@@ -1466,6 +1583,26 @@ func cloneOutboxEvent(e *models.OutboxEvent) *models.OutboxEvent {
 	if e.Payload != nil {
 		cc.Payload = append([]byte(nil), e.Payload...)
 	}
+	return &cc
+}
+
+func cloneKeyUpload(p *models.KeyUpload) *models.KeyUpload {
+	if p == nil {
+		return nil
+	}
+	cc := *p
+	cc.Nonce = append([]byte(nil), p.Nonce...)
+	cc.WrappedKey = append([]byte(nil), p.WrappedKey...)
+	cc.Tag = append([]byte(nil), p.Tag...)
+	cc.AAD = append([]byte(nil), p.AAD...)
+	return &cc
+}
+
+func cloneKeyDownload(d *models.KeyDownload) *models.KeyDownload {
+	if d == nil {
+		return nil
+	}
+	cc := *d
 	return &cc
 }
 

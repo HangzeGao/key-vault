@@ -21,7 +21,7 @@ type Key struct {
 	ID             string
 	TenantID       string
 	Name           string
-	Purpose        string // encrypt_decrypt | datakey
+	Purpose        string // encrypt_decrypt | key_wrap
 	PolicyID       string
 	SuiteID        string
 	CurrentVersion uint32
@@ -43,6 +43,49 @@ type KeyVersion struct {
 	WrapMetadata []byte // JSON: crk_version, aad_digest, wrap_alg
 	Status       string
 	CreatedAt    time.Time
+}
+
+// KeyUpload is a protocol-neutral package used to upload a static data key to
+// an external cryptographic device under a pre-shared KEK.
+type KeyUpload struct {
+	ID             string
+	TenantID       string
+	TargetID       string
+	Sequence       uint64
+	KEKID          string
+	KEKVersion     uint32
+	DataKeyID      string
+	DataKeyVersion uint32
+	WrapSuiteID    string
+	Nonce          []byte
+	WrappedKey     []byte
+	Tag            []byte
+	AAD            []byte
+	Status         string // UPLOAD_PENDING | CONFIRMED
+	CreatedAt      time.Time
+	ConfirmedAt    time.Time
+	ConfirmedBy    string
+}
+
+// KeyDownload records an inbound KEK-wrapped data key. Only the authenticated
+// request digest and metadata are persisted; plaintext key material is
+// immediately re-sealed under the CRK.
+type KeyDownload struct {
+	ID             string
+	TenantID       string
+	TargetID       string
+	Sequence       uint64
+	KEKID          string
+	KEKVersion     uint32
+	DataKeyID      string
+	DataKeyVersion uint32
+	DataSuiteID    string
+	RequestDigest  string
+	Operation      string // CREATE_KEY | CREATE_VERSION
+	Status         string // RECEIVED | IMPORTED
+	CreatedAt      time.Time
+	ImportedAt     time.Time
+	ImportedBy     string
 }
 
 // CRKVersion is a CRK version metadata record.
@@ -183,7 +226,7 @@ type LifecycleJob struct {
 // OutboxEvent is a transactional outbox event.
 type OutboxEvent struct {
 	ID          string
-	EventType   string // e.g. key.rotated, node.revoked, policy.reloaded
+	EventType   string // e.g. key.version_activated, node.revoked, policy.reloaded
 	AggregateID string
 	Payload     []byte // JSON
 	Status      string // PENDING | SENT

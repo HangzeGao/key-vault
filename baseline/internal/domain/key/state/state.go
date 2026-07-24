@@ -45,7 +45,7 @@ type KVEvent string
 
 const (
 	EvSelfCheckPass KVEvent = "self_check_pass"
-	EvRotate        KVEvent = "rotate"
+	EvSupersede     KVEvent = "supersede"
 	EvKVDisable     KVEvent = "disable"
 	EvKVDestroy     KVEvent = "destroy"
 )
@@ -91,7 +91,7 @@ func TransitionKV(current KeyVersionStatus, event KVEvent) (KeyVersionStatus, er
 		}
 	case KVActive:
 		switch event {
-		case EvRotate:
+		case EvSupersede:
 			return KVDecryptOnly, nil
 		case EvKVDisable:
 			return KVDisabled, nil

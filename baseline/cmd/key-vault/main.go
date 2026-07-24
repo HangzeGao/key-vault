@@ -13,6 +13,7 @@ import (
 	"github.com/kvlt/key-vault/internal/api/admin"
 	"github.com/kvlt/key-vault/internal/api/baselineapi"
 	cryptoapi "github.com/kvlt/key-vault/internal/api/crypto"
+	keytransferapi "github.com/kvlt/key-vault/internal/api/keytransfer"
 	"github.com/kvlt/key-vault/internal/api/ops"
 	"github.com/kvlt/key-vault/internal/api/server"
 	"github.com/kvlt/key-vault/internal/bootstrap"
@@ -58,6 +59,7 @@ func main() {
 
 	adminH := admin.New(app.KeyService)
 	cryptoH := cryptoapi.New(app.CryptoService)
+	keyTransferH := keytransferapi.New(app.KeyTransferService)
 	baselineH := baselineapi.New(app.AuditChain, app.PolicyMgr, app.Worker, app.CryptoService, app.Resolver, app.Store, cfg)
 	opsH := ops.New(ops.Deps{
 		Store:      app.Store,
@@ -69,15 +71,16 @@ func main() {
 	})
 
 	srv := server.New(server.Deps{
-		Cfg:             cfg,
-		AdminHandler:    adminH,
-		CryptoHandler:   cryptoH,
-		BaselineHandler: baselineH,
-		OpsHandler:      opsH,
-		TenantHandler:   app.TenantHandler,
-		JWTVerifier:     app.JWTVerifier,
-		HMACVerifier:    app.HMACVerifier,
-		StaticTokens:    app.StaticTokens,
+		Cfg:                cfg,
+		AdminHandler:       adminH,
+		CryptoHandler:      cryptoH,
+		BaselineHandler:    baselineH,
+		OpsHandler:         opsH,
+		TenantHandler:      app.TenantHandler,
+		KeyTransferHandler: keyTransferH,
+		JWTVerifier:        app.JWTVerifier,
+		HMACVerifier:       app.HMACVerifier,
+		StaticTokens:       app.StaticTokens,
 	})
 
 	// Signal handling.

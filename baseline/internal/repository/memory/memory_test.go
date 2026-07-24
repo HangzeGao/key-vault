@@ -248,43 +248,33 @@ func TestArchiveDestroyedKeyRejectsActiveKey(t *testing.T) {
 	}
 }
 
-func TestRotateKey(t *testing.T) {
+func TestPrepareAndActivateImportedKeyVersion(t *testing.T) {
 	ctx := context.Background()
-	s := newTestStore()
-	_ = s.UpsertTenant(ctx, &models.Tenant{ID: "t-1", Name: "t1", Status: "active"})
-
-	k := &models.Key{ID: "k-1", TenantID: "t-1", Name: "k", Purpose: "encrypt_decrypt", PolicyID: "p", SuiteID: "s", CurrentVersion: 1, Status: "ACTIVE"}
-	kv1 := &models.KeyVersion{ID: "kv-1", KeyID: "k-1", VersionNo: 1, SuiteID: "s", WrappedDEK: []byte("w1"), Status: "ACTIVE"}
-	_ = s.CreateKey(ctx, k, kv1)
-
-	// Rotate to v2.
-	kv2 := &models.KeyVersion{ID: "kv-2", KeyID: "k-1", VersionNo: 2, SuiteID: "s", WrappedDEK: []byte("w2"), Status: "ACTIVE"}
-	if err := s.RotateKey(ctx, "k-1", kv2); err != nil {
-		t.Fatalf("RotateKey: %v", err)
+	s := New()
+	now := time.Now().UTC()
+	k := &models.Key{ID: "k-static", TenantID: "t-1", CurrentVersion: 1, Status: "ACTIVE", CreatedAt: now, UpdatedAt: now}
+	v1 := &models.KeyVersion{ID: "kv-static-1", KeyID: k.ID, VersionNo: 1, SuiteID: "SM4_GCM", Status: "ACTIVE", CreatedAt: now}
+	if err := s.CreateKey(ctx, k, v1); err != nil {
+		t.Fatalf("CreateKey: %v", err)
 	}
-
-	// Current version should be 2.
-	got, _ := s.GetKey(ctx, "t-1", "k-1")
-	if got.CurrentVersion != 2 {
-		t.Errorf("CurrentVersion = %d, want 2", got.CurrentVersion)
+	v2 := &models.KeyVersion{ID: "kv-static-2", KeyID: k.ID, VersionNo: 2, SuiteID: "SM4_GCM", Status: "PRE_ACTIVE", WrappedDEK: []byte("wrapped"), CreatedAt: now}
+	if err := s.CreatePendingKeyVersion(ctx, k.ID, v2); err != nil {
+		t.Fatalf("CreatePendingKeyVersion: %v", err)
 	}
-
-	// Old version should be DECRYPT_ONLY.
-	old, _ := s.GetKeyVersion(ctx, "kv-1")
-	if old.Status != "DECRYPT_ONLY" {
-		t.Errorf("Old version status = %s, want DECRYPT_ONLY", old.Status)
+	current, err := s.GetCurrentKeyVersion(ctx, k.ID)
+	if err != nil || current.VersionNo != 1 {
+		t.Fatalf("current before activation = %#v, %v", current, err)
 	}
-
-	// Current version should be kv-2.
-	cur, _ := s.GetCurrentKeyVersion(ctx, "k-1")
-	if cur.ID != "kv-2" {
-		t.Errorf("Current version ID = %s, want kv-2", cur.ID)
+	if err := s.ActivateKeyVersion(ctx, k.ID, 2); err != nil {
+		t.Fatalf("ActivateKeyVersion: %v", err)
 	}
-
-	// Get by version number.
-	v1, _ := s.GetKeyVersionByNo(ctx, "k-1", 1)
-	if v1.ID != "kv-1" {
-		t.Errorf("Version 1 ID = %s, want kv-1", v1.ID)
+	current, err = s.GetCurrentKeyVersion(ctx, k.ID)
+	if err != nil || current.VersionNo != 2 || current.Status != "ACTIVE" {
+		t.Fatalf("current after activation = %#v, %v", current, err)
+	}
+	old, err := s.GetKeyVersionByNo(ctx, k.ID, 1)
+	if err != nil || old.Status != "DECRYPT_ONLY" {
+		t.Fatalf("old version = %#v, %v", old, err)
 	}
 }
 

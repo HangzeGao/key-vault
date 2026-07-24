@@ -14,6 +14,7 @@ import {
   Sun,
   Moon,
   Database,
+  ArrowUpDown,
 } from "lucide-react";
 import { useAuth, useTheme, useUI } from "../lib/store";
 
@@ -25,6 +26,7 @@ interface NavEntry {
 
 const managementNav: NavEntry[] = [
   { to: "/ui/keys", label: "Key Management", icon: <KeyRound /> },
+  { to: "/ui/key-transfer", label: "Key Upload / Download", icon: <ArrowUpDown /> },
   { to: "/ui/policy", label: "Policy", icon: <Shield /> },
   { to: "/ui/envelope-config", label: "Envelope Config", icon: <Package /> },
 ];
@@ -47,6 +49,7 @@ const opsNav: NavEntry[] = [
 const simpleNav: NavEntry[] = [
   { to: "/ui/dashboard", label: "Dashboard", icon: <LayoutDashboard /> },
   { to: "/ui/keys", label: "Keys", icon: <KeyRound /> },
+  { to: "/ui/key-transfer", label: "Key Transfer", icon: <ArrowUpDown /> },
   { to: "/ui/crypto", label: "Encrypt / Decrypt", icon: <Lock /> },
 ];
 

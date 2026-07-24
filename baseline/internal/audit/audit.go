@@ -71,7 +71,6 @@ const (
 	HRNodeRevoke         HighRiskAction = "node.revoke"
 	HRKeyDestroy         HighRiskAction = "key.destroy"
 	HRPolicyDowngrade    HighRiskAction = "policy.downgrade"
-	HRKeyRotate          HighRiskAction = "key.rotate"
 	HRClusterEpochChange HighRiskAction = "cluster_epoch.changed"
 )
 
@@ -79,7 +78,7 @@ const (
 func IsHighRisk(action string) bool {
 	switch HighRiskAction(action) {
 	case HRCreateCRK, HRNodeRegister, HRNodeRevoke, HRKeyDestroy,
-		HRPolicyDowngrade, HRKeyRotate, HRClusterEpochChange:
+		HRPolicyDowngrade, HRClusterEpochChange:
 		return true
 	}
 	return false

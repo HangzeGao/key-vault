@@ -14,10 +14,15 @@ export const apiPaths = {
   keys: `${BFF}/keys`,
   keysList: (params: Record<string, string | number | boolean | undefined> = {}) => query(`${BFF}/keys`, params),
   key: (id: string) => `${BFF}/keys/${encodeURIComponent(id)}`,
-  keyAction: (id: string, action: "enable" | "disable" | "rotate" | "cancel-destroy" | "archive") =>
+  keyAction: (id: string, action: "enable" | "disable" | "cancel-destroy" | "archive") =>
     `${BFF}/keys/${encodeURIComponent(id)}/${action}`,
   importKey: `${BFF}/keys:import`,
   importKeysBatch: `${BFF}/keys:import-batch`,
+  keyUploads: `${BFF}/key-uploads`,
+  keyUpload: (id: string) => `${BFF}/key-uploads/${encodeURIComponent(id)}`,
+  confirmKeyUpload: (id: string) => `${BFF}/key-uploads/${encodeURIComponent(id)}/confirm`,
+  keyDownloads: `${BFF}/key-downloads`,
+  keyDownload: (id: string) => `${BFF}/key-downloads/${encodeURIComponent(id)}`,
   crypto: {
     encrypt: `${BFF}/crypto/encrypt`, decrypt: `${BFF}/crypto/decrypt`, convert: `${BFF}/crypto/envelopes:convert`, inspect: `${BFF}/crypto/envelopes:inspect`,
     encryptBatch: `${BFF}/crypto/encrypt-batch`, decryptBatch: `${BFF}/crypto/decrypt-batch`,

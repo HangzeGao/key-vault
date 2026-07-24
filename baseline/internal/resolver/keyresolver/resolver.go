@@ -210,24 +210,24 @@ func (r *Resolver) GenerateAndWrapDEK(ctx context.Context, suite aead.SuiteID, k
 	return out, nil
 }
 
-// WrapExternalDEK seals a caller-provided DEK plaintext under the CRK.
+// WrapExternalKey seals caller-provided symmetric key material under the CRK.
 // Used by the controlled key import flow (EB-FR-01, design §2 "受控导入").
 // Per design §2 and INV-11: the imported plaintext only enters the key-plane
 // sealing flow; it is not persisted, logged, or echoed. The plaintext is
 // zeroized inside the CRK critical section before return.
 //
-// The caller MUST validate that dekPlaintext length matches suite.KeyBytes()
+// The caller MUST validate that keyPlaintext length matches suite.KeyBytes()
 // before calling; this function performs a defensive length check as well.
-func (r *Resolver) WrapExternalDEK(ctx context.Context, suite aead.SuiteID, keyVersionID string, dekPlaintext []byte) (*DEKMaterial, error) {
-	if len(dekPlaintext) != suite.KeyBytes() {
-		return nil, fmt.Errorf("resolver: imported dek length mismatch: got %d, want %d", len(dekPlaintext), suite.KeyBytes())
+func (r *Resolver) WrapExternalKey(ctx context.Context, suite aead.SuiteID, keyVersionID string, keyPlaintext []byte) (*DEKMaterial, error) {
+	if len(keyPlaintext) != suite.KeyBytes() {
+		return nil, fmt.Errorf("resolver: imported key length mismatch: got %d, want %d", len(keyPlaintext), suite.KeyBytes())
 	}
 	var out *DEKMaterial
 	err := r.withCRK(ctx, func(crk []byte) error {
-		// Copy the caller's DEK into a buffer we control so we can zeroize it.
-		dek := make([]byte, len(dekPlaintext))
-		copy(dek, dekPlaintext)
-		defer zeroize(dek)
+		// Copy the caller's key into a buffer we control so we can zeroize it.
+		keyMaterial := make([]byte, len(keyPlaintext))
+		copy(keyMaterial, keyPlaintext)
+		defer zeroize(keyMaterial)
 		a, err := aead.New(aead.SuiteAES256GCM, crk)
 		if err != nil {
 			return fmt.Errorf("resolver: aead new: %w", err)
@@ -237,7 +237,7 @@ func (r *Resolver) WrapExternalDEK(ctx context.Context, suite aead.SuiteID, keyV
 			return fmt.Errorf("resolver: rand nonce: %w", err)
 		}
 		dekAAD := []byte("kvlt-dek-wrap-v1|" + keyVersionID)
-		ct, tag := a.Encrypt(dek, nonce, dekAAD)
+		ct, tag := a.Encrypt(keyMaterial, nonce, dekAAD)
 		combined := append(append(append([]byte{}, nonce...), ct...), tag...)
 		meta := wrapMetadata{
 			CRKVersionID: fmt.Sprintf("crk-v%d", r.crkVersion),

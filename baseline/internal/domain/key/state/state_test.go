@@ -50,14 +50,14 @@ func TestTransitionKV(t *testing.T) {
 		wantErr bool
 	}{
 		{"PreActive -> Active (self-check)", KVPreActive, EvSelfCheckPass, KVActive, false},
-		{"Active -> DecryptOnly (rotate)", KVActive, EvRotate, KVDecryptOnly, false},
+		{"Active -> DecryptOnly (superseded)", KVActive, EvSupersede, KVDecryptOnly, false},
 		{"Active -> Disabled", KVActive, EvKVDisable, KVDisabled, false},
 		{"DecryptOnly -> Disabled", KVDecryptOnly, EvKVDisable, KVDisabled, false},
 		{"Disabled -> Destroyed", KVDisabled, EvKVDestroy, KVDestroyed, false},
 		// Illegal transitions
 		{"Destroyed -> Active (terminal)", KVDestroyed, EvSelfCheckPass, KVDestroyed, true},
-		{"PreActive -> Rotate (illegal)", KVPreActive, EvRotate, KVPreActive, true},
-		{"Disabled -> Rotate (illegal)", KVDisabled, EvRotate, KVDisabled, true},
+		{"PreActive -> Supersede (illegal)", KVPreActive, EvSupersede, KVPreActive, true},
+		{"Disabled -> Supersede (illegal)", KVDisabled, EvSupersede, KVDisabled, true},
 		{"DecryptOnly -> Destroy (must disable first)", KVDecryptOnly, EvKVDestroy, KVDecryptOnly, true},
 		{"Active -> Destroy (must disable first)", KVActive, EvKVDestroy, KVActive, true},
 	}

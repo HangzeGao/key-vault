@@ -12,6 +12,7 @@ import { AuditPage } from "../pages/Audit";
 import { LifecyclePage } from "../pages/Lifecycle";
 import { EnvelopeConfigPage } from "../pages/EnvelopeConfig";
 import { PolicyPage } from "../pages/Policy";
+import { KeyTransferPage } from "../pages/KeyTransfer";
 
 vi.mock("../lib/api", async (original) => {
   const actual = await original<typeof import("../lib/api")>();
@@ -42,7 +43,7 @@ const emptyResponse = (path: string) => {
   if (path.endsWith("/lifecycle/config")) return { owner_id: "worker", poll_interval: "5s", expiry_scan_interval: "1m", expiry_warning_window: "168h", lease_ttl: "30s", max_attempts: 5 };
   if (path.endsWith("/envelope/formats")) return { formats: [{ format_id: "configurable-json-v1", description: "configurable", match_rule: "json" }] };
   if (path.includes("/envelope-config")) return { tenant_id: "t-default", default_format: "configurable-json-v1", allowed_formats: ["configurable-json-v1"], profiles: [], version: 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString(), updated_by: "admin" };
-  if (path.endsWith("/policies/signed")) return { policy_id: "p", version: 1, effective_at: new Date().toISOString(), status: "active", default_suite: "AES", suites: [], cryptoperiod: { default_days: 30, max_days: 90, rotate_before_days: 5 }, gray_rules: {}, signature: { alg: "Ed25519", key_id: "k", sig: "x".repeat(80), payload_hash: "h".repeat(64) } };
+  if (path.endsWith("/policies/signed")) return { policy_id: "p", version: 1, effective_at: new Date().toISOString(), status: "active", default_suite: "AES", suites: [], cryptoperiod: { default_days: 30, max_days: 90, update_notice_days: 5 }, gray_rules: {}, signature: { alg: "Ed25519", key_id: "k", sig: "x".repeat(80), payload_hash: "h".repeat(64) } };
   return {};
 };
 
@@ -58,6 +59,7 @@ describe("page contracts", () => {
     ["Dashboard", <DashboardPage />], ["Database Operations", <DatabaseOperationsPage />], ["Keys", <KeysPage />], ["Crypto Sandbox", <CryptoPage />],
     ["Batch Crypto", <BatchCryptoPage />], ["Audit Log", <AuditPage />], ["Lifecycle", <LifecyclePage />],
     ["Envelope Config", <EnvelopeConfigPage />], ["Policy", <PolicyPage />],
+    ["Key Transfer", <KeyTransferPage />],
   ])("renders %s success/empty state", async (heading, page) => { renderPage(page); expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument(); });
 
   it("renders permission errors without blanking the route", async () => {

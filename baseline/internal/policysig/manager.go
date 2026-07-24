@@ -43,7 +43,7 @@ type SignedPolicy struct {
 type CryptoperiodConfig struct {
 	DefaultDays      int `json:"default_days"`
 	MaxDays          int `json:"max_days"`
-	RotateBeforeDays int `json:"rotate_before_days"`
+	UpdateNoticeDays int `json:"update_notice_days"`
 }
 
 // GrayRules defines tenant/key canary rules.
@@ -283,7 +283,7 @@ func GenerateDefaultSignedPolicy(priv ed25519.PrivateKey, keyID string) (*Signed
 		Cryptoperiod: CryptoperiodConfig{
 			DefaultDays:      365,
 			MaxDays:          730,
-			RotateBeforeDays: 30,
+			UpdateNoticeDays: 30,
 		},
 		GrayRules: GrayRules{},
 	}

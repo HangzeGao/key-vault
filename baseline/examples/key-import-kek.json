@@ -1,0 +1,8 @@
+{
+  "key_id": "demo-device-kek-sm4",
+  "name": "Demo Device Key Encryption Key (KEK)",
+  "purpose": "key_wrap",
+  "policy_id": "<active-signed-policy-id>",
+  "suite_id": "SM4_GCM",
+  "external_key": "ZGVtby1rZWstc200LTAwMQ=="
+}

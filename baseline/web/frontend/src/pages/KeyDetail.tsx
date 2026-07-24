@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Ban, CalendarClock, CheckCircle, RefreshCw, Trash2, AlertTriangle, Pencil, RotateCcw, Archive } from "lucide-react";
+import { ArrowLeft, Ban, CalendarClock, CheckCircle, Trash2, AlertTriangle, Pencil, RotateCcw, Archive } from "lucide-react";
 import { api } from "../lib/api";
 import { apiPaths } from "../lib/apiPaths";
 import { PageContainer, Panel, StatusPill, SuiteBadge, Loading, ErrorState, Modal, KVList, showToast } from "../components";
@@ -37,11 +37,6 @@ export function KeyDetailPage() {
   const enableMut = useMutation({
     mutationFn: () => api.post(apiPaths.keyAction(id!, "enable")),
     onSuccess: () => { invalidate(); showToast("key enabled", "success"); },
-    onError: (e: Error) => showToast(e.message, "error"),
-  });
-  const rotateMut = useMutation({
-    mutationFn: () => api.post(apiPaths.keyAction(id!, "rotate")),
-    onSuccess: () => { invalidate(); showToast("key rotated", "success"); },
     onError: (e: Error) => showToast(e.message, "error"),
   });
   const updateMut = useMutation({
@@ -122,9 +117,6 @@ export function KeyDetailPage() {
               <>
                 <button className="btn btn-secondary" onClick={() => disableMut.mutate()} disabled={disableMut.isPending}>
                   <Ban size={14} /> Disable
-                </button>
-                <button className="btn btn-secondary" onClick={() => rotateMut.mutate()} disabled={rotateMut.isPending}>
-                  <RefreshCw size={14} /> Rotate
                 </button>
                 <button className="btn btn-danger" onClick={() => setConfirmDestroy(true)}>
                   <Trash2 size={14} /> Schedule Destroy

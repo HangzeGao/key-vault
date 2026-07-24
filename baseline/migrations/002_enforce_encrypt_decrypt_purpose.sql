@@ -1,4 +1,5 @@
--- Key Vault engineering baseline supports symmetric AEAD keys only.
+-- Historical migration. Migration 004 later adds the protocol-neutral
+-- key_wrap purpose for imported KEKs.
 -- Historical signing labels described the same underlying DEK material.
 UPDATE keys SET purpose = 'encrypt_decrypt' WHERE purpose <> 'encrypt_decrypt';
 ALTER TABLE keys DROP CONSTRAINT IF EXISTS keys_purpose_check;

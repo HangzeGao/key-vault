@@ -6,7 +6,7 @@
 //   - Idempotency keys prevent duplicate side effects on retry.
 //
 // Job types:
-//   - key_expiry_check: scan cryptoperiod, create pending rotation tickets.
+//   - key_expiry_check: scan cryptoperiod and emit expiry notices.
 //   - cache_invalidate: confirm cache invalidation or TTL expiry.
 //   - destroy_due: destroy wrapped material after cooldown + approval.
 //   - audit_forward: forward audit outbox to external sink.

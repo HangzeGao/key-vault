@@ -20,6 +20,7 @@ import (
 	tenantapi "github.com/kvlt/key-vault/internal/api/tenant"
 	"github.com/kvlt/key-vault/internal/application/crypto"
 	"github.com/kvlt/key-vault/internal/application/keys"
+	"github.com/kvlt/key-vault/internal/application/keytransfer"
 	"github.com/kvlt/key-vault/internal/auditchain"
 	"github.com/kvlt/key-vault/internal/auth/hmacsign"
 	"github.com/kvlt/key-vault/internal/auth/jwt"
@@ -42,23 +43,24 @@ import (
 
 // App is the assembled application.
 type App struct {
-	Cfg              *config.Config
-	Store            repository.Repository
-	TPM              provider.Provider
-	Resolver         *keyresolver.Resolver
-	Policies         *policy.Engine
-	PolicyMgr        *policysig.Manager
-	KeyService       *keys.Service
-	CryptoService    *crypto.Service
-	NonceManager     *nonce.Manager
-	JWTVerifier      *jwt.Verifier
-	HMACVerifier     *hmacsign.Verifier
-	StaticTokens     map[string]*principal.Principal
-	EnvelopeRegistry *envelope.Registry
-	TenantHandler    *tenantapi.Handler
-	AuditChain       *auditchain.Service
-	OutboxSvc        *outbox.Service
-	Worker           *lifecycle.Worker
+	Cfg                *config.Config
+	Store              repository.Repository
+	TPM                provider.Provider
+	Resolver           *keyresolver.Resolver
+	Policies           *policy.Engine
+	PolicyMgr          *policysig.Manager
+	KeyService         *keys.Service
+	CryptoService      *crypto.Service
+	KeyTransferService *keytransfer.Service
+	NonceManager       *nonce.Manager
+	JWTVerifier        *jwt.Verifier
+	HMACVerifier       *hmacsign.Verifier
+	StaticTokens       map[string]*principal.Principal
+	EnvelopeRegistry   *envelope.Registry
+	TenantHandler      *tenantapi.Handler
+	AuditChain         *auditchain.Service
+	OutboxSvc          *outbox.Service
+	Worker             *lifecycle.Worker
 }
 
 // Build assembles the application from config.
@@ -135,6 +137,7 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	// 6. Application services.
 	keySvc := keys.New(store, resolver, polEng)
 	cryptoSvc := crypto.New(store, resolver, polEng, nonceMgr, cfg.Server.MaxRequestBody)
+	keyTransferSvc := keytransfer.New(store, resolver, keySvc)
 	// 7. Auth verifiers.
 	jwtVerifier := jwt.NewVerifier(cfg.Auth.JWTIssuer, cfg.Auth.JWTAudience, cfg.Auth.JWTAlgWhite)
 	hmacVerifier := hmacsign.NewVerifier(cfg.Auth.HMACMaxSkew)
@@ -167,6 +170,7 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	auditAdapter := &auditAdapter{ac: auditChain}
 	keySvc.SetAuditor(auditAdapter)
 	cryptoSvc.SetAuditor(&cryptoAuditAdapter{ac: auditChain})
+	keyTransferSvc.SetAuditor(auditAdapter)
 
 	// Outbox service.
 	outboxSvc := outbox.New(store)
@@ -203,23 +207,24 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	}
 
 	return &App{
-		Cfg:              cfg,
-		Store:            store,
-		TPM:              tpm,
-		Resolver:         resolver,
-		Policies:         polEng,
-		PolicyMgr:        policyMgr,
-		KeyService:       keySvc,
-		CryptoService:    cryptoSvc,
-		NonceManager:     nonceMgr,
-		JWTVerifier:      jwtVerifier,
-		HMACVerifier:     hmacVerifier,
-		StaticTokens:     loadStaticTokens(),
-		EnvelopeRegistry: envelopeRegistry,
-		TenantHandler:    tenantHandler,
-		AuditChain:       auditChain,
-		OutboxSvc:        outboxSvc,
-		Worker:           worker,
+		Cfg:                cfg,
+		Store:              store,
+		TPM:                tpm,
+		Resolver:           resolver,
+		Policies:           polEng,
+		PolicyMgr:          policyMgr,
+		KeyService:         keySvc,
+		CryptoService:      cryptoSvc,
+		KeyTransferService: keyTransferSvc,
+		NonceManager:       nonceMgr,
+		JWTVerifier:        jwtVerifier,
+		HMACVerifier:       hmacVerifier,
+		StaticTokens:       loadStaticTokens(),
+		EnvelopeRegistry:   envelopeRegistry,
+		TenantHandler:      tenantHandler,
+		AuditChain:         auditChain,
+		OutboxSvc:          outboxSvc,
+		Worker:             worker,
 	}, nil
 }
 

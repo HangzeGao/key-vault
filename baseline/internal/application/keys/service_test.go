@@ -14,6 +14,9 @@ func TestSupportedPurpose(t *testing.T) {
 	if !isSupportedPurpose(PurposeEncryptDecrypt) {
 		t.Fatal("encrypt_decrypt must be supported")
 	}
+	if !isSupportedPurpose(PurposeKeyWrap) {
+		t.Fatal("key_wrap must be supported")
+	}
 	for _, purpose := range []string{"signing", "datakey", ""} {
 		if isSupportedPurpose(purpose) {
 			t.Fatalf("purpose %q must be rejected", purpose)

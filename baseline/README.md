@@ -9,6 +9,7 @@ Implemented baseline capabilities:
 - AES/SM4 policy suites with algorithm and mode bound to each key.
 - Envelope v1 and canonical AAD.
 - TPM-backed key boundary: plaintext key material is not returned by API responses.
+- Protocol-neutral Key Encryption Key (KEK) upload/download with staged confirmation and activation.
 - Logical isolation for management, data, ops, key, and audit planes.
 - Hash-chained audit, lifecycle worker, signed policy reload, and tenant envelope configuration.
 - Embedded React UI served under `/ui/`.
@@ -57,6 +58,8 @@ npm run build
 | `GET /healthz` | Unauthenticated health check |
 | `GET /ui/login` | Embedded web UI |
 | `/ui/api/v1/keys` | Management API |
+| `/ui/api/v1/key-uploads*` | KEK key upload management API |
+| `/ui/api/v1/key-downloads*` | KEK key download/import management API |
 | `/ui/api/v1/crypto/*` | Data-plane crypto API |
 | `/ui/api/v1/audit/*` | Audit API |
 | `/ui/api/v1/policies*` | Policy governance API |

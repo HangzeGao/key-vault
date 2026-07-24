@@ -63,7 +63,7 @@ export interface ImportKeyReq {
   suite_id: string;
   tags?: Record<string, string>;
   expires_at?: string;
-  external_dek: string; // base64-encoded plaintext DEK
+  external_key: string; // base64-encoded symmetric key material
 }
 
 export interface BatchImportKeyResult {
@@ -72,6 +72,68 @@ export interface BatchImportKeyResult {
   key?: KeyDTO;
   error_code?: string;
   message?: string;
+}
+
+export interface CreateKeyUploadReq {
+  target_id: string;
+  sequence: number;
+  kek_id: string;
+  kek_version?: number;
+  data_key_id: string;
+  data_key_version?: number;
+}
+
+export interface KeyUploadDTO {
+  upload_id: string;
+  format_version: number;
+  target_id: string;
+  sequence: number;
+  kek_id: string;
+  kek_version: number;
+  data_key_id: string;
+  data_key_version: number;
+  wrap_suite_id: string;
+  nonce: string;
+  wrapped_key: string;
+  tag: string;
+  aad_b64: string;
+  status: "UPLOAD_PENDING" | "CONFIRMED";
+  created_at: string;
+  confirmed_at?: string;
+}
+
+export interface ImportKeyDownloadReq {
+  download_id: string;
+  target_id: string;
+  sequence: number;
+  kek_id: string;
+  kek_version: number;
+  data_key_id: string;
+  data_key_version: number;
+  data_suite_id: "SM4_GCM";
+  name?: string;
+  policy_id?: string;
+  tags?: Record<string, string>;
+  nonce: string;
+  wrapped_key: string;
+  tag: string;
+  aad_b64: string;
+}
+
+export interface KeyDownloadDTO {
+  download_id: string;
+  format_version: number;
+  target_id: string;
+  sequence: number;
+  kek_id: string;
+  kek_version: number;
+  data_key_id: string;
+  data_key_version: number;
+  data_suite_id: string;
+  operation: "CREATE_KEY" | "CREATE_VERSION";
+  status: "RECEIVED" | "IMPORTED";
+  created_at: string;
+  imported_at?: string;
 }
 
 export type EnvelopeJSON = Record<string, unknown>;
@@ -210,7 +272,7 @@ export interface SignedPolicy {
   cryptoperiod: {
     default_days: number;
     max_days: number;
-    rotate_before_days: number;
+    update_notice_days: number;
   };
   gray_rules: {
     tenant_allowlist?: string[];

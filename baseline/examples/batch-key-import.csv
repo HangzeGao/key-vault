@@ -1,5 +1,5 @@
-name,key_id,suite_id,external_dek,expires_at
+name,key_id,suite_id,external_key,expires_at
 orders-demo-aes,demo-orders-aes,AES_256_GCM,MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=,
 ledger-demo-sm4,demo-ledger-sm4,SM4_GCM,MDEyMzQ1Njc4OWFiY2RlZg==,2030-01-01T00:00:00Z
-legacy-aes-ecb,demo-legacy-aes-ecb,AES_256_ECB,MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=,
-legacy-sm4-ecb,demo-legacy-sm4-ecb,SM4_ECB,MDEyMzQ1Njc4OWFiY2RlZg==,
+demo-aes-ecb,demo-aes-ecb,AES_256_ECB,MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=,
+demo-sm4-ecb,demo-sm4-ecb,SM4_ECB,MDEyMzQ1Njc4OWFiY2RlZg==,

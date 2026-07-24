@@ -77,7 +77,7 @@ export function KeysPage() {
               <UploadCloud size={14} /> Batch Import
             </button>
             <button className="btn btn-ghost btn-sm" onClick={() => setShowImport(true)}>
-              <Upload size={14} /> Import Key
+              <Upload size={14} /> Import Key Material
             </button>
             <button className="btn btn-primary btn-sm" onClick={() => setShowCreate(true)}>
               <Plus size={14} /> Create Key

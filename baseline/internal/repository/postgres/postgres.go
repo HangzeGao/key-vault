@@ -71,6 +71,7 @@ var schemaMigrations = []migration{
 	{version: 1, name: "engineering_baseline_schema", sql: migrationV1SQL},
 	{version: 2, name: "enforce_encrypt_decrypt_purpose", sql: migrationV2PurposeSQL},
 	{version: 3, name: "archive_destroyed_keys", sql: migrationV3ArchiveDestroyedKeysSQL},
+	{version: 4, name: "key_upload_download", sql: migrationV4KeyUploadDownloadSQL},
 }
 
 // Migrate applies each embedded schema migration exactly once. A transaction-
@@ -422,29 +423,37 @@ func (s *Store) DestroyKeyMaterial(ctx context.Context, keyID string) error {
 	return tx.Commit(ctx)
 }
 
-func (s *Store) RotateKey(ctx context.Context, keyID string, newVersion *models.KeyVersion) error {
+func (s *Store) CreatePendingKeyVersion(ctx context.Context, keyID string, v *models.KeyVersion) error {
+	ct, err := s.pool.Exec(ctx, `INSERT INTO key_versions (id,key_id,version_no,suite_id,wrapped_dek,wrap_metadata,status,created_at)
+		SELECT $1,$2,$3,$4,$5,$6,'PRE_ACTIVE',$7 FROM keys WHERE id=$2 AND current_version+1=$3`,
+		v.ID, keyID, v.VersionNo, v.SuiteID, v.WrappedDEK, v.WrapMetadata, v.CreatedAt)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (s *Store) ActivateKeyVersion(ctx context.Context, keyID string, versionNo uint32) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	// Mark old current version DECRYPT_ONLY.
-	_, err = tx.Exec(ctx,
-		`UPDATE key_versions SET status='DECRYPT_ONLY'
-		 WHERE key_id=$1 AND version_no=(SELECT current_version FROM keys WHERE id=$1)`,
-		keyID)
+	ct, err := tx.Exec(ctx, `UPDATE key_versions SET status='ACTIVE' WHERE key_id=$1 AND version_no=$2 AND status='PRE_ACTIVE'`, keyID, versionNo)
 	if err != nil {
 		return err
 	}
-	newVersion.CreatedAt = time.Now().UTC()
-	_, err = tx.Exec(ctx,
-		`INSERT INTO key_versions (id, key_id, version_no, suite_id, wrapped_dek, wrap_metadata, status, created_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-		newVersion.ID, newVersion.KeyID, newVersion.VersionNo, newVersion.SuiteID, newVersion.WrappedDEK, newVersion.WrapMetadata, newVersion.Status, newVersion.CreatedAt)
+	if ct.RowsAffected() == 0 {
+		return ErrConflict
+	}
+	_, err = tx.Exec(ctx, `UPDATE key_versions SET status='DECRYPT_ONLY' WHERE key_id=$1 AND version_no=(SELECT current_version FROM keys WHERE id=$1)`, keyID)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE keys SET current_version=$2, updated_at=NOW() WHERE id=$1`, keyID, newVersion.VersionNo)
+	_, err = tx.Exec(ctx, `UPDATE keys SET current_version=$2,updated_at=NOW() WHERE id=$1`, keyID, versionNo)
 	if err != nil {
 		return err
 	}
@@ -486,6 +495,126 @@ func (s *Store) GetCurrentKeyVersion(ctx context.Context, keyID string) (*models
 		return nil, err
 	}
 	return kv, nil
+}
+
+func (s *Store) CreateKeyUpload(ctx context.Context, p *models.KeyUpload) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO key_uploads
+		(id,tenant_id,target_id,sequence,kek_id,kek_version,data_key_id,data_key_version,wrap_suite_id,nonce,wrapped_key,tag,aad,status,created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		p.ID, p.TenantID, p.TargetID, p.Sequence, p.KEKID, p.KEKVersion,
+		p.DataKeyID, p.DataKeyVersion, p.WrapSuiteID, p.Nonce, p.WrappedKey,
+		p.Tag, p.AAD, p.Status, p.CreatedAt)
+	if isUniqueViolation(err) {
+		return ErrConflict
+	}
+	return err
+}
+
+func (s *Store) GetKeyUpload(ctx context.Context, tenantID, uploadID string) (*models.KeyUpload, error) {
+	var p models.KeyUpload
+	var confirmedAt *time.Time
+	err := s.pool.QueryRow(ctx, `SELECT id,tenant_id,target_id,sequence,kek_id,kek_version,
+		data_key_id,data_key_version,wrap_suite_id,nonce,wrapped_key,tag,aad,status,created_at,confirmed_at,confirmed_by
+		FROM key_uploads WHERE id=$1 AND tenant_id=$2`, uploadID, tenantID).
+		Scan(&p.ID, &p.TenantID, &p.TargetID, &p.Sequence, &p.KEKID, &p.KEKVersion,
+			&p.DataKeyID, &p.DataKeyVersion, &p.WrapSuiteID, &p.Nonce, &p.WrappedKey,
+			&p.Tag, &p.AAD, &p.Status, &p.CreatedAt, &confirmedAt, &p.ConfirmedBy)
+	if isNoRows(err) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if confirmedAt != nil {
+		p.ConfirmedAt = *confirmedAt
+	}
+	return &p, nil
+}
+
+func (s *Store) ConfirmKeyUpload(ctx context.Context, tenantID, uploadID, principalID string, confirmedAt time.Time) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE key_uploads
+		SET status='CONFIRMED', confirmed_at=$4, confirmed_by=$3
+		WHERE id=$1 AND tenant_id=$2 AND status='UPLOAD_PENDING'`,
+		uploadID, tenantID, principalID, confirmedAt)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		var status string
+		err := s.pool.QueryRow(ctx, `SELECT status FROM key_uploads WHERE id=$1 AND tenant_id=$2`, uploadID, tenantID).Scan(&status)
+		if isNoRows(err) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if status == "CONFIRMED" {
+			return nil
+		}
+		return ErrConflict
+	}
+	return nil
+}
+
+func (s *Store) CreateKeyDownload(ctx context.Context, d *models.KeyDownload) error {
+	_, err := s.pool.Exec(ctx, `INSERT INTO key_downloads
+		(id,tenant_id,target_id,sequence,kek_id,kek_version,data_key_id,data_key_version,
+		 data_suite_id,request_digest,operation,status,created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		d.ID, d.TenantID, d.TargetID, d.Sequence, d.KEKID, d.KEKVersion,
+		d.DataKeyID, d.DataKeyVersion, d.DataSuiteID, d.RequestDigest,
+		d.Operation, d.Status, d.CreatedAt)
+	if isUniqueViolation(err) {
+		return ErrConflict
+	}
+	return err
+}
+
+func (s *Store) GetKeyDownload(ctx context.Context, tenantID, downloadID string) (*models.KeyDownload, error) {
+	var d models.KeyDownload
+	var importedAt *time.Time
+	err := s.pool.QueryRow(ctx, `SELECT id,tenant_id,target_id,sequence,kek_id,kek_version,
+		data_key_id,data_key_version,data_suite_id,request_digest,operation,status,
+		created_at,imported_at,imported_by
+		FROM key_downloads WHERE id=$1 AND tenant_id=$2`, downloadID, tenantID).
+		Scan(&d.ID, &d.TenantID, &d.TargetID, &d.Sequence, &d.KEKID, &d.KEKVersion,
+			&d.DataKeyID, &d.DataKeyVersion, &d.DataSuiteID, &d.RequestDigest,
+			&d.Operation, &d.Status, &d.CreatedAt, &importedAt, &d.ImportedBy)
+	if isNoRows(err) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if importedAt != nil {
+		d.ImportedAt = *importedAt
+	}
+	return &d, nil
+}
+
+func (s *Store) CompleteKeyDownload(ctx context.Context, tenantID, downloadID, principalID string, importedAt time.Time) error {
+	ct, err := s.pool.Exec(ctx, `UPDATE key_downloads
+		SET status='IMPORTED', imported_at=$4, imported_by=$3
+		WHERE id=$1 AND tenant_id=$2 AND status='RECEIVED'`,
+		downloadID, tenantID, principalID, importedAt)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		var status string
+		err := s.pool.QueryRow(ctx, `SELECT status FROM key_downloads WHERE id=$1 AND tenant_id=$2`, downloadID, tenantID).Scan(&status)
+		if isNoRows(err) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if status == "IMPORTED" {
+			return nil
+		}
+		return ErrConflict
+	}
+	return nil
 }
 
 // scanner is the common interface for pgx.Row and pgx.Rows.

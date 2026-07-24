@@ -35,7 +35,8 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /ui/api/v1/keys/{key_id}", h.deleteKey)
 	mux.HandleFunc("POST /ui/api/v1/keys/{key_id}/enable", h.enableKey)
 	mux.HandleFunc("POST /ui/api/v1/keys/{key_id}/disable", h.disableKey)
-	mux.HandleFunc("POST /ui/api/v1/keys/{key_id}/rotate", h.rotateKey)
+	mux.HandleFunc("POST /ui/api/v1/keys/{key_id}/versions", h.prepareKeyVersion)
+	mux.HandleFunc("POST /ui/api/v1/keys/{key_id}/versions/{version}/activate", h.activateKeyVersion)
 	mux.HandleFunc("POST /ui/api/v1/keys/{key_id}/schedule-destroy", h.scheduleDestroy)
 	mux.HandleFunc("POST /ui/api/v1/keys/{key_id}/cancel-destroy", h.cancelDestroy)
 	mux.HandleFunc("POST /ui/api/v1/keys/{key_id}/archive", h.archiveDestroyedKey)
@@ -53,9 +54,7 @@ type createKeyReq struct {
 }
 
 // importKeyReq is the request body for POST /ui/api/v1/keys:import (EB-FR-01).
-// Per design §2 and INV-11: external_dek is the caller-provided plaintext DEK
-// (base64). It only enters the key-plane sealing flow; it is never persisted,
-// logged, or echoed in the response.
+// external_key is the sole field for caller-provided symmetric key material.
 type importKeyReq struct {
 	TenantID    string            `json:"tenant_id"`
 	KeyID       string            `json:"key_id,omitempty"`
@@ -65,7 +64,7 @@ type importKeyReq struct {
 	SuiteID     string            `json:"suite_id"`
 	Tags        map[string]string `json:"tags,omitempty"`
 	ExpiresAt   string            `json:"expires_at,omitempty"`
-	ExternalDEK string            `json:"external_dek"` // base64-encoded plaintext DEK
+	ExternalKey string            `json:"external_key"`
 }
 
 type batchImportKeyReq struct {
@@ -85,6 +84,10 @@ type updateKeyReq struct {
 	Name      string            `json:"name"`
 	Tags      map[string]string `json:"tags,omitempty"`
 	ExpiresAt string            `json:"expires_at,omitempty"`
+}
+
+type prepareKeyVersionReq struct {
+	ExternalKey string `json:"external_key"`
 }
 
 func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
@@ -164,11 +167,15 @@ func (h *Handler) importKey(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// Decode base64 DEK plaintext. Per INV-11, this only enters the key-plane
-	// sealing flow inside the resolver; the service zeroizes it after wrapping.
-	dek, err := base64.StdEncoding.DecodeString(req.ExternalDEK)
+	// Decode symmetric key material. It only enters the key-plane sealing flow;
+	// the service zeroizes it after wrapping.
+	if req.ExternalKey == "" {
+		writeErr(w, 400, "BAD_REQUEST", "external_key is required")
+		return
+	}
+	keyMaterial, err := base64.StdEncoding.DecodeString(req.ExternalKey)
 	if err != nil {
-		writeErr(w, 400, "BAD_REQUEST", "external_dek is not valid base64")
+		writeErr(w, 400, "BAD_REQUEST", "external_key is not valid base64")
 		return
 	}
 	dto, err := h.keys.ImportKey(r.Context(), keys.ImportKeyCommand{
@@ -180,7 +187,7 @@ func (h *Handler) importKey(w http.ResponseWriter, r *http.Request) {
 		SuiteID:        req.SuiteID,
 		Tags:           req.Tags,
 		ExpiresAt:      expiresAt,
-		ExternalDEK:    dek,
+		ExternalKey:    keyMaterial,
 		IdempotencyKey: r.Header.Get("Idempotency-Key"),
 		PrincipalID:    p.ID,
 	})
@@ -232,9 +239,13 @@ func (h *Handler) importKeyBatch(w http.ResponseWriter, r *http.Request) {
 			results[i] = batchImportKeyResult{Index: i, ErrorCode: "BAD_REQUEST", Message: "invalid expires_at"}
 			continue
 		}
-		dek, err := base64.StdEncoding.DecodeString(entry.ExternalDEK)
+		if entry.ExternalKey == "" {
+			results[i] = batchImportKeyResult{Index: i, ErrorCode: "BAD_REQUEST", Message: "external_key is required"}
+			continue
+		}
+		keyMaterial, err := base64.StdEncoding.DecodeString(entry.ExternalKey)
 		if err != nil {
-			results[i] = batchImportKeyResult{Index: i, ErrorCode: "BAD_REQUEST", Message: "external_dek is not valid base64"}
+			results[i] = batchImportKeyResult{Index: i, ErrorCode: "BAD_REQUEST", Message: "external_key is not valid base64"}
 			continue
 		}
 		idempotencyKey := ""
@@ -244,7 +255,7 @@ func (h *Handler) importKeyBatch(w http.ResponseWriter, r *http.Request) {
 		dto, err := h.keys.ImportKey(r.Context(), keys.ImportKeyCommand{
 			TenantID: req.TenantID, KeyID: entry.KeyID, Name: entry.Name, Purpose: entry.Purpose,
 			PolicyID: entry.PolicyID, SuiteID: entry.SuiteID, Tags: entry.Tags, ExpiresAt: expiresAt,
-			ExternalDEK: dek, IdempotencyKey: idempotencyKey, PrincipalID: p.ID,
+			ExternalKey: keyMaterial, IdempotencyKey: idempotencyKey, PrincipalID: p.ID,
 		})
 		if err != nil {
 			results[i] = batchImportKeyResult{Index: i, ErrorCode: string(errorsx.AsCode(err)), Message: "key import failed"}
@@ -338,21 +349,51 @@ func (h *Handler) disableKey(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
-func (h *Handler) rotateKey(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) prepareKeyVersion(w http.ResponseWriter, r *http.Request) {
 	p := middleware.PrincipalFromContext(r.Context())
 	if !requireAnyScope(w, p, "keys:manage") {
 		return
 	}
-	keyID := r.PathValue("key_id")
-	tenantID := tenantFromQueryOrPrincipal(r, p)
-	dto, err := h.keys.RotateKey(r.Context(), keys.RotateKeyCommand{
-		TenantID: tenantID, KeyID: keyID, PrincipalID: p.ID,
+	var req prepareKeyVersionReq
+	if err := middleware.DecodeJSONStrict(middleware.BodyFromContext(r.Context()), &req); err != nil {
+		writeErr(w, 400, "BAD_REQUEST", "invalid json")
+		return
+	}
+	if req.ExternalKey == "" {
+		writeErr(w, 400, "BAD_REQUEST", "external_key is required")
+		return
+	}
+	keyMaterial, err := base64.StdEncoding.DecodeString(req.ExternalKey)
+	if err != nil {
+		writeErr(w, 400, "BAD_REQUEST", "external_key is not valid base64")
+		return
+	}
+	dto, err := h.keys.PrepareKeyVersion(r.Context(), keys.PrepareKeyVersionCommand{
+		TenantID: tenantFromQueryOrPrincipal(r, p), KeyID: r.PathValue("key_id"), ExternalKey: keyMaterial, PrincipalID: p.ID,
 	})
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, 200, dto)
+	writeJSON(w, http.StatusCreated, dto)
+}
+
+func (h *Handler) activateKeyVersion(w http.ResponseWriter, r *http.Request) {
+	p := middleware.PrincipalFromContext(r.Context())
+	if !requireAnyScope(w, p, "keys:manage") {
+		return
+	}
+	n, err := strconv.ParseUint(r.PathValue("version"), 10, 32)
+	if err != nil || n == 0 {
+		writeErr(w, 400, "BAD_REQUEST", "invalid version")
+		return
+	}
+	dto, err := h.keys.ActivateKeyVersion(r.Context(), tenantFromQueryOrPrincipal(r, p), r.PathValue("key_id"), uint32(n), p.ID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, dto)
 }
 
 func (h *Handler) cancelDestroy(w http.ResponseWriter, r *http.Request) {

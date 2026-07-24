@@ -99,7 +99,7 @@ func (s SuiteID) CiphertextLen(plaintextLen int) int {
 	}
 }
 
-// AEAD is the legacy uniform interface used by the envelope. GCM suites provide
+// AEAD is the uniform cipher interface used by the envelope. GCM suites provide
 // authenticated encryption; ECB suites ignore nonce/AAD and return an empty tag.
 type AEAD interface {
 	Encrypt(plaintext, nonce, aad []byte) (ciphertext, tag []byte)

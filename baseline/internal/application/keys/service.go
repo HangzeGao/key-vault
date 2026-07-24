@@ -51,16 +51,23 @@ type KeyDTO struct {
 	CreatedAt      time.Time         `json:"created_at"`
 }
 
-// RotateKeyCommand is the input for RotateKey.
-type RotateKeyCommand struct {
+type PrepareKeyVersionCommand struct {
 	TenantID    string
 	KeyID       string
+	ExternalKey []byte
 	PrincipalID string
 }
 
+type KeyVersionDTO struct {
+	KeyID     string `json:"key_id"`
+	VersionNo uint32 `json:"version"`
+	SuiteID   string `json:"suite_id"`
+	Status    string `json:"status"`
+}
+
 // ImportKeyCommand is the input for ImportKey (controlled import, EB-FR-01).
-// Per design §2 and INV-11: ExternalDEK is the caller-provided plaintext DEK
-// material. It is only used inside the key-plane sealing flow and is never
+// Per design §2 and INV-11: ExternalKey is the caller-provided plaintext key
+// material (DEK or KEK). It is only used inside the key-plane sealing flow and is never
 // persisted, logged, or echoed in the response. The service zeroizes its
 // in-memory copy after wrapping.
 type ImportKeyCommand struct {
@@ -72,7 +79,7 @@ type ImportKeyCommand struct {
 	SuiteID        string
 	Tags           map[string]string
 	ExpiresAt      time.Time
-	ExternalDEK    []byte // plaintext DEK from caller; zeroized after wrapping
+	ExternalKey    []byte // plaintext key material from caller; zeroized after wrapping
 	IdempotencyKey string
 	PrincipalID    string
 }
@@ -97,17 +104,19 @@ type Service struct {
 	auditor  Auditor
 }
 
-// PurposeEncryptDecrypt is the only tenant key purpose supported by the
-// engineering baseline. The supported suites are symmetric AEAD suites, so a
-// signing label would be misleading without a separate asymmetric key flow.
-const PurposeEncryptDecrypt = "encrypt_decrypt"
+const (
+	PurposeEncryptDecrypt = "encrypt_decrypt"
+	// PurposeKeyWrap identifies a pre-shared KEK. It may wrap data keys for
+	// protocol-neutral key upload/download and must never encrypt business data.
+	PurposeKeyWrap = "key_wrap"
+)
 
 func isSupportedPurpose(purpose string) bool {
-	return purpose == PurposeEncryptDecrypt
+	return purpose == PurposeEncryptDecrypt || purpose == PurposeKeyWrap
 }
 
 // Auditor records audit events for key lifecycle operations (design §15.1, EB-FR-09).
-// For high-risk actions (key.rotate, key.schedule_destroy), Record is called
+// For high-risk actions such as key.schedule_destroy, Record is called
 // BEFORE the business state change; if Record fails the operation must fail-closed.
 type Auditor interface {
 	Record(ctx context.Context, req AuditRequest) error
@@ -142,7 +151,8 @@ type Store interface {
 	UpdateKeyStatus(ctx context.Context, keyID, expectedCurrent, newStatus string) error
 	ArchiveDestroyedKey(ctx context.Context, tenantID, keyID string) (*models.Key, error)
 	DestroyKeyMaterial(ctx context.Context, keyID string) error
-	RotateKey(ctx context.Context, keyID string, newVersion *models.KeyVersion) error
+	CreatePendingKeyVersion(ctx context.Context, keyID string, newVersion *models.KeyVersion) error
+	ActivateKeyVersion(ctx context.Context, keyID string, versionNo uint32) error
 	GetCurrentKeyVersion(ctx context.Context, keyID string) (*models.KeyVersion, error)
 	GetKeyVersionByNo(ctx context.Context, keyID string, versionNo uint32) (*models.KeyVersion, error)
 	CreateLifecycleJob(ctx context.Context, j *models.LifecycleJob) error
@@ -205,7 +215,10 @@ func (s *Service) CreateKey(ctx context.Context, cmd CreateKeyCommand) (*KeyDTO,
 		return nil, errorsx.New(errorsx.CodeInvalidArgument, "missing required field", false)
 	}
 	if !isSupportedPurpose(cmd.Purpose) {
-		return nil, errorsx.New(errorsx.CodeInvalidArgument, "only encrypt_decrypt purpose is supported", false)
+		return nil, errorsx.New(errorsx.CodeInvalidArgument, "unsupported key purpose", false)
+	}
+	if cmd.Purpose == PurposeKeyWrap {
+		return nil, errorsx.New(errorsx.CodeInvalidArgument, "key_wrap keys must be imported from pre-shared key material", false)
 	}
 
 	// Idempotency: if a key is present, replay the cached result.
@@ -313,10 +326,10 @@ func (s *Service) ImportKey(ctx context.Context, cmd ImportKeyCommand) (*KeyDTO,
 		return nil, errorsx.New(errorsx.CodeInvalidArgument, "missing required field", false)
 	}
 	if !isSupportedPurpose(cmd.Purpose) {
-		return nil, errorsx.New(errorsx.CodeInvalidArgument, "only encrypt_decrypt purpose is supported", false)
+		return nil, errorsx.New(errorsx.CodeInvalidArgument, "unsupported key purpose", false)
 	}
-	if len(cmd.ExternalDEK) == 0 {
-		return nil, errorsx.New(errorsx.CodeInvalidArgument, "missing external_dek", false)
+	if len(cmd.ExternalKey) == 0 {
+		return nil, errorsx.New(errorsx.CodeInvalidArgument, "missing external_key", false)
 	}
 
 	// Idempotency replay.
@@ -360,14 +373,14 @@ func (s *Service) ImportKey(ctx context.Context, cmd ImportKeyCommand) (*KeyDTO,
 	versionID := newID("kv")
 
 	// Wrap the externally-provided DEK under the CRK (key-plane only).
-	// WrapExternalDEK validates length and zeroizes its in-memory copy.
-	dm, err := s.resolver.WrapExternalDEK(ctx, suiteEnum, versionID, cmd.ExternalDEK)
+	// WrapExternalKey validates length and zeroizes its in-memory copy.
+	dm, err := s.resolver.WrapExternalKey(ctx, suiteEnum, versionID, cmd.ExternalKey)
 	if err != nil {
 		return nil, errorsx.Wrap(errorsx.CodeTPMUnavailable, "dek wrap failed", true, err)
 	}
 	// Zeroize the caller's DEK plaintext as soon as wrapping succeeds.
-	for i := range cmd.ExternalDEK {
-		cmd.ExternalDEK[i] = 0
+	for i := range cmd.ExternalKey {
+		cmd.ExternalKey[i] = 0
 	}
 
 	now := time.Now().UTC()
@@ -661,10 +674,9 @@ func (s *Service) ReconcileDestroyDueJobs(ctx context.Context) error {
 	return nil
 }
 
-// RotateKey creates a new key version and atomically switches current_version.
-// Per design §9.6: old version becomes DECRYPT_ONLY; new version is ACTIVE.
-// Per NFR-5, this is a high-risk operation: audit BEFORE state change, fail-closed.
-func (s *Service) RotateKey(ctx context.Context, cmd RotateKeyCommand) (*KeyDTO, error) {
+// PrepareKeyVersion imports externally provisioned static material as a
+// PRE_ACTIVE version. It does not change the key's current version.
+func (s *Service) PrepareKeyVersion(ctx context.Context, cmd PrepareKeyVersionCommand) (*KeyVersionDTO, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k, err := s.store.GetKey(ctx, cmd.TenantID, cmd.KeyID)
@@ -674,39 +686,43 @@ func (s *Service) RotateKey(ctx context.Context, cmd RotateKeyCommand) (*KeyDTO,
 	if k.Status != string(keystate.KeyActive) {
 		return nil, errorsx.New(errorsx.CodeKeyDisabled, "key not active", false)
 	}
-	// High-risk: audit before state change (fail-closed per NFR-5).
-	if err := s.auditHighRisk(ctx, "key.rotate", cmd.TenantID, cmd.PrincipalID, "key", cmd.KeyID); err != nil {
+	suite, err := suiteIDFromString(k.SuiteID)
+	if err != nil {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "invalid suite_id", false)
+	}
+	versionNo := k.CurrentVersion + 1
+	versionID := newID("kv")
+	dm, err := s.resolver.WrapExternalKey(ctx, suite, versionID, cmd.ExternalKey)
+	for i := range cmd.ExternalKey {
+		cmd.ExternalKey[i] = 0
+	}
+	if err != nil {
+		return nil, errorsx.Wrap(errorsx.CodeTPMUnavailable, "dek wrap failed", true, err)
+	}
+	kv := &models.KeyVersion{ID: versionID, KeyID: k.ID, VersionNo: versionNo, SuiteID: k.SuiteID,
+		WrappedDEK: dm.WrappedDEK, WrapMetadata: dm.WrapMetadata, Status: string(keystate.KVPreActive), CreatedAt: time.Now().UTC()}
+	if err := s.store.CreatePendingKeyVersion(ctx, k.ID, kv); err != nil {
+		return nil, errorsx.Wrap(errorsx.CodeDBConflict, "create pending version failed", true, err)
+	}
+	s.audit(ctx, "key.version_prepared", cmd.TenantID, cmd.PrincipalID, "key", k.ID, "success", "", map[string]string{"version": fmt.Sprintf("%d", versionNo)})
+	return &KeyVersionDTO{KeyID: k.ID, VersionNo: versionNo, SuiteID: k.SuiteID, Status: kv.Status}, nil
+}
+
+func (s *Service) ActivateKeyVersion(ctx context.Context, tenantID, keyID string, versionNo uint32, principalID string) (*KeyDTO, error) {
+	if _, err := s.store.GetKey(ctx, tenantID, keyID); err != nil {
+		return nil, errorsx.New(errorsx.CodeKeyNotFound, "key not found", false)
+	}
+	if err := s.auditHighRisk(ctx, "key.version_activate", tenantID, principalID, "key", keyID); err != nil {
 		return nil, errorsx.Wrap(errorsx.CodeAuditUnavailable, "audit failed, operation aborted", false, err)
 	}
-	suiteEnum, err := suiteIDFromString(k.SuiteID)
-	if err != nil {
-		return nil, errorsx.Wrap(errorsx.CodeInternal, "bad suite", false, err)
+	if err := s.store.ActivateKeyVersion(ctx, keyID, versionNo); err != nil {
+		return nil, errorsx.Wrap(errorsx.CodeDBConflict, "activate version failed", true, err)
 	}
-	newVersionNo := k.CurrentVersion + 1
-	newVersionID := newID("kv")
-	dm, err := s.resolver.GenerateAndWrapDEK(ctx, suiteEnum, newVersionID)
-	if err != nil {
-		return nil, errorsx.Wrap(errorsx.CodeTPMUnavailable, "dek generation failed", true, err)
-	}
-	newKV := &models.KeyVersion{
-		ID:           newVersionID,
-		KeyID:        cmd.KeyID,
-		VersionNo:    newVersionNo,
-		SuiteID:      k.SuiteID,
-		WrappedDEK:   dm.WrappedDEK,
-		WrapMetadata: dm.WrapMetadata,
-		Status:       string(keystate.KVActive),
-		CreatedAt:    time.Now().UTC(),
-	}
-	if err := s.store.RotateKey(ctx, cmd.KeyID, newKV); err != nil {
-		return nil, errorsx.Wrap(errorsx.CodeDBConflict, "rotate failed", true, err)
-	}
-	// Re-fetch to return updated DTO.
-	k2, err := s.store.GetKey(ctx, cmd.TenantID, cmd.KeyID)
+	k, err := s.store.GetKey(ctx, tenantID, keyID)
 	if err != nil {
 		return nil, errorsx.Wrap(errorsx.CodeInternal, "re-fetch failed", false, err)
 	}
-	return toDTO(k2), nil
+	return toDTO(k), nil
 }
 
 // suiteIDFromString maps a suite string to aead.SuiteID.

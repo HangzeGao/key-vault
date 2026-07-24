@@ -157,8 +157,8 @@ export function PolicyPage() {
               <div className="mono" style={{ fontSize: 12 }}>{signed.cryptoperiod.max_days} days</div>
             </div>
             <div className="config-item">
-              <div className="input-label">Rotate Before</div>
-              <div className="mono" style={{ fontSize: 12 }}>{signed.cryptoperiod.rotate_before_days} days</div>
+              <div className="input-label">Update Notice</div>
+              <div className="mono" style={{ fontSize: 12 }}>{signed.cryptoperiod.update_notice_days} days</div>
             </div>
           </div>
         </Panel>

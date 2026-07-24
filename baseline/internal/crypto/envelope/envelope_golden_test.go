@@ -299,7 +299,7 @@ func TestGoldenEnvelopeRejectsUnknownSuite(t *testing.T) {
 
 func TestEnvelopeECBRoundTrip(t *testing.T) {
 	key := bytes.Repeat([]byte{0x55}, 32)
-	plaintext := []byte("legacy ECB compatibility payload")
+	plaintext := []byte("ECB no-padding test payload")
 	keyID := "key-ecb-001"
 	callerAAD := testCallerAAD{
 		TenantID:   "tenant-ecb",

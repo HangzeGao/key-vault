@@ -11,6 +11,7 @@ import (
 	"github.com/kvlt/key-vault/internal/api/admin"
 	"github.com/kvlt/key-vault/internal/api/baselineapi"
 	cryptoapi "github.com/kvlt/key-vault/internal/api/crypto"
+	keytransferapi "github.com/kvlt/key-vault/internal/api/keytransfer"
 	"github.com/kvlt/key-vault/internal/api/middleware"
 	"github.com/kvlt/key-vault/internal/api/ops"
 	tenantapi "github.com/kvlt/key-vault/internal/api/tenant"
@@ -28,15 +29,16 @@ type Server struct {
 
 // Deps bundles the server dependencies.
 type Deps struct {
-	Cfg             *config.Config
-	AdminHandler    *admin.Handler
-	CryptoHandler   *cryptoapi.Handler
-	BaselineHandler *baselineapi.Handler
-	OpsHandler      *ops.Handler
-	TenantHandler   *tenantapi.Handler
-	JWTVerifier     *jwt.Verifier
-	HMACVerifier    *hmacsign.Verifier
-	StaticTokens    map[string]*principal.Principal
+	Cfg                *config.Config
+	AdminHandler       *admin.Handler
+	CryptoHandler      *cryptoapi.Handler
+	BaselineHandler    *baselineapi.Handler
+	OpsHandler         *ops.Handler
+	TenantHandler      *tenantapi.Handler
+	KeyTransferHandler *keytransferapi.Handler
+	JWTVerifier        *jwt.Verifier
+	HMACVerifier       *hmacsign.Verifier
+	StaticTokens       map[string]*principal.Principal
 }
 
 // New constructs a server with all middleware applied.
@@ -54,6 +56,9 @@ func New(deps Deps) *Server {
 	}
 	if deps.TenantHandler != nil {
 		deps.TenantHandler.Routes(mux)
+	}
+	if deps.KeyTransferHandler != nil {
+		deps.KeyTransferHandler.Routes(mux)
 	}
 	// Health check.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {

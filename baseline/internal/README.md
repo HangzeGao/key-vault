@@ -82,7 +82,7 @@ RequestID -> BodyLimit -> ReadBody -> Auth -> APIAccess -> handler
 
 - create/import key metadata and initial wrapped material
 - update metadata and `expires_at`
-- enable/disable/rotate/schedule destroy/cancel destroy
+- enable/disable, prepare and activate imported versions, schedule/cancel destroy
 - derive external status such as `EXPIRED`
 - provide lifecycle expiry candidates
 

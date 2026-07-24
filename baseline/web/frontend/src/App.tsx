@@ -14,6 +14,7 @@ import { AuditPage } from "./pages/Audit";
 import { LifecyclePage } from "./pages/Lifecycle";
 import { BatchCryptoPage } from "./pages/BatchCrypto";
 import { EnvelopeConfigPage } from "./pages/EnvelopeConfig";
+import { KeyTransferPage } from "./pages/KeyTransfer";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -31,6 +32,7 @@ function ProtectedRoutes() {
       <Route path="database" element={<RouteErrorBoundary><DatabaseOperationsPage /></RouteErrorBoundary>} />
       <Route path="keys" element={<RouteErrorBoundary><KeysPage /></RouteErrorBoundary>} />
       <Route path="keys/:id" element={<RouteErrorBoundary><KeyDetailPage /></RouteErrorBoundary>} />
+      <Route path="key-transfer" element={<RouteErrorBoundary><KeyTransferPage /></RouteErrorBoundary>} />
       <Route path="crypto" element={<RouteErrorBoundary><CryptoPage /></RouteErrorBoundary>} />
       <Route path="batch-crypto" element={<RouteErrorBoundary><BatchCryptoPage /></RouteErrorBoundary>} />
       <Route path="lifecycle" element={<RouteErrorBoundary><LifecyclePage /></RouteErrorBoundary>} />

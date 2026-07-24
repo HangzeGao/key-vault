@@ -22,16 +22,16 @@ var (
 // It intentionally contains no connection strings, SQL text, record values,
 // identifiers, or cryptographic material.
 type DatabaseDiagnostics struct {
-	ObservedAt time.Time
-	Role       string
-	Latency    time.Duration
-	Pool       DatabasePoolStats
-	Schema     DatabaseSchemaStats
-	Storage    DatabaseStorageStats
-	Workload   DatabaseWorkloadStats
-	Protection DatabaseProtectionStats
-	Integrity  DatabaseIntegrityStats
-	Tables     []DatabaseTableStats
+	ObservedAt  time.Time
+	Role        string
+	Latency     time.Duration
+	Pool        DatabasePoolStats
+	Schema      DatabaseSchemaStats
+	Storage     DatabaseStorageStats
+	Workload    DatabaseWorkloadStats
+	Protection  DatabaseProtectionStats
+	Integrity   DatabaseIntegrityStats
+	Tables      []DatabaseTableStats
 	Unavailable []string
 }
 
@@ -60,23 +60,23 @@ type DatabaseWorkloadStats struct {
 }
 
 type DatabaseProtectionStats struct {
-	ReplicaCount       int64
-	ReplicationLag     time.Duration
-	BackupStatus       string
+	ReplicaCount   int64
+	ReplicationLag time.Duration
+	BackupStatus   string
 }
 
 type DatabaseIntegrityStats struct {
-	OrphanKeyVersions       int64
-	DestroyedMaterialRows   int64
-	ExpiredActiveDEKLeases  int64
+	OrphanKeyVersions        int64
+	DestroyedMaterialRows    int64
+	ExpiredActiveDEKLeases   int64
 	ExpiredActiveNonceLeases int64
 }
 
 type DatabaseTableStats struct {
-	Name          string
-	EstimatedRows int64
-	TableBytes    int64
-	IndexBytes    int64
+	Name           string
+	EstimatedRows  int64
+	TableBytes     int64
+	IndexBytes     int64
 	StatsUpdatedAt time.Time
 }
 
@@ -102,10 +102,19 @@ type Repository interface {
 	UpdateKeyStatus(ctx context.Context, keyID, expectedCurrent, newStatus string) error
 	ArchiveDestroyedKey(ctx context.Context, tenantID, keyID string) (*models.Key, error)
 	DestroyKeyMaterial(ctx context.Context, keyID string) error
-	RotateKey(ctx context.Context, keyID string, newVersion *models.KeyVersion) error
+	CreatePendingKeyVersion(ctx context.Context, keyID string, newVersion *models.KeyVersion) error
+	ActivateKeyVersion(ctx context.Context, keyID string, versionNo uint32) error
 	GetKeyVersion(ctx context.Context, versionID string) (*models.KeyVersion, error)
 	GetKeyVersionByNo(ctx context.Context, keyID string, versionNo uint32) (*models.KeyVersion, error)
 	GetCurrentKeyVersion(ctx context.Context, keyID string) (*models.KeyVersion, error)
+
+	// Protocol-neutral key upload and download.
+	CreateKeyUpload(ctx context.Context, p *models.KeyUpload) error
+	GetKeyUpload(ctx context.Context, tenantID, uploadID string) (*models.KeyUpload, error)
+	ConfirmKeyUpload(ctx context.Context, tenantID, uploadID, principalID string, confirmedAt time.Time) error
+	CreateKeyDownload(ctx context.Context, d *models.KeyDownload) error
+	GetKeyDownload(ctx context.Context, tenantID, downloadID string) (*models.KeyDownload, error)
+	CompleteKeyDownload(ctx context.Context, tenantID, downloadID, principalID string, importedAt time.Time) error
 
 	// CRK
 	CreateCRKVersion(ctx context.Context, v *models.CRKVersion) error

@@ -244,6 +244,26 @@ func accessRuleFor(method, path string) (accessRule, bool) {
 		}
 	}
 
+	if path == "/ui/api/v1/key-uploads" && method == http.MethodPost {
+		return accessRule{planes: management, scopes: []string{"key-upload:manage", "keys:manage"}}, true
+	}
+	if strings.HasPrefix(path, "/ui/api/v1/key-uploads/") {
+		switch method {
+		case http.MethodGet:
+			return accessRule{planes: management, scopes: []string{"key-upload:read", "key-upload:manage", "keys:manage"}}, true
+		case http.MethodPost:
+			if strings.HasSuffix(path, "/confirm") {
+				return accessRule{planes: management, scopes: []string{"key-upload:confirm", "key-upload:manage", "keys:manage"}}, true
+			}
+		}
+	}
+	if path == "/ui/api/v1/key-downloads" && method == http.MethodPost {
+		return accessRule{planes: management, scopes: []string{"key-download:manage", "keys:manage"}}, true
+	}
+	if strings.HasPrefix(path, "/ui/api/v1/key-downloads/") && method == http.MethodGet {
+		return accessRule{planes: management, scopes: []string{"key-download:read", "key-download:manage", "keys:manage"}}, true
+	}
+
 	if strings.HasPrefix(path, "/ui/api/v1/crypto/") && method == http.MethodPost {
 		switch path {
 		case "/ui/api/v1/crypto/encrypt", "/ui/api/v1/crypto/encrypt-batch":
