@@ -16,10 +16,16 @@ export interface KeyDTO {
 export type KeyStatus = "ACTIVE" | "EXPIRED" | "DISABLED" | "DESTROY_PENDING" | "DESTROYED";
 
 export interface EncryptResponse {
+  version: number;
+  flags: number;
   key_id: string;
   key_version: number;
   suite_id: string;
   ciphertext: string;
+  nonce?: string;
+  tag?: string;
+  aad_hash?: string;
+  policy_version?: number;
   envelope_format?: string;
 }
 
@@ -67,6 +73,8 @@ export interface BatchImportKeyResult {
   error_code?: string;
   message?: string;
 }
+
+export type EnvelopeJSON = Record<string, unknown>;
 
 export interface TenantEnvelopeConfig {
   tenant_id: string;
@@ -224,6 +232,6 @@ export interface BatchResult {
   key_id?: string;
   key_version?: number;
   suite_id?: string;
-  ciphertext?: string;
+  envelope?: EnvelopeJSON;
   plaintext?: string;
 }

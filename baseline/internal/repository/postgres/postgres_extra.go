@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/kvlt/key-vault/internal/repository"
 	"github.com/kvlt/key-vault/internal/repository/models"
 )
 
@@ -544,32 +546,128 @@ func (s *Store) ReplayOutboxEvent(ctx context.Context, eventID string) error {
 	return nil
 }
 
-// TableSizes returns approximate row counts via pg_class.reltuples to avoid
-// full-table scans on large tables (stats may lag behind actual counts).
-func (s *Store) TableSizes(ctx context.Context) (map[string]int64, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT relname::text AS table_name, GREATEST(COALESCE(reltuples, 0), 0)::bigint AS approx_rows
-		 FROM pg_class
-		 WHERE relkind='r' AND relname IN (
-		   'tenants','keys','key_versions','crk_versions','crk_node_envelopes','nodes',
-		   'dek_leases','nonce_leases','lifecycle_jobs','outbox_events','audit_events',
-		   'tenant_envelope_configs','cluster_state','nonce_counters','idempotency_keys',
-		   'audit_chain_heads','attestation_challenges','attestation_reports','attestation_baselines'
-		 )`)
-	if err != nil {
+// DatabaseDiagnostics returns a read-only operational snapshot assembled from
+// PostgreSQL statistics. Optional probes fail independently so a restricted
+// database role still receives every diagnostic it may safely read.
+func (s *Store) DatabaseDiagnostics(ctx context.Context) (*repository.DatabaseDiagnostics, error) {
+	result := &repository.DatabaseDiagnostics{
+		ObservedAt: time.Now().UTC(),
+		Role:       "unknown",
+		Protection: repository.DatabaseProtectionStats{BackupStatus: "managed_externally"},
+	}
+
+	pingStarted := time.Now()
+	if err := s.pool.Ping(ctx); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := make(map[string]int64)
-	for rows.Next() {
-		var name string
-		var count int64
-		if err := rows.Scan(&name, &count); err != nil {
-			return nil, err
-		}
-		out[name] = count
+	result.Latency = time.Since(pingStarted)
+	poolStats := s.pool.Stat()
+	result.Pool = repository.DatabasePoolStats{
+		Max: poolStats.MaxConns(), Total: poolStats.TotalConns(),
+		Acquired: poolStats.AcquiredConns(), Idle: poolStats.IdleConns(),
+		AcquireWaitEvents: poolStats.EmptyAcquireCount(),
 	}
-	return out, rows.Err()
+
+	if len(schemaMigrations) > 0 {
+		result.Schema.Expected = schemaMigrations[len(schemaMigrations)-1].version
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&result.Schema.Current); err != nil {
+		result.Unavailable = append(result.Unavailable, "schema")
+	}
+
+	if err := s.pool.QueryRow(ctx, `SELECT pg_database_size(current_database())`).Scan(&result.Storage.DatabaseBytes); err != nil {
+		result.Unavailable = append(result.Unavailable, "capacity")
+	}
+
+	var oldestSeconds float64
+	if err := s.pool.QueryRow(ctx, `
+		SELECT
+			COUNT(*) FILTER (WHERE state = 'active'),
+			COUNT(*) FILTER (WHERE wait_event_type = 'Lock'),
+			COUNT(*) FILTER (WHERE xact_start IS NOT NULL AND NOW() - xact_start > INTERVAL '30 seconds'),
+			COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(xact_start) FILTER (WHERE xact_start IS NOT NULL))), 0)
+		FROM pg_stat_activity
+		WHERE datname = current_database()`).Scan(
+		&result.Workload.ActiveConnections,
+		&result.Workload.LockWaiters,
+		&result.Workload.LongTransactions,
+		&oldestSeconds,
+	); err != nil {
+		result.Unavailable = append(result.Unavailable, "workload")
+	} else {
+		result.Workload.OldestTransaction = time.Duration(oldestSeconds * float64(time.Second))
+	}
+
+	var inRecovery bool
+	if err := s.pool.QueryRow(ctx, `SELECT pg_is_in_recovery()`).Scan(&inRecovery); err != nil {
+		result.Unavailable = append(result.Unavailable, "replication")
+	} else if inRecovery {
+		result.Role = "standby"
+		var lagSeconds float64
+		if err := s.pool.QueryRow(ctx, `SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - pg_last_xact_replay_timestamp())), 0)`).Scan(&lagSeconds); err != nil {
+			result.Unavailable = append(result.Unavailable, "replication_lag")
+		} else {
+			result.Protection.ReplicationLag = time.Duration(lagSeconds * float64(time.Second))
+		}
+	} else {
+		result.Role = "primary"
+		if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM pg_stat_replication`).Scan(&result.Protection.ReplicaCount); err != nil {
+			result.Unavailable = append(result.Unavailable, "replication")
+		}
+	}
+
+	if err := s.pool.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM key_versions kv LEFT JOIN keys k ON k.id = kv.key_id WHERE k.id IS NULL),
+			(SELECT COUNT(*) FROM key_versions kv JOIN keys k ON k.id = kv.key_id WHERE k.status = 'DESTROYED' AND (OCTET_LENGTH(kv.wrapped_dek) > 0 OR OCTET_LENGTH(kv.wrap_metadata) > 0)),
+			(SELECT COUNT(*) FROM dek_leases WHERE revoked = FALSE AND expires_at <= NOW()),
+			(SELECT COUNT(*) FROM nonce_leases WHERE status = 'ACTIVE' AND expires_at <= NOW())`).Scan(
+		&result.Integrity.OrphanKeyVersions,
+		&result.Integrity.DestroyedMaterialRows,
+		&result.Integrity.ExpiredActiveDEKLeases,
+		&result.Integrity.ExpiredActiveNonceLeases,
+	); err != nil {
+		result.Unavailable = append(result.Unavailable, "integrity")
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT c.relname::text,
+			GREATEST(COALESCE(c.reltuples, 0), 0)::bigint,
+			pg_relation_size(c.oid),
+			pg_indexes_size(c.oid),
+			GREATEST(st.last_analyze, st.last_autoanalyze)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_stat_user_tables st ON st.relid = c.oid
+		WHERE c.relkind = 'r' AND n.nspname = current_schema() AND c.relname IN (
+			'tenants','keys','key_versions','crk_versions','crk_node_envelopes','nodes',
+			'dek_leases','nonce_leases','lifecycle_jobs','outbox_events','audit_events',
+			'tenant_envelope_configs','cluster_state','nonce_counters','idempotency_keys',
+			'audit_chain_heads','attestation_challenges','attestation_reports','attestation_baselines',
+			'schema_migrations'
+		)
+		ORDER BY pg_total_relation_size(c.oid) DESC`)
+	if err != nil {
+		result.Unavailable = append(result.Unavailable, "tables")
+		return result, nil
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var table repository.DatabaseTableStats
+		var statsUpdated sql.NullTime
+		if err := rows.Scan(&table.Name, &table.EstimatedRows, &table.TableBytes, &table.IndexBytes, &statsUpdated); err != nil {
+			result.Unavailable = append(result.Unavailable, "tables")
+			return result, nil
+		}
+		if statsUpdated.Valid {
+			table.StatsUpdatedAt = statsUpdated.Time.UTC()
+		}
+		result.Tables = append(result.Tables, table)
+	}
+	if err := rows.Err(); err != nil {
+		result.Unavailable = append(result.Unavailable, "tables")
+	}
+	return result, nil
 }
 
 // --- Audit chain ---

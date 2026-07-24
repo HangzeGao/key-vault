@@ -5,6 +5,7 @@ import { ToastContainer } from "./components/ui";
 import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
 import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
+import { DatabaseOperationsPage } from "./pages/DatabaseOperations";
 import { KeysPage } from "./pages/Keys";
 import { KeyDetailPage } from "./pages/KeyDetail";
 import { CryptoPage } from "./pages/Crypto";
@@ -27,6 +28,7 @@ function ProtectedRoutes() {
   return (
     <Routes>
       <Route path="dashboard" element={<RouteErrorBoundary><DashboardPage /></RouteErrorBoundary>} />
+      <Route path="database" element={<RouteErrorBoundary><DatabaseOperationsPage /></RouteErrorBoundary>} />
       <Route path="keys" element={<RouteErrorBoundary><KeysPage /></RouteErrorBoundary>} />
       <Route path="keys/:id" element={<RouteErrorBoundary><KeyDetailPage /></RouteErrorBoundary>} />
       <Route path="crypto" element={<RouteErrorBoundary><CryptoPage /></RouteErrorBoundary>} />

@@ -16,7 +16,7 @@ interface BatchEntry {
 }
 
 interface BatchDecryptEntry {
-  ciphertext: string;
+  envelope: string;
   aad: string;
   aadMode: AADMode;
 }
@@ -61,7 +61,7 @@ export function BatchCryptoPage() {
   const updateDecEntry = (i: number, patch: Partial<BatchDecryptEntry>) => {
     setDecEntries((prev) => prev.map((e, idx) => (idx === i ? { ...e, ...patch } : e)));
   };
-  const addDecEntry = () => setDecEntries((prev) => [...prev, { ciphertext: "", aad: "", aadMode: "utf8" }]);
+  const addDecEntry = () => setDecEntries((prev) => [...prev, { envelope: "", aad: "", aadMode: "utf8" }]);
   const removeDecEntry = (i: number) => setDecEntries((prev) => prev.filter((_, idx) => idx !== i));
   const applyGlobal = () => {
     setEntries((prev) => prev.map((e) => ({ ...e, keyId: e.keyId || globalKeyId })));
@@ -76,7 +76,7 @@ export function BatchCryptoPage() {
       imported = rows.map((row) => ({ keyId: row.key_id ?? row.keyId ?? "", plaintext: row.plaintext ?? "", aad: row.aad ?? row.aad_b64 ?? "", aadMode: row.aad_mode ?? (row.aad_b64 ? "base64" : "utf8") }));
     } catch {
       const lines = text.trim().split(/\r?\n/).filter(Boolean);
-      const dataLines = lines[0]?.toLowerCase().startsWith("ciphertext,") ? lines.slice(1) : lines;
+      const dataLines = lines[0]?.toLowerCase().startsWith("envelope,") ? lines.slice(1) : lines;
       imported = dataLines.map((line) => {
         const [keyId = "", plaintext = "", aad = "", aadMode = "utf8"] = line.split(",");
         if (!(["utf8", "base64", "hex"] as string[]).includes(aadMode)) throw new Error(`unsupported AAD mode: ${aadMode}`);
@@ -93,18 +93,18 @@ export function BatchCryptoPage() {
       const parsed = JSON.parse(text);
       const rows = Array.isArray(parsed) ? parsed : parsed.entries;
       if (!Array.isArray(rows)) throw new Error("JSON must be an array or contain entries");
-      imported = rows.map((row) => ({ ciphertext: row.ciphertext ?? "", aad: row.aad ?? row.aad_b64 ?? "", aadMode: row.aad_mode ?? (row.aad_b64 ? "base64" : "utf8") }));
+      imported = rows.map((row) => ({ envelope: JSON.stringify(row.envelope ?? row, null, 2), aad: row.aad ?? row.aad_b64 ?? "", aadMode: row.aad_mode ?? (row.aad_b64 ? "base64" : "utf8") }));
     } catch {
       const lines = text.trim().split(/\r?\n/).filter(Boolean);
-      const dataLines = lines[0]?.toLowerCase().startsWith("key_id,") ? lines.slice(1) : lines;
+      const dataLines = lines[0]?.toLowerCase().startsWith("envelope,") ? lines.slice(1) : lines;
       imported = dataLines.map((line) => {
-        const [ciphertext = "", aad = "", aadMode = "utf8"] = line.split(",");
+        const [envelope = "", aad = "", aadMode = "utf8"] = line.split(",");
         if (!(["utf8", "base64", "hex"] as string[]).includes(aadMode)) throw new Error(`unsupported AAD mode: ${aadMode}`);
-        return { ciphertext, aad, aadMode: aadMode as AADMode };
+        return { envelope, aad, aadMode: aadMode as AADMode };
       });
     }
     if (!imported.length || imported.length > 100) throw new Error("import must contain 1-100 entries");
-    if (imported.some((entry) => !entry.ciphertext.trim())) throw new Error("each entry requires ciphertext");
+    if (imported.some((entry) => !entry.envelope.trim())) throw new Error("each entry requires envelope");
     setDecEntries(imported); setDecResults(null); showToast(`imported ${imported.length} decrypt entries`, "success");
   };
 
@@ -132,7 +132,7 @@ export function BatchCryptoPage() {
       const payload = {
         tenant_id: tenantId,
         entries: decEntries.map((e) => ({
-          ciphertext: e.ciphertext,
+          envelope: JSON.parse(e.envelope),
           aad_b64: encodeAAD(e.aad, e.aadMode),
         })),
       };
@@ -225,7 +225,7 @@ export function BatchCryptoPage() {
             {results && (
               <div style={{ marginTop: 4 }}>
                 <div className="input-label" style={{ marginBottom: 8 }}>Results</div>
-                <div className="toolbar-row"><span className="mono">{results.filter((r) => r.success).length} succeeded · {results.filter((r) => !r.success).length} failed</span><button className="btn btn-ghost btn-sm" onClick={() => setFailedOnly(!failedOnly)}>{failedOnly ? "Show all" : "Failures only"}</button><button className="btn btn-ghost btn-sm" disabled={!results.some((r) => r.success)} onClick={() => { navigator.clipboard.writeText(results.filter((r) => r.success).map((r) => r.ciphertext).join("\n")); showToast("copied successful ciphertexts", "success"); }}><Copy size={12} /> Copy successes</button>{results.some((r) => !r.success) && <button className="btn btn-ghost btn-sm" onClick={() => { setEntries(results.filter((r) => !r.success).map((r) => entries[r.index])); setResults(null); }}><RotateCcw size={12} /> Retry failures</button>}</div>
+                <div className="toolbar-row"><span className="mono">{results.filter((r) => r.success).length} succeeded · {results.filter((r) => !r.success).length} failed</span><button className="btn btn-ghost btn-sm" onClick={() => setFailedOnly(!failedOnly)}>{failedOnly ? "Show all" : "Failures only"}</button><button className="btn btn-ghost btn-sm" disabled={!results.some((r) => r.success)} onClick={() => { navigator.clipboard.writeText(JSON.stringify(results.filter((r) => r.success).map((r) => ({ envelope: r.envelope })), null, 2)); showToast("copied successful envelopes", "success"); }}><Copy size={12} /> Copy successes</button>{results.some((r) => !r.success) && <button className="btn btn-ghost btn-sm" onClick={() => { setEntries(results.filter((r) => !r.success).map((r) => entries[r.index])); setResults(null); }}><RotateCcw size={12} /> Retry failures</button>}</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   {results.filter((r) => !failedOnly || !r.success).map((r) => (
                     <div key={r.index} style={{ padding: 8, background: "var(--bg-inset)", border: `1px solid ${r.success ? "var(--success)" : "var(--danger)"}`, borderRadius: 2 }}>
@@ -236,8 +236,8 @@ export function BatchCryptoPage() {
                         {r.key_id && <span className="mono" style={{ fontSize: 10, color: "var(--text-tertiary)" }}>v{r.key_version}</span>}
                         {r.error_code && <span className="mono" style={{ fontSize: 10, color: "var(--danger)" }}>{r.error_code}: {r.message}</span>}
                       </div>
-                      {r.ciphertext && (
-                        <MonoReadout value={r.ciphertext} copyable />
+                      {r.envelope && (
+                        <MonoReadout value={JSON.stringify(r.envelope, null, 2)} copyable />
                       )}
                     </div>
                   ))}
@@ -248,13 +248,13 @@ export function BatchCryptoPage() {
                     style={{ marginTop: 8 }}
                     onClick={() => {
                       setDecEntries(results.filter((r) => r.success).map((r) => ({
-                        ciphertext: r.ciphertext ?? "",
+                        envelope: JSON.stringify(r.envelope ?? {}, null, 2),
                         aad: entries[r.index].aad, aadMode: entries[r.index].aadMode,
                       })));
                       showToast("sent to decrypt batch", "info");
                     }}
                   >
-                    <Play size={12} /> Send ciphertexts to Batch Decrypt
+                    <Play size={12} /> Send envelopes to Batch Decrypt
                   </button>
                 )}
               </div>
@@ -267,7 +267,7 @@ export function BatchCryptoPage() {
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <div className="toolbar-row">
               <button className="btn btn-ghost btn-sm" onClick={() => { setDecEntries([]); setDecResults(null); }}>Clear</button>
-              <button className="btn btn-ghost btn-sm" onClick={() => { const text = prompt("Paste JSON array or CSV lines: ciphertext,aad,aad_mode"); if (text) try { importDecryptText(text); } catch (error) { showToast((error as Error).message, "error"); } }}><Upload size={12} /> Paste JSON/CSV</button>
+              <button className="btn btn-ghost btn-sm" onClick={() => { const text = prompt("Paste JSON array or CSV lines: envelope,aad,aad_mode"); if (text) try { importDecryptText(text); } catch (error) { showToast((error as Error).message, "error"); } }}><Upload size={12} /> Paste JSON/CSV</button>
               <label className="btn btn-ghost btn-sm"><Upload size={12} /> Import file<input type="file" accept=".json,.csv,text/csv,application/json" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) file.text().then(importDecryptText).catch((error) => showToast(error.message, "error")); event.currentTarget.value = ""; }} /></label>
             </div>
             <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10 }}>
@@ -282,9 +282,9 @@ export function BatchCryptoPage() {
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     <textarea
                       className="textarea"
-                      value={e.ciphertext}
-                      onChange={(ev) => updateDecEntry(i, { ciphertext: ev.target.value })}
-                      placeholder="ciphertext base64 envelope..."
+                      value={e.envelope}
+                      onChange={(ev) => updateDecEntry(i, { envelope: ev.target.value })}
+                      placeholder="envelope JSON..."
                       style={{ minHeight: 72, fontFamily: '"JetBrains Mono", monospace', fontSize: 11 }}
                     />
                     <div className="aad-input-row"><select className="select" value={e.aadMode} onChange={(ev) => updateDecEntry(i, { aadMode: ev.target.value as AADMode })}><option value="utf8">UTF-8</option><option value="base64">Base64</option><option value="hex">Hex</option></select><input className="input" placeholder={`AAD (${e.aadMode})`} value={e.aad} onChange={(ev) => updateDecEntry(i, { aad: ev.target.value })} /></div>
@@ -297,7 +297,7 @@ export function BatchCryptoPage() {
             </div>
             <button
               className="btn btn-primary"
-              disabled={decEntries.length === 0 || decEntries.every((e) => !e.ciphertext.trim()) || decBatchMut.isPending}
+              disabled={decEntries.length === 0 || decEntries.every((e) => !e.envelope.trim()) || decBatchMut.isPending}
               onClick={() => decBatchMut.mutate()}
             >
               <Unlock size={14} /> {decBatchMut.isPending ? "Decrypting..." : "Decrypt Batch"}
@@ -351,7 +351,7 @@ export function BatchCryptoPage() {
           <pre style={{ margin: 0, padding: 10, background: "var(--bg-inset)", border: "1px solid var(--border)", borderRadius: 2, whiteSpace: "pre-wrap" }}>
 {`{
   "tenant_id": "t-default",
-  "entries": [ { "ciphertext": "<base64>", "aad_b64": "<base64 caller AAD bytes>" } ]
+  "entries": [ { "envelope": { "version": 1, "suite_id": "AES_256_ECB", "...": "..." }, "aad_b64": "<base64 caller AAD bytes>" } ]
 }`}
           </pre>
           <div style={{ marginTop: 8, color: "var(--text-tertiary)" }}>

@@ -5,9 +5,12 @@
 - [x] 支持 `AES_256_ECB` 与 `SM4_ECB`。
   - `AES_256_GCM`、`SM4_GCM`、`AES_256_ECB`、`SM4_ECB` 均为独立 suite；Key 创建、受控导入、Envelope、前端选择器与批量导入示例已覆盖。
   - 解密时 Envelope suite 必须与 Key suite 完全一致，GCM Key 不能用于 ECB，ECB Key 不能用于 GCM。
-  - ECB Envelope 使用空 nonce、空 tag 和 PKCS#7 padding；wire/JSON 不携带 `aad_hash`。ECB 忽略 caller AAD，仅用于兼容性场景，不提供 GCM 等价的完整性或 AAD 认证能力。
+  - ECB Envelope 使用 PKCS#7 padding；JSON/profile 不携带 `nonce`、`tag`、`aad_hash`。ECB 忽略 caller AAD，仅用于兼容性场景，不提供 GCM 等价的完整性或 AAD 认证能力。
+- [x] 支持最小 body 加解密。
+  - Encrypt 可只传 `plaintext`；未提供 `tenant_id` 时使用 principal tenant，未提供 `key_id` 时使用/自动创建租户默认 `AES_256_ECB` Key。
+  - Decrypt 请求体直接使用 Envelope JSON；Key、KeyVersion 和 suite 从 Envelope 中解析；不支持仅凭 raw ciphertext 推断默认 KeyVersion。
 
-更新时间：2026-07-10
+更新时间：2026-07-22
 
 当前工程基线的代码、测试、前端、SDK 和设计清理项已全部完成。本文保留完成记录与环境验收说明；“暂不做”是明确的架构决策，不计入未完成任务。
 
@@ -48,7 +51,7 @@
 - [x] 统一 API 路径和请求契约。
   - `src/lib/apiPaths.ts` 集中管理 BFF path、动态 ID 编码和 query builder；文档统一采用 `/retry`、`/replay`。
 - [x] 增加前端契约、页面和截图测试。
-  - Vitest 覆盖 Dashboard、Keys、Crypto、BatchCrypto、Audit、Lifecycle、EnvelopeConfig、Policy 的 empty/success，以及权限错误和大列表/长 ID。
+  - Vitest 覆盖 Dashboard、Database Operations、Keys、Crypto、BatchCrypto、Audit、Lifecycle、EnvelopeConfig、Policy 的 empty/success，以及权限错误和大列表/长 ID。
   - Playwright 使用 Edge 覆盖 desktop 与 390px narrow 登录布局、水平溢出和截图基线。
 - [x] 收敛前端样式与业务组件。
   - 通用 `page-header`、`page-section`、`table-scroll`、`record-card`、toolbar/filter/pagination/profile editor 类已落地。
@@ -76,7 +79,7 @@
 - [x] 增加前端设计系统文档。
 - [x] 完善 Dashboard 信息分层。
   - 可操作事项直达 lifecycle/CRK/audit；展示最近高风险审计和 lifecycle 活动；页面明确 tenant key inventory 与全局 Ops 状态的维度差异。
-  - Ops Dashboard 通过 `ops/db/status` 可视化全局数据库聚合：Key 状态、suite 分布、purpose 统计和 repository table row counts；不绕过平面隔离返回 Key ID、标签或密钥材料。
+  - Dashboard 只保留数据库整体状态、连接和延迟摘要；独立 Database Operations 页面通过 `ops/db/status` 可视化全局数据库聚合，不绕过平面隔离返回 Key ID、标签、记录值或密钥材料。
   - 对称 AEAD 基线将 Key purpose 收敛为 `encrypt_decrypt`；前端、服务层、加解密路径与数据库约束均拒绝不受支持的 `signing` 等用途。
   - PostgreSQL 使用事务化版本迁移账本与 advisory lock；历史 purpose 在约束前归一化，避免每次启动重复执行 DDL。
   - 前端默认提供 Daily workflow 简单模式；Policy、Envelope、Batch、Audit、Lifecycle 等控制项按需切换到 Advanced controls。
@@ -88,8 +91,11 @@
   - 提供独立 JSON/CSV 示例文件：批量 Key 导入、批量加密与批量解密各一组，并在示例 README 说明占位材料、AAD 编码与替换要求；批量解密操作区与加密对齐，支持 Clear。
   - Dashboard 全部 Health 卡均可展开查看脱敏运行态：TPM provider/PCR、Resolver CRK 缓存、数据库持久性与连接、Worker 参数与失败数、审计链校验、策略版本与受信任签名键数；不返回设备标识、DSN、密钥材料或完整审计载荷。
   - Dashboard 定义 Health 的 OK/WARN/DEGRADED 语义；TPM WARN 明确说明 `tpm2` 等兼容 provider 已初始化但低于生产原生 TPM 基线，并给出 native/tss/esapi 的升级方向。
-  - Dashboard 以 Data Atlas 作为唯一的密钥库存明细（总量、状态、套件、用途）；移除重复的 Key Inventory 区块。Repository footprint 显示全部 repository table row counts（包括零行的 `attestation_baselines` 与 `attestation_challenges`）；宽屏双列、窄屏单列。
-  - PostgreSQL `pg_class.reltuples=-1`（尚未 ANALYZE 的统计未知）在 Ops table sizes 中归一为 `0`，前端不再将其显示为 `-`。
+  - Database Operations 以 Data Atlas 作为唯一的数据库库存视图（Key 总量、状态、suite、用途、数据库容量和表统计）；后端只返回全局聚合，页面不调用管理面 `/keys`。
+  - 将含义错误的 `TableSizes/table_sizes` 收敛为结构化 Database Diagnostics：表项分别返回 `estimated_rows`、`table_bytes`、`index_bytes` 和统计更新时间；`pg_class.reltuples=-1` 归一为 `0` 并明确提示统计可能滞后。
+  - 数据库诊断补齐连接延迟、连接池、主备角色、迁移版本、会话/锁/长事务、复制摘要、外部备份责任边界，以及孤儿 KeyVersion、销毁后材料残留和过期活跃 lease 一致性检查。
+  - 数据库响应使用 `ok/warn/degraded` 和稳定原因码；不可观测指标进入 `unavailable`，不再伪装成健康零值；禁止向前端透传 PostgreSQL 原始错误、DSN 或 SQL。
+  - Dashboard 的数据库重诊断按 30 秒刷新，Database Operations 按 60 秒刷新；Health 仍保持 5 秒轻量轮询。
 - [x] 收敛 Envelope inspect/convert 协议边界。
   - 前端不再实现 Envelope 协议解析或重编码；只调用服务端 inspect/convert。服务端统一执行 parser/profile 选择、租户格式白名单、严格 JSON 数字边界和审计，示例文件不再硬编码策略 ID。
 - [x] 完成 DESTROYED Key 归档与历史销毁任务自愈。
@@ -100,7 +106,7 @@
 ## 验证记录
 
 - `go test ./...`
-- `npm.cmd test`：12 tests passed
+- `npm.cmd test -- --run`：14 tests passed
 - `npm.cmd run build`：TypeScript + Vite production build passed
 - `npm.cmd run test:e2e`：desktop/narrow 2 tests passed
 - TPM simulator 测试在当前 `CGO_ENABLED=0` 环境自动跳过；CI/部署验收须在启用 CGO 的 vTPM 或真实 TPM runner 上执行。

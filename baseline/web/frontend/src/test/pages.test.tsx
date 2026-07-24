@@ -4,6 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api, HttpError } from "../lib/api";
 import { DashboardPage } from "../pages/Dashboard";
+import { DatabaseOperationsPage } from "../pages/DatabaseOperations";
 import { KeysPage } from "../pages/Keys";
 import { CryptoPage } from "../pages/Crypto";
 import { BatchCryptoPage } from "../pages/BatchCrypto";
@@ -22,7 +23,17 @@ const emptyResponse = (path: string) => {
   if (path.endsWith("/ui/api/v1/status")) return { database: { driver: "postgres", connected: true }, server: { listen_addr: ":8080", tpm_provider: "native", plane_isolation: "physical", uptime_seconds: 1 }, cluster: { cluster_epoch: 1 }, keys: { total: 0, active: 0, disabled: 0, destroy_pending: 0, destroyed: 0 } };
   if (path.endsWith("/keys")) return { keys: [] };
   if (path.endsWith("/ops/health")) return { overall: "ok", uptime_seconds: 1, checks: {} };
-  if (path.endsWith("/ops/db/status")) return { driver: "postgres", connected: true, backlog: { lifecycle_failed: 0, lifecycle_pending: 0, outbox_pending: 0 }, key_inventory: { scope: "global", total: 3, by_status: { ACTIVE: 2, DISABLED: 1 }, by_suite: { AES_256_GCM: 3 }, by_purpose: { encrypt_decrypt: 3 } } };
+  if (path.endsWith("/ops/db/status")) return {
+    driver: "postgres", status: "ok", observed_at: new Date().toISOString(), connected: true,
+    connection: { status: "ok", latency_ms: 3 }, cluster_epoch: 1,
+    runtime: { role: "primary", pool: { max: 20, total: 2, acquired: 1, idle: 1, acquire_wait_events: 0 }, schema: { status: "ok", current: 3, expected: 3 }, workload: { active_connections: 1, lock_waiters: 0, long_transactions: 0, oldest_transaction_ms: 5 } },
+    capacity: { database_bytes: 4096, tables: [{ name: "keys", estimated_rows: 3, table_bytes: 2048, index_bytes: 1024 }] },
+    data_protection: { replica_count: 0, replication_lag_ms: 0, backup_status: "managed_externally" },
+    integrity: { status: "ok", orphan_key_versions: 0, destroyed_material_rows: 0, expired_active_dek_leases: 0, expired_active_nonce_leases: 0 },
+    backlog: { lifecycle_failed: 0, lifecycle_pending: 0, outbox_pending: 0 },
+    key_inventory: { scope: "global", total: 3, by_status: { ACTIVE: 2, DISABLED: 1 }, by_suite: { AES_256_GCM: 3 }, by_purpose: { encrypt_decrypt: 3 } },
+    crk_consistency: {},
+  };
   if (path.includes("/audit/events")) return { events: [] };
   if (path.endsWith("/audit/chain/heads")) return { heads: [] };
   if (path.includes("/audit/chain/verify")) return { results: [] };
@@ -44,7 +55,7 @@ beforeEach(() => { get.mockReset(); get.mockImplementation(async (path) => empty
 
 describe("page contracts", () => {
   it.each([
-    ["Dashboard", <DashboardPage />], ["Keys", <KeysPage />], ["Crypto Sandbox", <CryptoPage />],
+    ["Dashboard", <DashboardPage />], ["Database Operations", <DatabaseOperationsPage />], ["Keys", <KeysPage />], ["Crypto Sandbox", <CryptoPage />],
     ["Batch Crypto", <BatchCryptoPage />], ["Audit Log", <AuditPage />], ["Lifecycle", <LifecyclePage />],
     ["Envelope Config", <EnvelopeConfigPage />], ["Policy", <PolicyPage />],
   ])("renders %s success/empty state", async (heading, page) => { renderPage(page); expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument(); });
@@ -59,11 +70,11 @@ describe("page contracts", () => {
     get.mockResolvedValue({ keys } as never); renderPage(<KeysPage />); expect(await screen.findByText("Key 119")).toBeInTheDocument();
   });
 
-  it("visualizes aggregate database inventory when Ops cannot list management keys", async () => {
-    get.mockImplementation((path) => path.endsWith("/keys") ? Promise.reject(new HttpError(403, "PERMISSION_DENIED", "management scope required", false)) as never : emptyResponse(path) as never);
-    renderPage(<DashboardPage />);
+  it("visualizes only aggregate database inventory without listing management keys", async () => {
+    renderPage(<DatabaseOperationsPage />);
     expect(get.mock.calls.map(([path]) => path)).toContain("/ui/api/v1/ops/db/status");
-    expect(await screen.findByText("global aggregate")).toBeInTheDocument();
+    expect(get.mock.calls.map(([path]) => path)).not.toContain("/ui/api/v1/keys");
+    expect(await screen.findByText(/global aggregate/)).toBeInTheDocument();
     expect(await screen.findByText("Key status distribution")).toBeInTheDocument();
     expect(await screen.findByText("Key workloads")).toBeInTheDocument();
     expect(await screen.findByText("AES_256_GCM")).toBeInTheDocument();

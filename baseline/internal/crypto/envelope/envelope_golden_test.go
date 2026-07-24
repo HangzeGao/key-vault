@@ -12,7 +12,7 @@ import (
 
 // Golden Test Vectors for Envelope v1 per design 搂8.3.
 // These are immutable KAT (Known Answer Test) vectors. Any change to the
-// wire format MUST be a version bump.
+// canonical encoding MUST be a version bump.
 
 // TestGoldenEnvelopeRoundTrip verifies Seal -> Open round-trip with AES-256-GCM.
 func TestGoldenEnvelopeRoundTrip(t *testing.T) {
@@ -337,7 +337,7 @@ func TestEnvelopeECBRoundTrip(t *testing.T) {
 	}
 	wantWireLen := BaseHeaderSize + len(keyID) + len(env.Ciphertext)
 	if len(sealed) != wantWireLen {
-		t.Fatalf("ECB wire length = %d, want %d without aad_hash", len(sealed), wantWireLen)
+		t.Fatalf("ECB canonical length = %d, want %d without aad_hash", len(sealed), wantWireLen)
 	}
 	if !env.VerifyAADHash([]byte("any aad")) {
 		t.Fatal("ECB VerifyAADHash must ignore caller AAD")
@@ -370,7 +370,7 @@ func TestGoldenEnvelopeEncodeRoundTrip(t *testing.T) {
 }
 
 // TestGoldenEnvelopeHeaderLayout verifies the GCM authenticated header layout
-// is exactly 61 bytes and field offsets match the wire format spec.
+// is exactly 61 bytes and field offsets match the internal canonical layout.
 func TestGoldenEnvelopeHeaderLayout(t *testing.T) {
 	if BaseHeaderSize != 29 {
 		t.Fatalf("BaseHeaderSize = %d, want 29", BaseHeaderSize)

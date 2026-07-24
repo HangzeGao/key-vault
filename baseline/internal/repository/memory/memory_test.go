@@ -63,8 +63,8 @@ func TestEnvelopeConfigOptimisticConcurrency(t *testing.T) {
 	// Create.
 	cfg := &models.TenantEnvelopeConfig{
 		TenantID:       "t-env",
-		DefaultFormat:  "kvlt-binary-v1",
-		AllowedFormats: []string{"kvlt-binary-v1", "json-v1"},
+		DefaultFormat:  "json-v1",
+		AllowedFormats: []string{"json-v1", "configurable-json-v1"},
 	}
 	if err := s.UpsertTenantEnvelopeConfig(ctx, cfg); err != nil {
 		t.Fatalf("Upsert: %v", err)
@@ -94,7 +94,7 @@ func TestEnvelopeConfigOptimisticConcurrency(t *testing.T) {
 	// Update with stale version should fail.
 	stale := &models.TenantEnvelopeConfig{
 		TenantID:      "t-env",
-		DefaultFormat: "kvlt-binary-v1",
+		DefaultFormat: "json-v1",
 		Version:       1, // stale
 	}
 	err = s.UpsertTenantEnvelopeConfig(ctx, stale)

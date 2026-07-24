@@ -3,7 +3,9 @@ package crypto
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -14,6 +16,7 @@ import (
 	keystate "github.com/kvlt/key-vault/internal/domain/key/state"
 	"github.com/kvlt/key-vault/internal/domain/policy"
 	"github.com/kvlt/key-vault/internal/errorsx"
+	"github.com/kvlt/key-vault/internal/repository"
 	"github.com/kvlt/key-vault/internal/repository/models"
 	"github.com/kvlt/key-vault/internal/resolver/keyresolver"
 )
@@ -93,6 +96,8 @@ type InspectEnvelopeResult struct {
 
 // Store is the repository subset used by the crypto service.
 type Store interface {
+	GetTenant(ctx context.Context, id string) (*models.Tenant, error)
+	CreateKey(ctx context.Context, k *models.Key, kv *models.KeyVersion) error
 	GetKey(ctx context.Context, tenantID, keyID string) (*models.Key, error)
 	GetKeyVersionByNo(ctx context.Context, keyID string, versionNo uint32) (*models.KeyVersion, error)
 	GetCurrentKeyVersion(ctx context.Context, keyID string) (*models.KeyVersion, error)
@@ -115,6 +120,10 @@ type Service struct {
 
 const maxCallerAADLen = 64 * 1024
 const purposeEncryptDecrypt = "encrypt_decrypt"
+const defaultTenantID = "t-default"
+const defaultEncryptKeyID = "default-ecb"
+const defaultEncryptKeySuite = "AES_256_ECB"
+const defaultPolicyID = "default-v1"
 
 // Auditor records audit events for crypto operations (design §15.1, EB-FR-09).
 type Auditor interface {
@@ -174,6 +183,16 @@ func (s *Service) audit(ctx context.Context, action, tenantID, principalID, keyI
 
 // Encrypt performs server-side encryption per design §9.4.
 func (s *Service) Encrypt(ctx context.Context, cmd EncryptCommand) (*EncryptResult, error) {
+	if cmd.TenantID == "" {
+		cmd.TenantID = defaultTenantID
+	}
+	if cmd.KeyID == "" {
+		keyID, err := s.ensureDefaultEncryptKey(ctx, cmd.TenantID, cmd.PrincipalID)
+		if err != nil {
+			return nil, err
+		}
+		cmd.KeyID = keyID
+	}
 	if len(cmd.Plaintext) > s.maxBodySize {
 		return nil, errorsx.New(errorsx.CodeBadRequest, "plaintext exceeds max size", false)
 	}
@@ -266,8 +285,8 @@ func (s *Service) Encrypt(ctx context.Context, cmd EncryptCommand) (*EncryptResu
 		if tenantCfg != nil {
 			format = envelope.FormatID(tenantCfg.DefaultFormat)
 		}
-		if format == "" {
-			format = envelope.FormatKVLTBinaryV1
+		if format == "" || !envelopeFormatKnown(tenantCfg, format) {
+			format = envelope.FormatJSONV1
 		}
 	} else {
 		// Validate requested format against tenant's allowed_formats whitelist.
@@ -303,6 +322,9 @@ func (s *Service) Encrypt(ctx context.Context, cmd EncryptCommand) (*EncryptResu
 
 // Decrypt performs server-side decryption per design §9.5.
 func (s *Service) Decrypt(ctx context.Context, cmd DecryptCommand) (*DecryptResult, error) {
+	if cmd.TenantID == "" {
+		cmd.TenantID = defaultTenantID
+	}
 	if len(cmd.Ciphertext) > s.maxBodySize*2 {
 		return nil, errorsx.New(errorsx.CodeBadRequest, "ciphertext exceeds max size", false)
 	}
@@ -440,6 +462,91 @@ func suiteIDFromString(s string) (aead.SuiteID, error) {
 	return 0, fmt.Errorf("unknown suite %s", s)
 }
 
+func (s *Service) ensureDefaultEncryptKey(ctx context.Context, tenantID, principalID string) (string, error) {
+	if tenantID == "" {
+		tenantID = defaultTenantID
+	}
+	keyID := defaultKeyIDForTenant(tenantID)
+	if k, err := s.store.GetKey(ctx, tenantID, keyID); err == nil && k != nil {
+		if k.SuiteID != defaultEncryptKeySuite {
+			return "", errorsx.New(errorsx.CodePolicyDenied, "default key suite mismatch", false)
+		}
+		return keyID, nil
+	}
+	if _, err := s.store.GetTenant(ctx, tenantID); err != nil {
+		return "", errorsx.New(errorsx.CodePermissionDenied, "tenant not found", false)
+	}
+	pol, err := s.policies.Get(defaultPolicyID)
+	if err != nil {
+		return "", errorsx.New(errorsx.CodePolicyDenied, "default policy not found", false)
+	}
+	suite, err := pol.SuiteByID(defaultEncryptKeySuite)
+	if err != nil {
+		return "", errorsx.New(errorsx.CodePolicyDenied, "default suite not in policy", false)
+	}
+	if !policy.CanEncrypt(suite.Status) {
+		return "", errorsx.New(errorsx.CodePolicyDenied, "default suite not available for encryption", false)
+	}
+	if s.resolver == nil {
+		return "", errorsx.New(errorsx.CodeTPMUnavailable, "resolver unavailable", true)
+	}
+	suiteEnum := aead.SuiteAES256ECB
+	versionID := newID("kv")
+	dm, err := s.resolver.GenerateAndWrapDEK(ctx, suiteEnum, versionID)
+	if err != nil {
+		return "", errorsx.Wrap(errorsx.CodeTPMUnavailable, "default dek generation failed", true, err)
+	}
+	now := time.Now().UTC()
+	key := &models.Key{
+		ID:             keyID,
+		TenantID:       tenantID,
+		Name:           "Default ECB Key",
+		Purpose:        purposeEncryptDecrypt,
+		PolicyID:       defaultPolicyID,
+		SuiteID:        defaultEncryptKeySuite,
+		CurrentVersion: 1,
+		Status:         string(keystate.KeyActive),
+		Tags:           map[string]string{"managed_by": "system", "default": "true"},
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	kv := &models.KeyVersion{
+		ID:           versionID,
+		KeyID:        keyID,
+		VersionNo:    1,
+		SuiteID:      defaultEncryptKeySuite,
+		WrappedDEK:   dm.WrappedDEK,
+		WrapMetadata: dm.WrapMetadata,
+		Status:       string(keystate.KVActive),
+		CreatedAt:    now,
+	}
+	if err := s.store.CreateKey(ctx, key, kv); err != nil {
+		if errors.Is(err, repository.ErrConflict) {
+			if existing, getErr := s.store.GetKey(ctx, tenantID, keyID); getErr == nil && existing != nil && existing.SuiteID == defaultEncryptKeySuite {
+				return keyID, nil
+			}
+		}
+		return "", errorsx.Wrap(errorsx.CodeDBConflict, "default key create failed", true, err)
+	}
+	s.audit(ctx, "key.default_created", tenantID, principalID, keyID, "success", "", map[string]string{"suite_id": defaultEncryptKeySuite})
+	return keyID, nil
+}
+
+func defaultKeyIDForTenant(tenantID string) string {
+	if tenantID == "" || tenantID == defaultTenantID {
+		return defaultEncryptKeyID
+	}
+	return defaultEncryptKeyID + "-" + tenantID
+}
+
+func newID(prefix string) string {
+	var b [8]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	}
+	return prefix + "-" + hex.EncodeToString(b[:])
+}
+
 func zeroize(b []byte) {
 	for i := range b {
 		b[i] = 0
@@ -517,6 +624,21 @@ func envelopeFormatAllowed(cfg *models.TenantEnvelopeConfig, format envelope.For
 	for _, allowed := range cfg.AllowedFormats {
 		if allowed == string(format) {
 			return true
+		}
+	}
+	return false
+}
+
+func envelopeFormatKnown(cfg *models.TenantEnvelopeConfig, format envelope.FormatID) bool {
+	if envelope.BuiltinProfile(format) != nil {
+		return true
+	}
+	if cfg != nil {
+		for _, p := range cfg.Profiles {
+			if p.FormatID == string(format) {
+				adapter := envelope.FormatID(p.Adapter)
+				return adapter == envelope.FormatJSONV1 || adapter == envelope.FormatConfigurableJSONV1
+			}
 		}
 	}
 	return false

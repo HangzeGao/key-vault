@@ -29,11 +29,28 @@ func TestPostgresMigrationTransactionAndConcurrentVersioning(t *testing.T) {
 	if err := store.Ping(ctx); err != nil {
 		t.Fatal(err)
 	}
+	diagnostics, err := store.DatabaseDiagnostics(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnostics.Role != "primary" || diagnostics.Schema.Current != diagnostics.Schema.Expected {
+		t.Fatalf("unexpected database diagnostics: %+v", diagnostics)
+	}
+	foundKeysTable := false
+	for _, table := range diagnostics.Tables {
+		if table.Name == "keys" {
+			foundKeysTable = true
+			break
+		}
+	}
+	if !foundKeysTable {
+		t.Fatalf("database diagnostics omitted keys table: %+v", diagnostics.Tables)
+	}
 	tenant := &models.Tenant{ID: "integration-tenant", Name: "Integration", Status: "active"}
 	if err := store.UpsertTenant(ctx, tenant); err != nil {
 		t.Fatal(err)
 	}
-	base := &models.TenantEnvelopeConfig{TenantID: tenant.ID, DefaultFormat: "kvlt-binary-v1", AllowedFormats: []string{"kvlt-binary-v1"}, UpdatedBy: "test"}
+	base := &models.TenantEnvelopeConfig{TenantID: tenant.ID, DefaultFormat: "json-v1", AllowedFormats: []string{"json-v1"}, UpdatedBy: "test"}
 	if err := store.UpsertTenantEnvelopeConfig(ctx, base); err != nil {
 		t.Fatal(err)
 	}

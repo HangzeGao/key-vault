@@ -14,6 +14,19 @@ export function formatCount(n: number | undefined | null): string {
   return String(n);
 }
 
+export function formatBytes(bytes: number | undefined | null): string {
+  if (bytes === undefined || bytes === null || !Number.isFinite(bytes) || bytes < 0) return "-";
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let i = 1; i < units.length && value >= 1024; i += 1) {
+    value /= 1024;
+    unit = units[i];
+  }
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${unit}`;
+}
+
 export function StatusRow({ label, value, ok }: { label: string; value: string | number; ok?: boolean }) {
   const color = ok === undefined ? "var(--text-primary)" : ok ? "var(--success)" : "var(--danger)";
   return (

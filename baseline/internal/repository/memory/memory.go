@@ -1166,30 +1166,65 @@ func (s *Store) ReplayOutboxEvent(ctx context.Context, eventID string) error {
 	return nil
 }
 
-// TableSizes returns approximate row counts for ops db/status diagnostics.
-func (s *Store) TableSizes(ctx context.Context) (map[string]int64, error) {
+// DatabaseDiagnostics returns a redacted snapshot for the engineering-only
+// in-memory backend. Capacity and backup metrics are not applicable.
+func (s *Store) DatabaseDiagnostics(ctx context.Context) (*repository.DatabaseDiagnostics, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return map[string]int64{
-		"tenants":                 int64(len(s.tenants)),
-		"keys":                    int64(len(s.keys)),
-		"key_versions":            int64(len(s.keyVersions)),
-		"crk_versions":            int64(len(s.crkVersions)),
-		"crk_node_envelopes":      int64(len(s.crkNodeEnvelopes)),
-		"nodes":                   int64(len(s.nodes)),
-		"dek_leases":              int64(len(s.dekLeases)),
-		"nonce_leases":            int64(len(s.nonceLeases)),
-		"lifecycle_jobs":          int64(len(s.lifecycleJobs)),
-		"outbox_events":           int64(len(s.outboxEvents)),
-		"audit_events":            int64(len(s.auditEvents)),
-		"tenant_envelope_configs": int64(len(s.tenantEnvelopeConfigs)),
-		"cluster_state":           1, // single-row table (cluster epoch)
-		"nonce_counters":          int64(len(s.nonceCounter)),
-		"idempotency_keys":        int64(len(s.idempotency)),
-		"audit_chain_heads":       int64(len(s.auditChainHeads)),
-		"attestation_challenges":  int64(len(s.attestationChallenges)),
-		"attestation_reports":     int64(len(s.attestationReports)),
-		"attestation_baselines":   int64(len(s.attestationBaselines)),
+	now := time.Now().UTC()
+	tables := []repository.DatabaseTableStats{
+		{Name: "tenants", EstimatedRows: int64(len(s.tenants))},
+		{Name: "keys", EstimatedRows: int64(len(s.keys))},
+		{Name: "key_versions", EstimatedRows: int64(len(s.keyVersions))},
+		{Name: "crk_versions", EstimatedRows: int64(len(s.crkVersions))},
+		{Name: "crk_node_envelopes", EstimatedRows: int64(len(s.crkNodeEnvelopes))},
+		{Name: "nodes", EstimatedRows: int64(len(s.nodes))},
+		{Name: "dek_leases", EstimatedRows: int64(len(s.dekLeases))},
+		{Name: "nonce_leases", EstimatedRows: int64(len(s.nonceLeases))},
+		{Name: "lifecycle_jobs", EstimatedRows: int64(len(s.lifecycleJobs))},
+		{Name: "outbox_events", EstimatedRows: int64(len(s.outboxEvents))},
+		{Name: "audit_events", EstimatedRows: int64(len(s.auditEvents))},
+		{Name: "tenant_envelope_configs", EstimatedRows: int64(len(s.tenantEnvelopeConfigs))},
+		{Name: "cluster_state", EstimatedRows: 1},
+		{Name: "nonce_counters", EstimatedRows: int64(len(s.nonceCounter))},
+		{Name: "idempotency_keys", EstimatedRows: int64(len(s.idempotency))},
+		{Name: "audit_chain_heads", EstimatedRows: int64(len(s.auditChainHeads))},
+		{Name: "attestation_challenges", EstimatedRows: int64(len(s.attestationChallenges))},
+		{Name: "attestation_reports", EstimatedRows: int64(len(s.attestationReports))},
+		{Name: "attestation_baselines", EstimatedRows: int64(len(s.attestationBaselines))},
+	}
+	for i := range tables {
+		tables[i].StatsUpdatedAt = now
+	}
+
+	integrity := repository.DatabaseIntegrityStats{}
+	for _, version := range s.keyVersions {
+		if _, ok := s.keys[version.KeyID]; !ok {
+			integrity.OrphanKeyVersions++
+		}
+		if key := s.keys[version.KeyID]; key != nil && key.Status == "DESTROYED" && (len(version.WrappedDEK) > 0 || len(version.WrapMetadata) > 0) {
+			integrity.DestroyedMaterialRows++
+		}
+	}
+	for _, lease := range s.dekLeases {
+		if !lease.Revoked && !lease.ExpiresAt.After(now) {
+			integrity.ExpiredActiveDEKLeases++
+		}
+	}
+	for _, lease := range s.nonceLeases {
+		if lease.Status == "ACTIVE" && !lease.ExpiresAt.After(now) {
+			integrity.ExpiredActiveNonceLeases++
+		}
+	}
+
+	return &repository.DatabaseDiagnostics{
+		ObservedAt: now,
+		Role:       "memory",
+		Schema:     repository.DatabaseSchemaStats{Current: 0, Expected: 0},
+		Protection: repository.DatabaseProtectionStats{BackupStatus: "not_applicable"},
+		Integrity:  integrity,
+		Tables:     tables,
+		Unavailable: []string{"capacity", "workload", "replication"},
 	}, nil
 }
 

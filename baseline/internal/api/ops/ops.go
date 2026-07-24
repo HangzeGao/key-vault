@@ -269,7 +269,7 @@ func (h *Handler) getHealth(w http.ResponseWriter, r *http.Request) {
 		dbStatus = "degraded"
 		dbSummary = "ping failed"
 		dbDetail["connection"] = "unreachable"
-		checks["db"] = healthStatus{Status: dbStatus, Summary: dbSummary, Error: dbErr.Error(), Detail: dbDetail}
+		checks["db"] = healthStatus{Status: dbStatus, Summary: dbSummary, Error: "DB_UNREACHABLE", Detail: dbDetail}
 		overall = "degraded"
 	} else {
 		if h.cfg.Database.Driver == "memory" {
@@ -360,86 +360,256 @@ func (h *Handler) getHealth(w http.ResponseWriter, r *http.Request) {
 
 // --- DB Status ---
 
+type dbConnectionStatus struct {
+	Status    string `json:"status"`
+	Reason    string `json:"reason,omitempty"`
+	LatencyMS int64  `json:"latency_ms"`
+}
+
+type dbPoolStatus struct {
+	Max               int32 `json:"max"`
+	Total             int32 `json:"total"`
+	Acquired          int32 `json:"acquired"`
+	Idle              int32 `json:"idle"`
+	AcquireWaitEvents int64 `json:"acquire_wait_events"`
+}
+
+type dbSchemaStatus struct {
+	Status   string `json:"status"`
+	Current  int    `json:"current"`
+	Expected int    `json:"expected"`
+}
+
+type dbWorkloadStatus struct {
+	ActiveConnections   int64 `json:"active_connections"`
+	LockWaiters         int64 `json:"lock_waiters"`
+	LongTransactions    int64 `json:"long_transactions"`
+	OldestTransactionMS int64 `json:"oldest_transaction_ms"`
+}
+
+type dbRuntimeStatus struct {
+	Role     string           `json:"role"`
+	Pool     dbPoolStatus     `json:"pool"`
+	Schema   dbSchemaStatus   `json:"schema"`
+	Workload dbWorkloadStatus `json:"workload"`
+}
+
+type dbTableStatus struct {
+	Name           string     `json:"name"`
+	EstimatedRows  int64      `json:"estimated_rows"`
+	TableBytes     int64      `json:"table_bytes"`
+	IndexBytes     int64      `json:"index_bytes"`
+	StatsUpdatedAt *time.Time `json:"stats_updated_at,omitempty"`
+}
+
+type dbCapacityStatus struct {
+	DatabaseBytes int64           `json:"database_bytes"`
+	Tables        []dbTableStatus `json:"tables"`
+}
+
+type dbProtectionStatus struct {
+	ReplicaCount     int64  `json:"replica_count"`
+	ReplicationLagMS int64  `json:"replication_lag_ms"`
+	BackupStatus     string `json:"backup_status"`
+}
+
+type dbIntegrityStatus struct {
+	Status                   string `json:"status"`
+	OrphanKeyVersions        int64  `json:"orphan_key_versions"`
+	DestroyedMaterialRows    int64  `json:"destroyed_material_rows"`
+	ExpiredActiveDEKLeases   int64  `json:"expired_active_dek_leases"`
+	ExpiredActiveNonceLeases int64  `json:"expired_active_nonce_leases"`
+}
+
+type dbBacklogStatus struct {
+	LifecycleFailed  int `json:"lifecycle_failed"`
+	LifecyclePending int `json:"lifecycle_pending"`
+	OutboxPending    int `json:"outbox_pending"`
+}
+
+type dbKeyInventory struct {
+	Scope     string         `json:"scope"`
+	Total     int            `json:"total"`
+	ByStatus  map[string]int `json:"by_status"`
+	BySuite   map[string]int `json:"by_suite"`
+	ByPurpose map[string]int `json:"by_purpose"`
+}
+
+type dbCRKConsistency struct {
+	LatestVersion uint32 `json:"latest_version,omitempty"`
+	Status        string `json:"status,omitempty"`
+	DigestValid   *bool  `json:"digest_valid,omitempty"`
+	EnvelopeBytes int    `json:"envelope_bytes,omitempty"`
+}
+
+type dbStatusResponse struct {
+	Driver         string             `json:"driver"`
+	Status         string             `json:"status"`
+	ObservedAt     time.Time          `json:"observed_at"`
+	Connected      bool               `json:"connected"`
+	Connection     dbConnectionStatus `json:"connection"`
+	Runtime        dbRuntimeStatus    `json:"runtime"`
+	Capacity       dbCapacityStatus   `json:"capacity"`
+	DataProtection dbProtectionStatus `json:"data_protection"`
+	Integrity      dbIntegrityStatus  `json:"integrity"`
+	Backlog        dbBacklogStatus    `json:"backlog"`
+	KeyInventory   dbKeyInventory     `json:"key_inventory"`
+	CRKConsistency dbCRKConsistency   `json:"crk_consistency"`
+	ClusterEpoch   uint64             `json:"cluster_epoch,omitempty"`
+	Unavailable    []string           `json:"unavailable,omitempty"`
+}
+
 func (h *Handler) getDBStatus(w http.ResponseWriter, r *http.Request) {
 	if !requireAnyScope(w, r, "ops:read", "ops:repair", "ops:breakglass") {
 		return
 	}
 	ctx := r.Context()
-	status := map[string]any{
-		"driver": h.cfg.Database.Driver,
+	now := time.Now().UTC()
+	response := dbStatusResponse{
+		Driver:     h.cfg.Database.Driver,
+		Status:     "degraded",
+		ObservedAt: now,
+		Connection: dbConnectionStatus{Status: "degraded", Reason: "DB_UNREACHABLE"},
+		Integrity:  dbIntegrityStatus{Status: "unknown"},
+		KeyInventory: dbKeyInventory{
+			Scope: "global", ByStatus: map[string]int{}, BySuite: map[string]int{}, ByPurpose: map[string]int{},
+		},
 	}
 
-	// Connection health.
-	pingErr := h.store.Ping(ctx)
-	status["connected"] = pingErr == nil
-	if pingErr != nil {
-		status["error"] = pingErr.Error()
+	diagnostics, err := h.store.DatabaseDiagnostics(ctx)
+	if err != nil {
+		writeJSON(w, 200, response)
+		return
+	}
+	response.Connected = true
+	response.Status = "ok"
+	response.ObservedAt = diagnostics.ObservedAt
+	response.Connection = dbConnectionStatus{Status: "ok", LatencyMS: diagnostics.Latency.Milliseconds()}
+	response.Runtime = dbRuntimeStatus{
+		Role: diagnostics.Role,
+		Pool: dbPoolStatus{
+			Max: diagnostics.Pool.Max, Total: diagnostics.Pool.Total, Acquired: diagnostics.Pool.Acquired,
+			Idle: diagnostics.Pool.Idle, AcquireWaitEvents: diagnostics.Pool.AcquireWaitEvents,
+		},
+		Schema: dbSchemaStatus{Status: "ok", Current: diagnostics.Schema.Current, Expected: diagnostics.Schema.Expected},
+		Workload: dbWorkloadStatus{
+			ActiveConnections:   diagnostics.Workload.ActiveConnections,
+			LockWaiters:         diagnostics.Workload.LockWaiters,
+			LongTransactions:    diagnostics.Workload.LongTransactions,
+			OldestTransactionMS: diagnostics.Workload.OldestTransaction.Milliseconds(),
+		},
+	}
+	response.Capacity.DatabaseBytes = diagnostics.Storage.DatabaseBytes
+	for _, table := range diagnostics.Tables {
+		var statsUpdatedAt *time.Time
+		if !table.StatsUpdatedAt.IsZero() {
+			observed := table.StatsUpdatedAt
+			statsUpdatedAt = &observed
+		}
+		response.Capacity.Tables = append(response.Capacity.Tables, dbTableStatus{
+			Name: table.Name, EstimatedRows: table.EstimatedRows, TableBytes: table.TableBytes,
+			IndexBytes: table.IndexBytes, StatsUpdatedAt: statsUpdatedAt,
+		})
+	}
+	response.DataProtection = dbProtectionStatus{
+		ReplicaCount:     diagnostics.Protection.ReplicaCount,
+		ReplicationLagMS: diagnostics.Protection.ReplicationLag.Milliseconds(),
+		BackupStatus:     diagnostics.Protection.BackupStatus,
+	}
+	response.Integrity = dbIntegrityStatus{
+		Status:                   "ok",
+		OrphanKeyVersions:        diagnostics.Integrity.OrphanKeyVersions,
+		DestroyedMaterialRows:    diagnostics.Integrity.DestroyedMaterialRows,
+		ExpiredActiveDEKLeases:   diagnostics.Integrity.ExpiredActiveDEKLeases,
+		ExpiredActiveNonceLeases: diagnostics.Integrity.ExpiredActiveNonceLeases,
+	}
+	response.Unavailable = diagnostics.Unavailable
+
+	if h.cfg.Database.Driver == "memory" {
+		response.Status = "warn"
+	}
+	if diagnostics.Latency > 500*time.Millisecond {
+		response.Status = "degraded"
+		response.Connection.Status = "degraded"
+		response.Connection.Reason = "DB_LATENCY_CRITICAL"
+	} else if diagnostics.Latency > 100*time.Millisecond {
+		response.Status = "warn"
+		response.Connection.Status = "warn"
+		response.Connection.Reason = "DB_LATENCY_HIGH"
+	}
+	if diagnostics.Schema.Current != diagnostics.Schema.Expected {
+		response.Status = "degraded"
+		response.Runtime.Schema.Status = "degraded"
+	}
+	if diagnostics.Pool.Max > 0 && diagnostics.Pool.Acquired*100/diagnostics.Pool.Max >= 80 && response.Status == "ok" {
+		response.Status = "warn"
+	}
+	if diagnostics.Workload.LockWaiters > 0 || diagnostics.Workload.LongTransactions > 0 {
+		if response.Status == "ok" {
+			response.Status = "warn"
+		}
+	}
+	if diagnostics.Integrity.OrphanKeyVersions > 0 || diagnostics.Integrity.DestroyedMaterialRows > 0 {
+		response.Status = "degraded"
+		response.Integrity.Status = "degraded"
+	} else if diagnostics.Integrity.ExpiredActiveDEKLeases > 0 || diagnostics.Integrity.ExpiredActiveNonceLeases > 0 {
+		if response.Status == "ok" {
+			response.Status = "warn"
+		}
+		response.Integrity.Status = "warn"
+	}
+	if len(diagnostics.Unavailable) > 0 && h.cfg.Database.Driver != "memory" && response.Status == "ok" {
+		response.Status = "warn"
 	}
 
 	// Cluster epoch.
 	if epoch, err := h.store.ClusterEpoch(ctx); err == nil {
-		status["cluster_epoch"] = epoch
-	}
-
-	// Table sizes.
-	if sizes, err := h.store.TableSizes(ctx); err == nil {
-		status["table_sizes"] = sizes
+		response.ClusterEpoch = epoch
 	}
 
 	// Backlog.
-	backlog := map[string]any{}
 	if jobs, err := h.store.ListLifecycleJobs(ctx, "FAILED", 1000); err == nil {
-		backlog["lifecycle_failed"] = len(jobs)
+		response.Backlog.LifecycleFailed = len(jobs)
 	}
 	if jobs, err := h.store.ListLifecycleJobs(ctx, "PENDING", 1000); err == nil {
-		backlog["lifecycle_pending"] = len(jobs)
+		response.Backlog.LifecyclePending = len(jobs)
 	}
 	if events, err := h.store.ListOutboxEvents(ctx, "PENDING", 1000); err == nil {
-		backlog["outbox_pending"] = len(events)
+		response.Backlog.OutboxPending = len(events)
 	}
-	status["backlog"] = backlog
 
 	// Ops tokens cannot use the management-plane /keys endpoint. Expose only
 	// aggregate inventory here: no names, IDs, tags, payloads, or key material.
-	keyInventory := map[string]any{
-		"scope": "global", "total": 0,
-		"by_status": map[string]int{}, "by_suite": map[string]int{}, "by_purpose": map[string]int{},
-	}
 	if keys, err := h.store.ListAllKeys(ctx); err == nil {
-		byStatus := keyInventory["by_status"].(map[string]int)
-		bySuite := keyInventory["by_suite"].(map[string]int)
-		byPurpose := keyInventory["by_purpose"].(map[string]int)
-		keyInventory["total"] = len(keys)
+		response.KeyInventory.Total = len(keys)
 		for _, key := range keys {
 			keyStatus := key.Status
 			if keyStatus == "ACTIVE" && !key.ExpiresAt.IsZero() && !time.Now().UTC().Before(key.ExpiresAt) {
 				keyStatus = "EXPIRED"
 			}
-			byStatus[keyStatus]++
-			bySuite[key.SuiteID]++
-			byPurpose[key.Purpose]++
+			response.KeyInventory.ByStatus[keyStatus]++
+			response.KeyInventory.BySuite[key.SuiteID]++
+			response.KeyInventory.ByPurpose[key.Purpose]++
 		}
 	}
-	status["key_inventory"] = keyInventory
 
 	// CRK envelope consistency.
-	crkConsistency := map[string]any{}
 	if latest, err := h.store.GetLatestCRKVersion(ctx); err == nil {
-		crkConsistency["latest_version"] = latest.Version
-		crkConsistency["latest_version_id"] = latest.ID
-		crkConsistency["status"] = latest.Status
+		response.CRKConsistency.LatestVersion = latest.Version
+		response.CRKConsistency.Status = latest.Status
 		// Check envelope for default node.
 		if rec, env, ok := h.tryLoadCRKEnvelope(ctx, latest.ID, "node-bootstrap"); ok {
 			expected := crkAADDigest(env)
-			crkConsistency["digest_valid"] = env.CRKAADDigest == expected
-			crkConsistency["envelope_bytes"] = len(rec.Envelope)
+			valid := env.CRKAADDigest == expected
+			response.CRKConsistency.DigestValid = &valid
+			response.CRKConsistency.EnvelopeBytes = len(rec.Envelope)
 		} else {
-			crkConsistency["digest_valid"] = false
+			valid := false
+			response.CRKConsistency.DigestValid = &valid
 		}
 	}
-	status["crk_consistency"] = crkConsistency
 
-	writeJSON(w, 200, status)
+	writeJSON(w, 200, response)
 }
 
 // --- CRK Envelope (migrated from baselineapi) ---

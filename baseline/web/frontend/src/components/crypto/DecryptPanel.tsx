@@ -10,15 +10,15 @@ import type { DecryptResponse } from "../../lib/types";
 
 interface Props {
   formatOptions: string[];
-  seedCiphertext?: string;
+  seedEnvelope?: string;
   seedAAD?: string;
   seedFormat?: string;
   seedVersion?: number; // 用于触发重新初始化
 }
 
-export function DecryptPanel({ formatOptions, seedCiphertext, seedAAD, seedFormat, seedVersion }: Props) {
+export function DecryptPanel({ formatOptions, seedEnvelope, seedAAD, seedFormat, seedVersion }: Props) {
   const { tenantId } = useAuth();
-  const [decCiphertext, setDecCiphertext] = useState("");
+  const [decEnvelope, setDecEnvelope] = useState("");
   const [decAAD, setDecAAD] = useState("");
   const [decEnvelopeFormat, setDecEnvelopeFormat] = useState("");
   const [decResult, setDecResult] = useState<DecryptResponse | null>(null);
@@ -26,7 +26,7 @@ export function DecryptPanel({ formatOptions, seedCiphertext, seedAAD, seedForma
   // 当 seedVersion 变化时（Encrypt → Send to decrypt），同步初始值
   useEffect(() => {
     if (seedVersion !== undefined && seedVersion > 0) {
-      if (seedCiphertext !== undefined) setDecCiphertext(seedCiphertext);
+      if (seedEnvelope !== undefined) setDecEnvelope(seedEnvelope);
       if (seedAAD !== undefined) setDecAAD(seedAAD);
       if (seedFormat !== undefined) setDecEnvelopeFormat(seedFormat);
       setDecResult(null);
@@ -35,13 +35,18 @@ export function DecryptPanel({ formatOptions, seedCiphertext, seedAAD, seedForma
   }, [seedVersion]);
 
   const decMut = useMutation({
-    mutationFn: () =>
-      api.post<DecryptResponse>(apiPaths.crypto.decrypt, {
+    mutationFn: () => {
+      const envelope = JSON.parse(decEnvelope);
+      if (!envelope || Array.isArray(envelope) || typeof envelope !== "object") {
+        throw new Error("envelope must be a JSON object");
+      }
+      return api.post<DecryptResponse>(apiPaths.crypto.decrypt, {
+        ...envelope,
         tenant_id: tenantId,
-        ciphertext: decCiphertext,
         aad_b64: decAAD ? toBase64(decAAD) : undefined,
         envelope_format: decEnvelopeFormat || undefined,
-      }),
+      });
+    },
     onSuccess: (r) => { setDecResult(r); showToast("decrypted", "success"); },
     onError: (e: Error) => showToast(e.message, "error"),
   });
@@ -50,12 +55,12 @@ export function DecryptPanel({ formatOptions, seedCiphertext, seedAAD, seedForma
     <Panel title="Decrypt">
       <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
         <div>
-          <label className="input-label">Ciphertext (base64)</label>
+          <label className="input-label">Envelope JSON</label>
           <textarea
             className="textarea"
-            value={decCiphertext}
-            onChange={(e) => setDecCiphertext(e.target.value)}
-            placeholder="paste base64 envelope..."
+            value={decEnvelope}
+            onChange={(e) => setDecEnvelope(e.target.value)}
+            placeholder="paste envelope JSON..."
             style={{ minHeight: 100 }}
           />
         </div>
@@ -78,7 +83,7 @@ export function DecryptPanel({ formatOptions, seedCiphertext, seedAAD, seedForma
             ))}
           </select>
         </div>
-        <button className="btn btn-primary" disabled={!decCiphertext || decMut.isPending} onClick={() => decMut.mutate()}>
+        <button className="btn btn-primary" disabled={!decEnvelope || decMut.isPending} onClick={() => decMut.mutate()}>
           <Unlock size={14} /> {decMut.isPending ? "Decrypting..." : "Decrypt"}
         </button>
         {decResult && (

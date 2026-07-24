@@ -2,12 +2,20 @@ package crypto
 
 import (
 	"bytes"
+	"context"
+	"time"
+
 	"github.com/kvlt/key-vault/internal/errorsx"
 	"testing"
 
+	"github.com/kvlt/key-vault/internal/crypto/aad"
 	"github.com/kvlt/key-vault/internal/crypto/aead"
 	"github.com/kvlt/key-vault/internal/crypto/envelope"
+	"github.com/kvlt/key-vault/internal/domain/policy"
+	"github.com/kvlt/key-vault/internal/repository/memory"
 	"github.com/kvlt/key-vault/internal/repository/models"
+	"github.com/kvlt/key-vault/internal/resolver/keyresolver"
+	"github.com/kvlt/key-vault/internal/tpm/provider"
 )
 
 func TestEnvelopeProfileUsesTenantProfile(t *testing.T) {
@@ -123,11 +131,92 @@ func TestDetectEnvelopeProfileRejectsDisallowedBuiltinFormat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	cfg := &models.TenantEnvelopeConfig{AllowedFormats: []string{string(envelope.FormatKVLTBinaryV1)}}
+	cfg := &models.TenantEnvelopeConfig{AllowedFormats: []string{string(envelope.FormatConfigurableJSONV1)}}
 	_, _, err = detectEnvelopeProfile(registry, cfg, "", jsonBytes)
 	if errorsx.AsCode(err) != errorsx.CodePolicyDenied {
 		t.Fatalf("detect error code = %s, want %s", errorsx.AsCode(err), errorsx.CodePolicyDenied)
 	}
+}
+
+func TestEncryptWithoutKeyUsesDefaultECBKey(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	if err := store.UpsertTenant(ctx, &models.Tenant{ID: "t-default", Name: "Default", Status: "active"}); err != nil {
+		t.Fatalf("UpsertTenant: %v", err)
+	}
+	resolver := newTestResolver(t, ctx, store)
+	policies := policy.NewEngine()
+	if err := policies.Load(policy.DefaultPolicy()); err != nil {
+		t.Fatalf("Load policy: %v", err)
+	}
+	svc := New(store, resolver, policies, nil, 64*1024)
+
+	encrypted, err := svc.Encrypt(ctx, EncryptCommand{Plaintext: []byte("minimal payload"), PrincipalID: "tester"})
+	if err != nil {
+		t.Fatalf("Encrypt minimal: %v", err)
+	}
+	if encrypted.KeyID != defaultEncryptKeyID {
+		t.Fatalf("KeyID = %s, want %s", encrypted.KeyID, defaultEncryptKeyID)
+	}
+	if encrypted.SuiteID != defaultEncryptKeySuite {
+		t.Fatalf("SuiteID = %s, want %s", encrypted.SuiteID, defaultEncryptKeySuite)
+	}
+	env, err := envelope.DefaultRegistry().Parse(envelope.FormatJSONV1, encrypted.Ciphertext)
+	if err != nil {
+		t.Fatalf("Parse envelope: %v", err)
+	}
+	if env.SuiteID != aead.SuiteAES256ECB || len(env.Nonce) != 0 || len(env.Tag) != 0 {
+		t.Fatalf("unexpected default envelope suite/nonce/tag: %s %d %d", env.SuiteID, len(env.Nonce), len(env.Tag))
+	}
+
+	decrypted, err := svc.Decrypt(ctx, DecryptCommand{Ciphertext: encrypted.Ciphertext})
+	if err != nil {
+		t.Fatalf("Decrypt minimal: %v", err)
+	}
+	if string(decrypted.Plaintext) != "minimal payload" {
+		t.Fatalf("Plaintext = %q", decrypted.Plaintext)
+	}
+
+}
+
+func newTestResolver(t *testing.T, ctx context.Context, store *memory.Store) *keyresolver.Resolver {
+	t.Helper()
+	p, err := provider.NewSoftwareProvider(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewSoftwareProvider: %v", err)
+	}
+	r := keyresolver.New(p, "test-nrwk", time.Minute)
+	baselineDigest := []byte("baseline")
+	policyDigest := []byte("policy")
+	if err := r.Init(ctx, "cluster-1", "node-1", "data", baselineDigest, policyDigest); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	nrwk, err := p.EnsureNRWK(ctx, "test-nrwk")
+	if err != nil {
+		t.Fatalf("EnsureNRWK: %v", err)
+	}
+	crk := bytes.Repeat([]byte{0x42}, 32)
+	env, err := p.SealCRK(ctx, nrwk, crk, aad.CRKAAD{
+		ClusterID:      "cluster-1",
+		NodeID:         "node-1",
+		PlaneRole:      "data",
+		CRKVersion:     1,
+		NRWKName:       "test-nrwk",
+		BaselineDigest: baselineDigest,
+		PolicyDigest:   policyDigest,
+	})
+	if err != nil {
+		t.Fatalf("SealCRK: %v", err)
+	}
+	r.SetCRKEnvelope(env)
+	r.SetFetchDEKHook(func(ctx context.Context, keyVersionID string) ([]byte, []byte, error) {
+		kv, err := store.GetKeyVersion(ctx, keyVersionID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return kv.WrappedDEK, kv.WrapMetadata, nil
+	})
+	return r
 }
 
 func mustParseEnvelope(t *testing.T, b []byte) *envelope.Envelope {

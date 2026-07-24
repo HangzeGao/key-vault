@@ -39,14 +39,6 @@ type encryptReq struct {
 	Extensions     map[string]any `json:"extensions,omitempty"`
 }
 
-type encryptResp struct {
-	KeyID          string `json:"key_id"`
-	KeyVersion     uint32 `json:"key_version"`
-	SuiteID        string `json:"suite_id"`
-	Ciphertext     string `json:"ciphertext"` // base64 envelope
-	EnvelopeFormat string `json:"envelope_format"`
-}
-
 func (h *Handler) encrypt(w http.ResponseWriter, r *http.Request) {
 	p := middleware.PrincipalFromContext(r.Context())
 	if p == nil {
@@ -62,6 +54,9 @@ func (h *Handler) encrypt(w http.ResponseWriter, r *http.Request) {
 	if err := middleware.DecodeJSONStrict(body, &req); err != nil {
 		writeErr(w, 400, "BAD_REQUEST", "invalid json")
 		return
+	}
+	if req.TenantID == "" {
+		req.TenantID = p.TenantID
 	}
 	if p.TenantID != "" && req.TenantID != p.TenantID {
 		writeErr(w, 403, "PERMISSION_DENIED", "tenant mismatch")
@@ -98,18 +93,11 @@ func (h *Handler) encrypt(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, 200, encryptResp{
-		KeyID:          res.KeyID,
-		KeyVersion:     res.KeyVersion,
-		SuiteID:        res.SuiteID,
-		Ciphertext:     base64.StdEncoding.EncodeToString(res.Ciphertext),
-		EnvelopeFormat: res.EnvelopeFormat,
-	})
+	writeEnvelopeJSON(w, 200, res.Ciphertext)
 }
 
 type decryptReq struct {
 	TenantID       string `json:"tenant_id"`
-	Ciphertext     string `json:"ciphertext"` // base64 envelope
 	AADB64         string `json:"aad_b64,omitempty"`
 	EnvelopeFormat string `json:"envelope_format,omitempty"`
 }
@@ -121,21 +109,21 @@ type decryptResp struct {
 }
 
 type convertEnvelopeReq struct {
-	TenantID     string `json:"tenant_id"`
-	Ciphertext   string `json:"ciphertext"`
-	SourceFormat string `json:"source_format,omitempty"`
-	TargetFormat string `json:"target_format"`
+	TenantID     string          `json:"tenant_id"`
+	Envelope     json.RawMessage `json:"envelope"`
+	SourceFormat string          `json:"source_format,omitempty"`
+	TargetFormat string          `json:"target_format"`
 }
 
 type convertEnvelopeResp struct {
-	Ciphertext     string `json:"ciphertext"`
-	EnvelopeFormat string `json:"envelope_format"`
+	Envelope       json.RawMessage `json:"envelope"`
+	EnvelopeFormat string          `json:"envelope_format"`
 }
 
 type inspectEnvelopeReq struct {
-	TenantID     string `json:"tenant_id"`
-	Ciphertext   string `json:"ciphertext"`
-	SourceFormat string `json:"source_format,omitempty"`
+	TenantID     string          `json:"tenant_id"`
+	Envelope     json.RawMessage `json:"envelope"`
+	SourceFormat string          `json:"source_format,omitempty"`
 }
 
 func (h *Handler) inspectEnvelope(w http.ResponseWriter, r *http.Request) {
@@ -153,16 +141,18 @@ func (h *Handler) inspectEnvelope(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "BAD_REQUEST", "invalid json")
 		return
 	}
+	if req.TenantID == "" {
+		req.TenantID = p.TenantID
+	}
 	if p.TenantID != "" && req.TenantID != p.TenantID {
 		writeErr(w, 403, "PERMISSION_DENIED", "tenant mismatch")
 		return
 	}
-	ct, err := base64.StdEncoding.DecodeString(req.Ciphertext)
-	if err != nil {
-		writeErr(w, 400, "BAD_REQUEST", "ciphertext not base64")
+	if len(req.Envelope) == 0 {
+		writeErr(w, 400, "BAD_REQUEST", "envelope is required")
 		return
 	}
-	res, err := h.svc.InspectEnvelope(r.Context(), crypto.InspectEnvelopeCommand{TenantID: req.TenantID, Ciphertext: ct, SourceFormat: req.SourceFormat})
+	res, err := h.svc.InspectEnvelope(r.Context(), crypto.InspectEnvelopeCommand{TenantID: req.TenantID, Ciphertext: req.Envelope, SourceFormat: req.SourceFormat})
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -185,21 +175,23 @@ func (h *Handler) convertEnvelope(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "BAD_REQUEST", "invalid json")
 		return
 	}
+	if req.TenantID == "" {
+		req.TenantID = p.TenantID
+	}
 	if p.TenantID != "" && req.TenantID != p.TenantID {
 		writeErr(w, 403, "PERMISSION_DENIED", "tenant mismatch")
 		return
 	}
-	ct, err := base64.StdEncoding.DecodeString(req.Ciphertext)
-	if err != nil {
-		writeErr(w, 400, "BAD_REQUEST", "ciphertext not base64")
+	if len(req.Envelope) == 0 {
+		writeErr(w, 400, "BAD_REQUEST", "envelope is required")
 		return
 	}
-	res, err := h.svc.ConvertEnvelope(r.Context(), crypto.ConvertEnvelopeCommand{TenantID: req.TenantID, Ciphertext: ct, SourceFormat: req.SourceFormat, TargetFormat: req.TargetFormat, PrincipalID: p.ID})
+	res, err := h.svc.ConvertEnvelope(r.Context(), crypto.ConvertEnvelopeCommand{TenantID: req.TenantID, Ciphertext: req.Envelope, SourceFormat: req.SourceFormat, TargetFormat: req.TargetFormat, PrincipalID: p.ID})
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, 200, convertEnvelopeResp{Ciphertext: base64.StdEncoding.EncodeToString(res.Ciphertext), EnvelopeFormat: res.EnvelopeFormat})
+	writeJSON(w, 200, convertEnvelopeResp{Envelope: res.Ciphertext, EnvelopeFormat: res.EnvelopeFormat})
 }
 
 func (h *Handler) decrypt(w http.ResponseWriter, r *http.Request) {
@@ -212,19 +204,17 @@ func (h *Handler) decrypt(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 403, "PERMISSION_DENIED", "missing scope crypto:decrypt")
 		return
 	}
-	body := middleware.BodyFromContext(r.Context())
 	var req decryptReq
-	if err := middleware.DecodeJSONStrict(body, &req); err != nil {
+	body := middleware.BodyFromContext(r.Context())
+	if err := json.Unmarshal(body, &req); err != nil {
 		writeErr(w, 400, "BAD_REQUEST", "invalid json")
 		return
 	}
+	if req.TenantID == "" {
+		req.TenantID = p.TenantID
+	}
 	if p.TenantID != "" && req.TenantID != p.TenantID {
 		writeErr(w, 403, "PERMISSION_DENIED", "tenant mismatch")
-		return
-	}
-	ct, err := base64.StdEncoding.DecodeString(req.Ciphertext)
-	if err != nil {
-		writeErr(w, 400, "BAD_REQUEST", "ciphertext not base64")
 		return
 	}
 	aadBytes, err := decodeOptionalBase64(req.AADB64)
@@ -234,7 +224,7 @@ func (h *Handler) decrypt(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.svc.Decrypt(r.Context(), crypto.DecryptCommand{
 		TenantID:       req.TenantID,
-		Ciphertext:     ct,
+		Ciphertext:     body,
 		AAD:            aadBytes,
 		PrincipalID:    p.ID,
 		EnvelopeFormat: req.EnvelopeFormat,
@@ -248,6 +238,16 @@ func (h *Handler) decrypt(w http.ResponseWriter, r *http.Request) {
 		KeyVersion: res.KeyVersion,
 		Plaintext:  base64.StdEncoding.EncodeToString(res.Plaintext),
 	})
+}
+
+func writeEnvelopeJSON(w http.ResponseWriter, status int, envelopeJSON []byte) {
+	if !json.Valid(envelopeJSON) {
+		writeErr(w, 500, "INTERNAL", "internal error")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(envelopeJSON)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

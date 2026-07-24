@@ -1,6 +1,7 @@
-// Package envelope implements the Envelope v1 binary format per design §8.3.
+// Package envelope implements the internal canonical Envelope v1 encoding used
+// for authentication boundaries and normalized parsing.
 //
-// Wire layout (big-endian):
+// Internal canonical layout (big-endian):
 //
 //	+----------------------+---------+
 //	| magic                | 4 bytes | "KVLT"
@@ -137,7 +138,7 @@ func BuildAEADAAD(hdr ProtectedHeader, callerAAD []byte) []byte {
 }
 
 // encodeProtectedHeader serializes the protected header in a fixed layout.
-// Order matches the wire format (excluding aad_hash).
+// Order matches the internal canonical layout (excluding aad_hash).
 func encodeProtectedHeader(h ProtectedHeader) []byte {
 	buf := make([]byte, 0, BaseHeaderSize)
 	buf = append(buf, h.Magic[:]...)
@@ -163,7 +164,7 @@ func encodeProtectedHeader(h ProtectedHeader) []byte {
 }
 
 // Seal builds a complete Envelope v1 byte slice from plaintext + caller AAD.
-// It generates the AAD hash, encrypts, and assembles the wire format.
+// It generates the AAD hash, encrypts, and assembles the internal canonical encoding.
 // The caller MUST supply a unique nonce (from the nonce lease).
 func Seal(suite aead.SuiteID, key []byte, keyID string, keyVersion uint32,
 	policyVersion uint32, nonce, plaintext []byte, callerAAD []byte) ([]byte, error) {
@@ -208,7 +209,7 @@ func Seal(suite aead.SuiteID, key []byte, keyID string, keyVersion uint32,
 	return assemble(hdr, aadHash, []byte(keyID), nonce, ciphertext, tag)
 }
 
-// assemble concatenates the wire format. Validates lengths.
+// assemble concatenates the internal canonical encoding. Validates lengths.
 func assemble(hdr ProtectedHeader, aadHash [32]byte, keyID, nonce, ciphertext, tag []byte) ([]byte, error) {
 	if int(hdr.KeyIDLen) != len(keyID) {
 		return nil, fmt.Errorf("envelope: key_id_len mismatch")

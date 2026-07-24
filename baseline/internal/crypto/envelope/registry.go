@@ -18,7 +18,6 @@ import (
 type FormatID string
 
 const (
-	FormatKVLTBinaryV1       FormatID = "kvlt-binary-v1"
 	FormatJSONV1             FormatID = "json-v1"
 	FormatConfigurableJSONV1 FormatID = "configurable-json-v1"
 )
@@ -61,7 +60,6 @@ func NewRegistry(codecs ...Codec) *Registry {
 // DefaultRegistry returns a registry with all built-in codecs registered.
 func DefaultRegistry() *Registry {
 	return NewRegistry(
-		binaryCodec{},
 		jsonCodec{},
 		configurableJSONCodec{},
 	)
@@ -75,7 +73,6 @@ func (r *Registry) SetDescription(id FormatID, desc string) {
 // ListFormats returns descriptions of all registered formats.
 func (r *Registry) ListFormats() []FormatDescription {
 	defaults := map[FormatID]string{
-		FormatKVLTBinaryV1:       "Native binary format with KVLT magic header, most efficient for internal systems",
 		FormatJSONV1:             "JSON object with base64-encoded fields, for REST API integration and debugging",
 		FormatConfigurableJSONV1: "Profile-driven JSON adapter for tenant and partner envelope formats",
 	}
@@ -88,8 +85,6 @@ func (r *Registry) ListFormats() []FormatDescription {
 		matchRule := "unknown"
 		if c, ok := r.codecs[id]; ok {
 			switch id {
-			case FormatKVLTBinaryV1:
-				matchRule = "first 4 bytes == 'KVLT'"
 			case FormatJSONV1:
 				matchRule = "first non-whitespace byte == '{'"
 			case FormatConfigurableJSONV1:
@@ -137,7 +132,7 @@ func (r *Registry) Encode(id FormatID, env *Envelope) ([]byte, error) {
 }
 func (r *Registry) EncodeWithProfile(profile *FormatProfile, env *Envelope, ctx RenderContext) ([]byte, error) {
 	if profile == nil {
-		profile = BuiltinProfile(FormatKVLTBinaryV1)
+		profile = BuiltinProfile(FormatJSONV1)
 	}
 	adapterID := profile.Adapter
 	if adapterID == "" {
@@ -196,30 +191,16 @@ func (r *Registry) OpenWithProfile(profile *FormatProfile, b, key, callerAAD []b
 	return Open(raw, key, callerAAD)
 }
 
-type binaryCodec struct{}
-
-func (binaryCodec) ID() FormatID                       { return FormatKVLTBinaryV1 }
-func (binaryCodec) Match(b []byte) bool                { return len(b) >= 4 && bytes.Equal(b[:4], Magic[:]) }
-func (binaryCodec) Encode(e *Envelope) ([]byte, error) { return e.Encode() }
-func (binaryCodec) Decode(b []byte) (*Envelope, error) { return Parse(b) }
-func (c binaryCodec) EncodeWithProfile(e *Envelope, _ *FormatProfile, _ RenderContext) ([]byte, error) {
-	return c.Encode(e)
-}
-func (c binaryCodec) DecodeWithProfile(b []byte, _ *FormatProfile) (*Envelope, ExtensionBag, error) {
-	env, err := c.Decode(b)
-	return env, nil, err
-}
-
 type jsonEnvelope struct {
 	Version       uint8  `json:"version"`
 	Flags         uint16 `json:"flags"`
-	SuiteID       uint16 `json:"suite_id"`
+	SuiteID       string `json:"suite_id"`
 	KeyID         string `json:"key_id"`
 	KeyVersion    uint32 `json:"key_version"`
 	PolicyVersion uint32 `json:"policy_version"`
-	Nonce         string `json:"nonce"`
+	Nonce         string `json:"nonce,omitempty"`
 	Ciphertext    string `json:"ciphertext"`
-	Tag           string `json:"tag"`
+	Tag           string `json:"tag,omitempty"`
 	AADHash       string `json:"aad_hash,omitempty"`
 }
 type jsonCodec struct{}
@@ -229,7 +210,13 @@ func (jsonCodec) Match(b []byte) bool {
 	return len(bytes.TrimSpace(b)) > 0 && bytes.TrimSpace(b)[0] == '{'
 }
 func (jsonCodec) Encode(e *Envelope) ([]byte, error) {
-	out := jsonEnvelope{Version: e.Version, Flags: e.Flags, SuiteID: uint16(e.SuiteID), KeyID: string(e.KeyID), KeyVersion: e.KeyVersion, PolicyVersion: e.PolicyVersion, Nonce: base64.RawStdEncoding.EncodeToString(e.Nonce), Ciphertext: base64.RawStdEncoding.EncodeToString(e.Ciphertext), Tag: base64.RawStdEncoding.EncodeToString(e.Tag)}
+	out := jsonEnvelope{Version: e.Version, Flags: e.Flags, SuiteID: suiteName(e.SuiteID), KeyID: string(e.KeyID), KeyVersion: e.KeyVersion, PolicyVersion: e.PolicyVersion, Ciphertext: base64.RawStdEncoding.EncodeToString(e.Ciphertext)}
+	if e.SuiteID.NonceLen() > 0 {
+		out.Nonce = base64.RawStdEncoding.EncodeToString(e.Nonce)
+	}
+	if e.SuiteID.TagLen() > 0 {
+		out.Tag = base64.RawStdEncoding.EncodeToString(e.Tag)
+	}
 	if e.SuiteID.AuthenticatesAAD() {
 		out.AADHash = base64.RawStdEncoding.EncodeToString(e.AADHash[:])
 	}
@@ -244,10 +231,21 @@ func (jsonCodec) Decode(b []byte) (*Envelope, error) {
 	if d.Decode(&v) != nil || d.Decode(&struct{}{}) != io.EOF || v.Version != Version1 {
 		return nil, ErrInvalid
 	}
-	n, e1 := base64.RawStdEncoding.DecodeString(v.Nonce)
 	c, e2 := base64.RawStdEncoding.DecodeString(v.Ciphertext)
-	t, e3 := base64.RawStdEncoding.DecodeString(v.Tag)
-	suite := aead.SuiteID(v.SuiteID)
+	suite, err := suiteIDFromJSON(v.SuiteID)
+	if err != nil {
+		return nil, ErrInvalid
+	}
+	var n []byte
+	var e1 error
+	if suite.NonceLen() > 0 || v.Nonce != "" {
+		n, e1 = base64.RawStdEncoding.DecodeString(v.Nonce)
+	}
+	var t []byte
+	var e3 error
+	if suite.TagLen() > 0 || v.Tag != "" {
+		t, e3 = base64.RawStdEncoding.DecodeString(v.Tag)
+	}
 	var h []byte
 	var e4 error
 	if suite.AuthenticatesAAD() {
@@ -345,7 +343,28 @@ func (configurableJSONCodec) EncodeWithProfile(e *Envelope, profile *FormatProfi
 }
 
 func sourceOptionalForEnvelope(e *Envelope, source string) bool {
-	return source == "core.aad_hash" && e != nil && !e.SuiteID.AuthenticatesAAD()
+	if e == nil {
+		return false
+	}
+	switch source {
+	case "core.nonce":
+		return e.SuiteID.NonceLen() == 0
+	case "core.tag":
+		return e.SuiteID.TagLen() == 0
+	case "core.aad_hash":
+		return !e.SuiteID.AuthenticatesAAD()
+	default:
+		return false
+	}
+}
+
+func isSuiteConditionalCoreSource(source string) bool {
+	switch source {
+	case "core.nonce", "core.tag", "core.aad_hash":
+		return true
+	default:
+		return false
+	}
 }
 func (configurableJSONCodec) DecodeWithProfile(b []byte, profile *FormatProfile) (*Envelope, ExtensionBag, error) {
 	var obj map[string]any
@@ -364,7 +383,7 @@ func (configurableJSONCodec) DecodeWithProfile(b []byte, profile *FormatProfile)
 	for _, m := range mappings {
 		v, ok := getJSONPath(obj, m.Path)
 		if !ok {
-			if m.Source == "core.aad_hash" {
+			if isSuiteConditionalCoreSource(m.Source) {
 				continue
 			}
 			if m.Required {
@@ -407,7 +426,7 @@ func renderMappingValue(e *Envelope, m FieldMapping, ctx RenderContext) (any, bo
 	case "core.flags":
 		value = e.Flags
 	case "core.suite_id":
-		value = uint16(e.SuiteID)
+		value = suiteName(e.SuiteID)
 	case "core.key_id":
 		value = string(e.KeyID)
 	case "core.key_version":
@@ -415,10 +434,16 @@ func renderMappingValue(e *Envelope, m FieldMapping, ctx RenderContext) (any, bo
 	case "core.policy_version":
 		value = e.PolicyVersion
 	case "core.nonce":
+		if e.SuiteID.NonceLen() == 0 {
+			return nil, false, nil
+		}
 		value = e.Nonce
 	case "core.ciphertext":
 		value = e.Ciphertext
 	case "core.tag":
+		if e.SuiteID.TagLen() == 0 {
+			return nil, false, nil
+		}
 		value = e.Tag
 	case "core.aad_hash":
 		if !e.SuiteID.AuthenticatesAAD() {
@@ -467,7 +492,7 @@ func coreEnvelopeFromMap(core map[string]any, mappings []FieldMapping) (jsonEnve
 	if err != nil {
 		return out, err
 	}
-	out.SuiteID, err = uint16FromAny(core["suite_id"])
+	out.SuiteID, err = suiteStringFromAny(core["suite_id"])
 	if err != nil {
 		return out, err
 	}
@@ -480,19 +505,37 @@ func coreEnvelopeFromMap(core map[string]any, mappings []FieldMapping) (jsonEnve
 	if err != nil {
 		return out, err
 	}
-	out.Nonce, err = encodedString(core["nonce"], encodingFor("core.nonce", mappings))
+	suite, err := suiteIDFromJSON(out.SuiteID)
 	if err != nil {
 		return out, err
+	}
+	if suite.NonceLen() > 0 {
+		out.Nonce, err = encodedString(core["nonce"], encodingFor("core.nonce", mappings))
+		if err != nil {
+			return out, err
+		}
+	} else if _, ok := core["nonce"]; ok {
+		out.Nonce, err = encodedString(core["nonce"], encodingFor("core.nonce", mappings))
+		if err != nil {
+			return out, err
+		}
 	}
 	out.Ciphertext, err = encodedString(core["ciphertext"], encodingFor("core.ciphertext", mappings))
 	if err != nil {
 		return out, err
 	}
-	out.Tag, err = encodedString(core["tag"], encodingFor("core.tag", mappings))
-	if err != nil {
-		return out, err
+	if suite.TagLen() > 0 {
+		out.Tag, err = encodedString(core["tag"], encodingFor("core.tag", mappings))
+		if err != nil {
+			return out, err
+		}
+	} else if _, ok := core["tag"]; ok {
+		out.Tag, err = encodedString(core["tag"], encodingFor("core.tag", mappings))
+		if err != nil {
+			return out, err
+		}
 	}
-	if aead.SuiteID(out.SuiteID).AuthenticatesAAD() {
+	if suite.AuthenticatesAAD() {
 		out.AADHash, err = encodedString(core["aad_hash"], encodingFor("core.aad_hash", mappings))
 		if err != nil {
 			return out, err
@@ -649,6 +692,58 @@ func uint64FromAny(v any) (uint64, error) {
 	}
 }
 
+func suiteStringFromAny(v any) (string, error) {
+	switch x := v.(type) {
+	case string:
+		if _, err := suiteIDFromJSON(x); err != nil {
+			return "", err
+		}
+		return x, nil
+	default:
+		n, err := uint16FromAny(v)
+		if err != nil {
+			return "", err
+		}
+		suite := aead.SuiteID(n)
+		if !suiteKnown(suite) {
+			return "", fmt.Errorf("envelope: unknown suite_id")
+		}
+		return suiteName(suite), nil
+	}
+}
+
+func suiteIDFromJSON(s string) (aead.SuiteID, error) {
+	switch strings.TrimSpace(s) {
+	case "AES_256_GCM":
+		return aead.SuiteAES256GCM, nil
+	case "SM4_GCM":
+		return aead.SuiteSM4GCM, nil
+	case "AES_256_ECB":
+		return aead.SuiteAES256ECB, nil
+	case "SM4_ECB":
+		return aead.SuiteSM4ECB, nil
+	default:
+		n, err := strconv.ParseUint(s, 10, 16)
+		if err != nil {
+			return 0, fmt.Errorf("envelope: expected suite_id")
+		}
+		suite := aead.SuiteID(n)
+		if !suiteKnown(suite) {
+			return 0, fmt.Errorf("envelope: unknown suite_id")
+		}
+		return suite, nil
+	}
+}
+
+func suiteKnown(s aead.SuiteID) bool {
+	switch s {
+	case aead.SuiteAES256GCM, aead.SuiteSM4GCM, aead.SuiteAES256ECB, aead.SuiteSM4ECB:
+		return true
+	default:
+		return false
+	}
+}
+
 func suiteName(s aead.SuiteID) string {
 	switch s {
 	case aead.SuiteAES256GCM:
@@ -673,5 +768,4 @@ func isCoreJSONField(k string) bool {
 	}
 }
 
-// base64Codec and pemCodec have been removed. Built-in adapters are binary,
-// canonical JSON, and configurable JSON profile rendering.
+// Built-in external adapters are canonical JSON and configurable JSON profile rendering.

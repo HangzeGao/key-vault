@@ -11,17 +11,18 @@ import type { KeyDTO, EncryptResponse } from "../../lib/types";
 interface Props {
   keys: KeyDTO[];
   formatOptions: string[];
-  onSendToDecrypt: (ciphertext: string, aad: string, format: string) => void;
+  onSendToDecrypt: (envelope: string, aad: string, format: string) => void;
 }
 
 export function EncryptPanel({ keys, formatOptions, onSendToDecrypt }: Props) {
   const { tenantId } = useAuth();
   const [keyId, setKeyId] = useState("");
   const [plaintext, setPlaintext] = useState("hello, cryogenic vault");
-  const [encAAD, setEncAAD] = useState("{\"source\":\"partner-a\",\"object\":\"order-123\"}");
-  const [encExtensions, setEncExtensions] = useState("{\n  \"trace_id\": \"trace-001\"\n}");
+  const [encAAD, setEncAAD] = useState("");
+  const [encExtensions, setEncExtensions] = useState("");
   const [encResult, setEncResult] = useState<EncryptResponse | null>(null);
   const [envelopeFormat, setEnvelopeFormat] = useState("");
+  const envelopeText = encResult ? JSON.stringify(encResult, null, 2) : "";
 
   const parseExtensions = () => {
     const raw = encExtensions.trim();
@@ -43,7 +44,7 @@ export function EncryptPanel({ keys, formatOptions, onSendToDecrypt }: Props) {
       }
       return api.post<EncryptResponse>(apiPaths.crypto.encrypt, {
         tenant_id: tenantId,
-        key_id: keyId,
+        key_id: keyId.trim() || undefined,
         plaintext: toBase64(plaintext),
         aad_b64: encAAD ? toBase64(encAAD) : undefined,
         envelope_format: envelopeFormat || undefined,
@@ -64,7 +65,7 @@ export function EncryptPanel({ keys, formatOptions, onSendToDecrypt }: Props) {
             list="crypto-key-options"
             value={keyId}
             onChange={(e) => setKeyId(e.target.value)}
-            placeholder="key_id"
+            placeholder="default ECB key if empty"
           />
           <datalist id="crypto-key-options">
             {keys.map((k) => (
@@ -112,7 +113,7 @@ export function EncryptPanel({ keys, formatOptions, onSendToDecrypt }: Props) {
             style={{ minHeight: 84 }}
           />
         </div>
-        <button className="btn btn-primary" disabled={!keyId || encMut.isPending} onClick={() => encMut.mutate()}>
+        <button className="btn btn-primary" disabled={encMut.isPending} onClick={() => encMut.mutate()}>
           <Lock size={14} /> {encMut.isPending ? "Encrypting..." : "Encrypt"}
         </button>
         {encResult && (
@@ -122,17 +123,17 @@ export function EncryptPanel({ keys, formatOptions, onSendToDecrypt }: Props) {
               <span className="mono" style={{ fontSize: 11, color: "var(--text-tertiary)" }}>
                 key v{encResult.key_version}
               </span>
-              {encResult.envelope_format && (
+              {envelopeFormat && (
                 <span className="mono" style={{ fontSize: 10, color: "var(--accent)" }}>
-                  {encResult.envelope_format}
+                  {envelopeFormat}
                 </span>
               )}
             </div>
-            <MonoReadout label="Ciphertext (base64 envelope)" value={encResult.ciphertext} copyable />
+            <MonoReadout label="Envelope JSON" value={envelopeText} copyable />
             <button
               className="btn btn-ghost btn-sm"
               style={{ marginTop: 8 }}
-              onClick={() => onSendToDecrypt(encResult.ciphertext, encAAD, encResult.envelope_format ?? envelopeFormat)}
+              onClick={() => onSendToDecrypt(envelopeText, encAAD, envelopeFormat)}
             >
               <ArrowRight size={12} /> Send to decrypt
             </button>

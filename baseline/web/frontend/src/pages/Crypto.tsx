@@ -9,10 +9,24 @@ import { DecryptPanel } from "../components/crypto/DecryptPanel";
 import { EnvelopeInspector } from "../components/crypto/EnvelopeInspector";
 import type { KeyDTO, EnvelopeFormatDescription, TenantEnvelopeConfig } from "../lib/types";
 
+function envelopeFormatOptions(formats: EnvelopeFormatDescription[], config?: TenantEnvelopeConfig): string[] {
+  const registered = new Set(formats.map((format) => format.format_id));
+  const validProfiles = (config?.profiles ?? [])
+    .filter((profile) => registered.has(profile.adapter))
+    .map((profile) => profile.format_id);
+  return [
+    ...new Set([
+      ...formats.map((format) => format.format_id),
+      ...(config?.allowed_formats ?? []).filter((format) => registered.has(format) || validProfiles.includes(format)),
+      ...validProfiles,
+    ]),
+  ];
+}
+
 export function CryptoPage() {
   const { tenantId } = useAuth();
-  const [decryptSeed, setDecryptSeed] = useState<{ ciphertext: string; aad: string; format: string; version: number }>({
-    ciphertext: "",
+  const [decryptSeed, setDecryptSeed] = useState<{ envelope: string; aad: string; format: string; version: number }>({
+    envelope: "",
     aad: "",
     format: "",
     version: 0,
@@ -36,16 +50,10 @@ export function CryptoPage() {
     enabled: !!tenantId,
     retry: false,
   });
-  const formatOptions = useMemo(() => [
-    ...new Set([
-      ...formats.map((f) => f.format_id),
-      ...(envelopeConfig?.allowed_formats ?? []),
-      ...(envelopeConfig?.profiles ?? []).map((p) => p.format_id),
-    ]),
-  ], [formats, envelopeConfig]);
+  const formatOptions = useMemo(() => envelopeFormatOptions(formats, envelopeConfig), [formats, envelopeConfig]);
 
-  const handleSendToDecrypt = (ciphertext: string, aad: string, format: string) => {
-    setDecryptSeed((prev) => ({ ciphertext, aad, format, version: prev.version + 1 }));
+  const handleSendToDecrypt = (envelope: string, aad: string, format: string) => {
+    setDecryptSeed((prev) => ({ envelope, aad, format, version: prev.version + 1 }));
   };
 
   return (
@@ -65,7 +73,7 @@ export function CryptoPage() {
         />
         <DecryptPanel
           formatOptions={formatOptions}
-          seedCiphertext={decryptSeed.ciphertext}
+          seedEnvelope={decryptSeed.envelope}
           seedAAD={decryptSeed.aad}
           seedFormat={decryptSeed.format}
           seedVersion={decryptSeed.version}

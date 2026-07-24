@@ -520,9 +520,8 @@ func bootstrapEnvelopeConfig(ctx context.Context, store repository.Repository) e
 	}
 	cfg := &models.TenantEnvelopeConfig{
 		TenantID:      "t-default",
-		DefaultFormat: string(envelope.FormatKVLTBinaryV1),
+		DefaultFormat: string(envelope.FormatJSONV1),
 		AllowedFormats: []string{
-			string(envelope.FormatKVLTBinaryV1),
 			string(envelope.FormatJSONV1),
 			string(envelope.FormatConfigurableJSONV1),
 		},

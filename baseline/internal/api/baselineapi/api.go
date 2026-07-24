@@ -259,15 +259,15 @@ type batchEncryptReq struct {
 }
 
 type batchResult struct {
-	Index      int    `json:"index"`
-	Success    bool   `json:"success"`
-	ErrorCode  string `json:"error_code,omitempty"`
-	Message    string `json:"message,omitempty"`
-	KeyID      string `json:"key_id,omitempty"`
-	KeyVersion uint32 `json:"key_version,omitempty"`
-	SuiteID    string `json:"suite_id,omitempty"`
-	Ciphertext string `json:"ciphertext,omitempty"`
-	Plaintext  string `json:"plaintext,omitempty"`
+	Index      int             `json:"index"`
+	Success    bool            `json:"success"`
+	ErrorCode  string          `json:"error_code,omitempty"`
+	Message    string          `json:"message,omitempty"`
+	KeyID      string          `json:"key_id,omitempty"`
+	KeyVersion uint32          `json:"key_version,omitempty"`
+	SuiteID    string          `json:"suite_id,omitempty"`
+	Envelope   json.RawMessage `json:"envelope,omitempty"`
+	Plaintext  string          `json:"plaintext,omitempty"`
 }
 
 type batchResp struct {
@@ -321,6 +321,9 @@ func (h *Handler) encryptBatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "BAD_REQUEST", "batch exceeds 100 entries")
 		return
 	}
+	if req.TenantID == "" {
+		req.TenantID = p.TenantID
+	}
 	if p.TenantID != "" && req.TenantID != p.TenantID {
 		writeErr(w, 403, "PERMISSION_DENIED", "tenant mismatch")
 		return
@@ -359,15 +362,15 @@ func (h *Handler) encryptBatch(w http.ResponseWriter, r *http.Request) {
 		results[i] = batchResult{
 			Index: i, Success: true,
 			KeyID: res.KeyID, KeyVersion: res.KeyVersion, SuiteID: res.SuiteID,
-			Ciphertext: base64.StdEncoding.EncodeToString(res.Ciphertext),
+			Envelope: res.Ciphertext,
 		}
 	}
 	writeJSON(w, 200, batchResp{Results: results, Summary: summarizeBatch(results)})
 }
 
 type batchDecryptEntry struct {
-	Ciphertext string `json:"ciphertext"`
-	AADB64     string `json:"aad_b64,omitempty"`
+	Envelope json.RawMessage `json:"envelope"`
+	AADB64   string          `json:"aad_b64,omitempty"`
 }
 
 type batchDecryptReq struct {
@@ -399,15 +402,17 @@ func (h *Handler) decryptBatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "BAD_REQUEST", "batch exceeds 100 entries")
 		return
 	}
+	if req.TenantID == "" {
+		req.TenantID = p.TenantID
+	}
 	if p.TenantID != "" && req.TenantID != p.TenantID {
 		writeErr(w, 403, "PERMISSION_DENIED", "tenant mismatch")
 		return
 	}
 	results := make([]batchResult, len(req.Entries))
 	for i, e := range req.Entries {
-		ct, err := base64.StdEncoding.DecodeString(e.Ciphertext)
-		if err != nil {
-			results[i] = batchResult{Index: i, Success: false, ErrorCode: "BAD_REQUEST", Message: "ciphertext not base64"}
+		if len(e.Envelope) == 0 {
+			results[i] = batchResult{Index: i, Success: false, ErrorCode: "BAD_REQUEST", Message: "envelope is required"}
 			continue
 		}
 		aadBytes, err := decodeOptionalBase64(e.AADB64)
@@ -417,7 +422,7 @@ func (h *Handler) decryptBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		res, err := h.cryptoSvc.Decrypt(r.Context(), crypto.DecryptCommand{
 			TenantID:    req.TenantID,
-			Ciphertext:  ct,
+			Ciphertext:  e.Envelope,
 			AAD:         aadBytes,
 			PrincipalID: p.ID,
 		})
@@ -455,7 +460,7 @@ func (h *Handler) systemStatus(w http.ResponseWriter, r *http.Request) {
 		"connected": dbPingErr == nil,
 	}
 	if dbPingErr != nil {
-		dbInfo["error"] = dbPingErr.Error()
+		dbInfo["error"] = "DATABASE_UNREACHABLE"
 	}
 	status["database"] = dbInfo
 
@@ -473,7 +478,7 @@ func (h *Handler) systemStatus(w http.ResponseWriter, r *http.Request) {
 		"cluster_epoch": epoch,
 	}
 	if epochErr != nil {
-		clusterInfo["error"] = epochErr.Error()
+		clusterInfo["error"] = "CLUSTER_STATE_UNAVAILABLE"
 	}
 
 	// CRK info.

@@ -12,7 +12,7 @@ import (
 )
 
 // SuiteID identifies an algorithm suite. Values are stable and part of
-// the Envelope v1 wire format (design §8.3, §8.1).
+// the Envelope v1 internal canonical encoding (design §8.3, §8.1).
 type SuiteID uint16
 
 const (

@@ -13,6 +13,7 @@ import {
   Settings2,
   Sun,
   Moon,
+  Database,
 } from "lucide-react";
 import { useAuth, useTheme, useUI } from "../lib/store";
 
@@ -40,6 +41,7 @@ const auditNav: NavEntry[] = [
 
 const opsNav: NavEntry[] = [
   { to: "/ui/dashboard", label: "Dashboard", icon: <LayoutDashboard /> },
+  { to: "/ui/database", label: "Database", icon: <Database /> },
 ];
 
 const simpleNav: NavEntry[] = [

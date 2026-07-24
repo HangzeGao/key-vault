@@ -18,6 +18,68 @@ var (
 	ErrConflict = errors.New("repository: conflict")
 )
 
+// DatabaseDiagnostics is a redacted, backend-neutral operational snapshot.
+// It intentionally contains no connection strings, SQL text, record values,
+// identifiers, or cryptographic material.
+type DatabaseDiagnostics struct {
+	ObservedAt time.Time
+	Role       string
+	Latency    time.Duration
+	Pool       DatabasePoolStats
+	Schema     DatabaseSchemaStats
+	Storage    DatabaseStorageStats
+	Workload   DatabaseWorkloadStats
+	Protection DatabaseProtectionStats
+	Integrity  DatabaseIntegrityStats
+	Tables     []DatabaseTableStats
+	Unavailable []string
+}
+
+type DatabasePoolStats struct {
+	Max               int32
+	Total             int32
+	Acquired          int32
+	Idle              int32
+	AcquireWaitEvents int64
+}
+
+type DatabaseSchemaStats struct {
+	Current  int
+	Expected int
+}
+
+type DatabaseStorageStats struct {
+	DatabaseBytes int64
+}
+
+type DatabaseWorkloadStats struct {
+	ActiveConnections int64
+	LockWaiters       int64
+	LongTransactions  int64
+	OldestTransaction time.Duration
+}
+
+type DatabaseProtectionStats struct {
+	ReplicaCount       int64
+	ReplicationLag     time.Duration
+	BackupStatus       string
+}
+
+type DatabaseIntegrityStats struct {
+	OrphanKeyVersions       int64
+	DestroyedMaterialRows   int64
+	ExpiredActiveDEKLeases  int64
+	ExpiredActiveNonceLeases int64
+}
+
+type DatabaseTableStats struct {
+	Name          string
+	EstimatedRows int64
+	TableBytes    int64
+	IndexBytes    int64
+	StatsUpdatedAt time.Time
+}
+
 // Repository is the storage interface. Each method mirrors a method on
 // memory.Store. Backends MUST enforce the same concurrency and consistency
 // rules: row-lock style serialization, monotonic counters, append-only audit.
@@ -87,10 +149,10 @@ type Repository interface {
 	CompleteOutboxEvent(ctx context.Context, id string) error
 	ListOutboxEvents(ctx context.Context, status string, limit int) ([]*models.OutboxEvent, error)
 
-	// Ops plane: lifecycle retry, outbox replay, table sizes for diagnostics.
+	// Ops plane: lifecycle retry, outbox replay, and redacted diagnostics.
 	RetryLifecycleJob(ctx context.Context, jobID string) error
 	ReplayOutboxEvent(ctx context.Context, eventID string) error
-	TableSizes(ctx context.Context) (map[string]int64, error)
+	DatabaseDiagnostics(ctx context.Context) (*DatabaseDiagnostics, error)
 
 	// Audit chain
 	AppendAuditEvent(ctx context.Context, e *models.AuditEvent) error

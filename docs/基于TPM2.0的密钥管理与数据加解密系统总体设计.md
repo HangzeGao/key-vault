@@ -270,7 +270,7 @@ sequenceDiagram
 
 ### 6.2.1 Key 有效期
 
-Key 可在创建和受控导入时指定显式 `key_id` 与 `expires_at`。`expires_at` 到期后，Key 对外查询状态应呈现为 `EXPIRED`，加密和解密均 fail-closed。生命周期 worker 应周期扫描到期 Key，并通过领域状态机或等效检查形成可观测状态；用户需要继续使用时，只能通过管理面延期。
+Key 可在创建和受控导入时指定显式 `key_id` 与 `expires_at`。数据面 Encrypt 未提供 `key_id` 时，服务端使用/自动创建租户默认 `AES_256_ECB` Key，以支持最小 body 加密。`expires_at` 到期后，Key 对外查询状态应呈现为 `EXPIRED`，加密和解密均 fail-closed。生命周期 worker 应周期扫描到期 Key，并通过领域状态机或等效检查形成可观测状态；用户需要继续使用时，只能通过管理面延期。
 
 ### 6.3 安全删除
 
@@ -310,11 +310,11 @@ sequenceDiagram
 
 ### 6.7 Envelope 配置
 
-租户 Envelope 配置由 `default_format`、`allowed_formats` 和 `profiles` 组成。每个 profile 绑定一个已注册 `adapter`，并通过 `field_mappings` 与 `extensions` 描述外部格式字段如何映射到 CoreEnvelope、derived 值或 extension 值。JSON/profile 格式允许在核心字段之外携带扩展字段，解密解析必须忽略不参与认证的扩展字段并继续以核心字段重建 Envelope；数据面 caller AAD 不从 Envelope 重建，而是由调用方通过 `aad_b64` 明确传入；`kvlt-binary-v1` 是固定 wire layout，profile 不得改变已发布二进制布局。
+租户 Envelope 配置由 `default_format`、`allowed_formats` 和 `profiles` 组成。外部格式仅保留 `json-v1` 与 `configurable-json-v1`。每个 profile 绑定一个已注册 `adapter`，并通过 `field_mappings` 与 `extensions` 描述外部格式字段如何映射到 CoreEnvelope、derived 值或 extension 值。JSON/profile 格式允许在核心字段之外携带扩展字段，解密解析必须忽略不参与认证的扩展字段并继续以核心字段重建 Envelope；数据面 caller AAD 不从 Envelope 重建，而是由调用方通过 `aad_b64` 明确传入。
 
-`magic` 是 `kvlt-binary-v1` 的二进制 wire-format discriminator，固定为 `KVLT`，用于二进制格式识别、防误解析，并作为 binary protected header 的一部分参与 GCM AEAD AAD 构造。`magic` 不属于 CoreEnvelope 的业务语义字段，不是租户可配置字段，也不要求 `json-v1`、`configurable-json-v1` 或第三方 profile 格式呈现；外部 JSON/profile 只需通过字段映射还原完整 CoreEnvelope。
+服务端内部 canonical 编码用于 GCM 认证边界和统一解析，不作为对外 API 格式暴露。租户 profile 只能改变 JSON 呈现，不能替代核心认证字段；外部 JSON/profile 只需通过字段映射还原完整 CoreEnvelope。
 
-数据面 caller AAD 是调用方提供的 opaque bytes。第三方系统可按自己的 JSON、XML、Protobuf、header 或业务上下文生成 AAD，但 canonical 步骤必须在调用方或 SDK 完成。GCM suite 将 `aad_b64` 解码结果作为 AEAD AAD 使用，并执行最大 64 KiB 长度限制、`SHA-256(aad_bytes)` 审计和加解密一致性校验；ECB suite 忽略 caller AAD，Envelope wire/JSON 不携带 `aad_hash` 且解密不校验 AAD。AAD 明文不进入 Envelope 核心字段，也不得写入审计日志。
+数据面 caller AAD 是调用方提供的 opaque bytes。第三方系统可按自己的 JSON、XML、Protobuf、header 或业务上下文生成 AAD，但 canonical 步骤必须在调用方或 SDK 完成。GCM suite 将 `aad_b64` 解码结果作为 AEAD AAD 使用，并执行最大 64 KiB 长度限制、`SHA-256(aad_bytes)` 审计和加解密一致性校验；ECB suite 忽略 caller AAD，Envelope JSON/profile 不携带 `nonce`、`tag`、`aad_hash`，解密不校验 AAD。AAD 明文不进入 Envelope 核心字段，也不得写入审计日志。
 
 ## 7. 数据模型
 
@@ -348,8 +348,8 @@ sequenceDiagram
 | `POST /ui/api/v1/keys/{id}:rotate` / `/rotate` | 生成新 KeyVersion。 |
 | `POST /ui/api/v1/keys/{id}/schedule-destroy` | 计划销毁入口。 |
 | `POST /ui/api/v1/keys/{id}/cancel-destroy` | 取消计划销毁。 |
-| `POST /ui/api/v1/crypto/encrypt` | 小对象加密。 |
-| `POST /ui/api/v1/crypto/decrypt` | 小对象解密。 |
+| `POST /ui/api/v1/crypto/encrypt` | 小对象加密；最小 body 为 `{"plaintext":"<base64>"}`，未提供 `key_id` 时使用租户默认 `AES_256_ECB` Key。 |
+| `POST /ui/api/v1/crypto/decrypt` | 小对象解密；请求体直接使用 Envelope JSON 本体，最小 body 为加密响应返回的 Envelope JSON。 |
 | `POST /ui/api/v1/crypto/encrypt-batch` | 批量加密。 |
 | `POST /ui/api/v1/crypto/decrypt-batch` | 批量解密，采用 entries 输入模型。 |
 | `GET/PUT /ui/api/v1/tenants/{id}/envelope-config` | 管理租户信封默认格式、允许格式和 profiles。 |
@@ -359,7 +359,7 @@ sequenceDiagram
 | `GET /ui/api/v1/audit/chain/verify` | 验证审计链。 |
 | `GET /ui/api/v1/lifecycle/jobs`、`GET /ui/api/v1/lifecycle/outbox`、`GET /ui/api/v1/lifecycle/config` | 查询 worker 任务、outbox 和运行参数。 |
 | `GET /ui/api/v1/ops/health` | 查询运维聚合健康状态。 |
-| `GET /ui/api/v1/ops/db/status` | 查询数据库迁移、连接、容量和积压摘要。 |
+| `GET /ui/api/v1/ops/db/status` | 查询脱敏数据库诊断：连接/连接池、角色、迁移、容量、锁/长事务、复制、积压和领域一致性；不返回任意 SQL、原始错误或记录值。 |
 | `GET /ui/api/v1/ops/crk/envelope` | 查询 CRK envelope 脱敏状态。 |
 | `POST /ui/api/v1/ops/crk/envelope:repair-aad-digest` | 修复 CRK envelope AAD digest 并刷新 resolver。 |
 | `POST /ui/api/v1/ops/lifecycle/jobs/{id}/retry`、`POST /ui/api/v1/ops/outbox/{id}/replay` | 运维面白名单任务干预。 |

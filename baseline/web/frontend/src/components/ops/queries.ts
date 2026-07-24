@@ -16,9 +16,33 @@ export interface HealthResponse {
 
 export interface DBStatusResponse {
   driver: string;
+  status: "ok" | "warn" | "degraded";
+  observed_at: string;
   connected: boolean;
+  connection: {
+    status: "ok" | "warn" | "degraded";
+    reason?: string;
+    latency_ms: number;
+  };
   cluster_epoch?: number;
-  table_sizes?: Record<string, number>;
+  runtime: {
+    role: "primary" | "standby" | "memory" | "unknown";
+    pool: { max: number; total: number; acquired: number; idle: number; acquire_wait_events: number };
+    schema: { status: "ok" | "degraded"; current: number; expected: number };
+    workload: { active_connections: number; lock_waiters: number; long_transactions: number; oldest_transaction_ms: number };
+  };
+  capacity: {
+    database_bytes: number;
+    tables: Array<{ name: string; estimated_rows: number; table_bytes: number; index_bytes: number; stats_updated_at?: string }>;
+  };
+  data_protection: { replica_count: number; replication_lag_ms: number; backup_status: "managed_externally" | "not_applicable" | string };
+  integrity: {
+    status: "ok" | "warn" | "degraded" | "unknown";
+    orphan_key_versions: number;
+    destroyed_material_rows: number;
+    expired_active_dek_leases: number;
+    expired_active_nonce_leases: number;
+  };
   backlog: {
     lifecycle_failed: number;
     lifecycle_pending: number;
@@ -31,8 +55,8 @@ export interface DBStatusResponse {
     digest_valid?: boolean;
     envelope_bytes?: number;
   };
-	error?: string;
-	key_inventory?: {
+	unavailable?: string[];
+	key_inventory: {
 		scope: "global" | "tenant";
 		total: number;
 		by_status: Record<string, number>;
@@ -69,11 +93,11 @@ export function useHealth() {
   });
 }
 
-export function useDBStatus() {
+export function useDBStatus(refetchInterval = 60_000) {
   return useQuery({
     queryKey: ["ops", "db-status"],
     queryFn: () => api.get<DBStatusResponse>(apiPaths.ops.dbStatus),
-    refetchInterval: 5000,
+    refetchInterval,
   });
 }
 

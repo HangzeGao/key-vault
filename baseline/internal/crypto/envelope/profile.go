@@ -41,8 +41,6 @@ type ExtensionField struct {
 
 func BuiltinProfile(format FormatID) *FormatProfile {
 	switch format {
-	case FormatKVLTBinaryV1:
-		return &FormatProfile{FormatID: FormatKVLTBinaryV1, Adapter: FormatKVLTBinaryV1}
 	case FormatJSONV1:
 		return &FormatProfile{FormatID: FormatJSONV1, Adapter: FormatJSONV1}
 	case FormatConfigurableJSONV1:
@@ -60,9 +58,9 @@ func DefaultJSONMappings() []FieldMapping {
 		{Path: "$.key_id", Source: "core.key_id", Required: true},
 		{Path: "$.key_version", Source: "core.key_version", Required: true},
 		{Path: "$.policy_version", Source: "core.policy_version", Required: true},
-		{Path: "$.nonce", Source: "core.nonce", Required: true, Encoding: "base64raw"},
+		{Path: "$.nonce", Source: "core.nonce", Required: false, Encoding: "base64raw"},
 		{Path: "$.ciphertext", Source: "core.ciphertext", Required: true, Encoding: "base64raw"},
-		{Path: "$.tag", Source: "core.tag", Required: true, Encoding: "base64raw"},
+		{Path: "$.tag", Source: "core.tag", Required: false, Encoding: "base64raw"},
 		{Path: "$.aad_hash", Source: "core.aad_hash", Required: false, Encoding: "base64raw"},
 	}
 }

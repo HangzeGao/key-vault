@@ -17,13 +17,25 @@ const DEFAULT_PROFILE: EnvelopeFormatProfile = {
     { path: "$.key_id", source: "core.key_id", required: true },
     { path: "$.key_version", source: "core.key_version", required: true },
     { path: "$.policy_version", source: "core.policy_version", required: true },
-    { path: "$.nonce", source: "core.nonce", required: true, encoding: "base64raw" },
+    { path: "$.nonce", source: "core.nonce", required: false, encoding: "base64raw" },
     { path: "$.ciphertext", source: "core.ciphertext", required: true, encoding: "base64raw" },
-    { path: "$.tag", source: "core.tag", required: true, encoding: "base64raw" },
+    { path: "$.tag", source: "core.tag", required: false, encoding: "base64raw" },
     { path: "$.aad_hash", source: "core.aad_hash", required: false, encoding: "base64raw" },
   ],
   extensions: [],
 };
+
+function normalizedFormats(formats: EnvelopeFormatDescription[], profiles: EnvelopeFormatProfile[]) {
+  const registered = new Set(formats.map((format) => format.format_id));
+  const validProfiles = profiles.filter((profile) => registered.has(profile.adapter));
+  const profileIds = validProfiles.map((profile) => profile.format_id);
+  return {
+    registered,
+    validProfiles,
+    profileIds,
+    visibleFormats: [...formats.map((format) => format.format_id), ...profileIds.filter((id) => !registered.has(id))],
+  };
+}
 
 export function EnvelopeConfigPage() {
   const { tenantId } = useAuth();
@@ -53,9 +65,9 @@ export function EnvelopeConfigPage() {
   });
   const formats = formatsData?.formats ?? [];
 
-  const profiles = useMemo(() => config?.profiles ?? [], [config?.profiles]);
-  const profileIds = profiles.map((p) => p.format_id);
-  const visibleFormats = [...formats.map((f) => f.format_id), ...profileIds.filter((id) => !formats.some((f) => f.format_id === id))];
+  const rawProfiles = useMemo(() => config?.profiles ?? [], [config?.profiles]);
+  const { registered, validProfiles, profileIds, visibleFormats } = useMemo(() => normalizedFormats(formats, rawProfiles), [formats, rawProfiles]);
+  const profiles = validProfiles;
 
   const editProfiles = useMemo<EnvelopeFormatProfile[]>(() => {
     try { const value = JSON.parse(profilesJSON); return Array.isArray(value) ? value : []; } catch { return []; }
@@ -71,10 +83,10 @@ export function EnvelopeConfigPage() {
     }); return errors;
   }, [editProfiles, formats]);
   const profileDiff = useMemo(() => {
-    const before = new Map((config?.profiles ?? []).map((p) => [p.format_id, JSON.stringify(p)]));
+    const before = new Map(profiles.map((p) => [p.format_id, JSON.stringify(p)]));
     const after = new Map(editProfiles.map((p) => [p.format_id, JSON.stringify(p)]));
     return { added: [...after.keys()].filter((id) => !before.has(id)), removed: [...before.keys()].filter((id) => !after.has(id)), changed: [...after.keys()].filter((id) => before.has(id) && before.get(id) !== after.get(id)) };
-  }, [config?.profiles, editProfiles]);
+  }, [profiles, editProfiles]);
 
   const updateMut = useMutation({
     mutationFn: (req: { default_format: string; allowed_formats: string[]; profiles: EnvelopeFormatProfile[]; aad_required: boolean; version: number }) =>
@@ -92,11 +104,12 @@ export function EnvelopeConfigPage() {
   if (formatsError) return <PageContainer><ErrorState message={formatsError.message} /></PageContainer>;
 
   const startEdit = () => {
-    const firstFormat = formats[0]?.format_id ?? "kvlt-binary-v1";
-    setDefaultFormat(config?.default_format ?? firstFormat);
-    setAllowedFormats(config?.allowed_formats ?? formats.map((f) => f.format_id));
+    const firstFormat = formats[0]?.format_id ?? "json-v1";
+    const validAllowed = (config?.allowed_formats ?? formats.map((format) => format.format_id)).filter((format) => registered.has(format) || profileIds.includes(format));
+    setDefaultFormat(validAllowed.includes(config?.default_format ?? "") ? config!.default_format : firstFormat);
+    setAllowedFormats(validAllowed.length > 0 ? validAllowed : formats.map((format) => format.format_id));
     setAADRequired(config?.aad_required ?? false);
-    setProfilesJSON(JSON.stringify(config?.profiles ?? [], null, 2));
+    setProfilesJSON(JSON.stringify(profiles, null, 2));
     setSelectedProfile(0);
     setEditMode(true);
   };
@@ -137,19 +150,24 @@ export function EnvelopeConfigPage() {
       showToast(e instanceof Error ? e.message : "invalid profiles JSON", "error");
       return;
     }
-    if (!defaultFormat || !allowedFormats.includes(defaultFormat)) {
+    const validProfileIds = nextProfiles.filter((profile) => registered.has(profile.adapter)).map((profile) => profile.format_id);
+    const validAllowed = allowedFormats.filter((format) => registered.has(format) || validProfileIds.includes(format));
+    if (!defaultFormat || !validAllowed.includes(defaultFormat)) {
       showToast("default format must be in allowed formats", "error");
       return;
     }
     if (profileErrors.length) { showToast(profileErrors[0], "error"); return; }
     updateMut.mutate({
       default_format: defaultFormat,
-      allowed_formats: allowedFormats,
+      allowed_formats: validAllowed,
       profiles: nextProfiles,
       aad_required: aadRequired,
       version: config?.version ?? 0,
     });
   };
+
+  const displayAllowedFormats = (config?.allowed_formats ?? []).filter((format) => registered.has(format) || profileIds.includes(format));
+  const displayDefaultFormat = displayAllowedFormats.includes(config?.default_format ?? "") ? config!.default_format : formats[0]?.format_id ?? "json-v1";
 
   return (
     <PageContainer>
@@ -178,8 +196,8 @@ export function EnvelopeConfigPage() {
             <KVList
               items={[
                 ["Tenant", config.tenant_id],
-                ["Default Format", <span className="mono" style={{ color: "var(--accent)" }}>{config.default_format}</span>],
-                ["Allowed Formats", config.allowed_formats.join(", ")],
+                ["Default Format", <span className="mono" style={{ color: "var(--accent)" }}>{displayDefaultFormat}</span>],
+                ["Allowed Formats", displayAllowedFormats.join(", ")],
                 ["Profiles", `${profiles.length}`],
                 ["AAD Policy", config.aad_required ? "required" : "optional"],
                 ["Version", `v${config.version}`],
@@ -198,8 +216,8 @@ export function EnvelopeConfigPage() {
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {visibleFormats.map((formatID) => {
               const desc = formats.find((f) => f.format_id === formatID);
-              const isAllowed = editMode ? allowedFormats.includes(formatID) : config?.allowed_formats.includes(formatID);
-              const isDefault = editMode ? defaultFormat === formatID : config?.default_format === formatID;
+              const isAllowed = editMode ? allowedFormats.includes(formatID) : displayAllowedFormats.includes(formatID);
+              const isDefault = editMode ? defaultFormat === formatID : displayDefaultFormat === formatID;
               return (
                 <div key={formatID} style={{ padding: "12px 14px", background: "var(--bg-inset)", border: `1px solid ${isDefault ? "var(--accent)" : "var(--border)"}`, borderRadius: 2 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>

@@ -15,15 +15,12 @@ import (
 func TestDefaultRegistryFormats(t *testing.T) {
 	r := DefaultRegistry()
 	formats := r.ListFormats()
-	if len(formats) != 3 {
-		t.Fatalf("expected 3 formats, got %d: %+v", len(formats), formats)
+	if len(formats) != 2 {
+		t.Fatalf("expected 2 formats, got %d: %+v", len(formats), formats)
 	}
 	ids := make(map[FormatID]bool)
 	for _, f := range formats {
 		ids[f.ID] = true
-	}
-	if !ids[FormatKVLTBinaryV1] {
-		t.Error("kvlt-binary-v1 format not registered")
 	}
 	if !ids[FormatJSONV1] {
 		t.Error("json-v1 format not registered")
@@ -51,8 +48,10 @@ func TestJSONCodecOmitsAADHashForECB(t *testing.T) {
 	if err := json.Unmarshal(encoded, &obj); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
-	if _, ok := obj["aad_hash"]; ok {
-		t.Fatalf("ECB JSON unexpectedly carried aad_hash: %s", encoded)
+	for _, field := range []string{"nonce", "tag", "aad_hash"} {
+		if _, ok := obj[field]; ok {
+			t.Fatalf("ECB JSON unexpectedly carried %s: %s", field, encoded)
+		}
 	}
 	parsed, err := DefaultRegistry().Parse(FormatJSONV1, encoded)
 	if err != nil {
@@ -61,14 +60,96 @@ func TestJSONCodecOmitsAADHashForECB(t *testing.T) {
 	if parsed.SuiteID != aead.SuiteAES256ECB {
 		t.Fatalf("suite = %s, want AES_256_ECB", parsed.SuiteID)
 	}
+	reencoded, err := parsed.Encode()
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !bytes.Equal(sealed, reencoded) {
+		t.Fatal("ECB JSON -> canonical round-trip changed envelope")
+	}
+}
+
+func TestJSONCodecAdaptiveRequiredFields(t *testing.T) {
+	key := bytes.Repeat([]byte{0x67}, 32)
+	sealed, err := Seal(aead.SuiteAES256ECB, key, "key-ecb-min", 1, 1, nil, []byte("payload"), nil)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	env, err := Parse(sealed)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	minimal := jsonEnvelope{
+		Version:       env.Version,
+		Flags:         env.Flags,
+		SuiteID:       suiteName(env.SuiteID),
+		KeyID:         string(env.KeyID),
+		KeyVersion:    env.KeyVersion,
+		PolicyVersion: env.PolicyVersion,
+		Ciphertext:    base64.RawStdEncoding.EncodeToString(env.Ciphertext),
+	}
+	raw, err := json.Marshal(minimal)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	parsed, err := DefaultRegistry().Parse(FormatJSONV1, raw)
+	if err != nil {
+		t.Fatalf("Parse ECB minimal JSON: %v", err)
+	}
+	if parsed.SuiteID != aead.SuiteAES256ECB || len(parsed.Nonce) != 0 || len(parsed.Tag) != 0 {
+		t.Fatalf("unexpected parsed ECB envelope: suite=%s nonce=%d tag=%d", parsed.SuiteID, len(parsed.Nonce), len(parsed.Tag))
+	}
+
+	minimal.SuiteID = suiteName(aead.SuiteAES256GCM)
+	raw, err = json.Marshal(minimal)
+	if err != nil {
+		t.Fatalf("Marshal GCM: %v", err)
+	}
+	if _, err := DefaultRegistry().Parse(FormatJSONV1, raw); err == nil {
+		t.Fatal("Parse accepted GCM JSON without nonce/tag/aad_hash")
+	}
+}
+
+func TestConfigurableJSONAdaptiveRequiredFieldsForECB(t *testing.T) {
+	key := bytes.Repeat([]byte{0x68}, 32)
+	sealed, err := Seal(aead.SuiteAES256ECB, key, "key-ecb-profile", 1, 1, nil, []byte("payload"), nil)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	env, err := Parse(sealed)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	profile := BuiltinProfile(FormatConfigurableJSONV1)
+	encoded, err := DefaultRegistry().EncodeWithProfile(profile, env, RenderContext{})
+	if err != nil {
+		t.Fatalf("EncodeWithProfile: %v", err)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(encoded, &obj); err != nil {
+		t.Fatalf("json.Unmarshal: %v", err)
+	}
+	for _, field := range []string{"nonce", "tag", "aad_hash"} {
+		if _, ok := obj[field]; ok {
+			t.Fatalf("ECB configurable JSON unexpectedly carried %s: %s", field, encoded)
+		}
+	}
+	parsed, _, err := DefaultRegistry().ParseWithProfile(profile, encoded)
+	if err != nil {
+		t.Fatalf("ParseWithProfile: %v", err)
+	}
+	reencoded, err := parsed.Encode()
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !bytes.Equal(sealed, reencoded) {
+		t.Fatal("ECB configurable JSON -> canonical round-trip changed envelope")
+	}
 }
 
 // TestRegistryCodec verifies Codec lookup for registered and unregistered formats.
 func TestRegistryCodec(t *testing.T) {
 	r := DefaultRegistry()
-	if _, err := r.Codec(FormatKVLTBinaryV1); err != nil {
-		t.Errorf("Codec(kvlt-binary-v1) error: %v", err)
-	}
 	if _, err := r.Codec(FormatJSONV1); err != nil {
 		t.Errorf("Codec(json-v1) error: %v", err)
 	}
@@ -83,7 +164,7 @@ func TestRegistryCodec(t *testing.T) {
 	}
 }
 
-// TestRegistryDetect verifies auto-detection of binary vs JSON envelopes.
+// TestRegistryDetect verifies auto-detection of JSON envelopes only.
 func TestRegistryDetect(t *testing.T) {
 	r := DefaultRegistry()
 
@@ -106,15 +187,6 @@ func TestRegistryDetect(t *testing.T) {
 		t.Fatalf("Seal: %v", err)
 	}
 
-	// Binary detection.
-	binCodec, err := r.Detect(sealed)
-	if err != nil {
-		t.Fatalf("Detect(binary) error: %v", err)
-	}
-	if binCodec.ID() != FormatKVLTBinaryV1 {
-		t.Errorf("Detect(binary) = %s, want kvlt-binary-v1", binCodec.ID())
-	}
-
 	// JSON detection: encode to JSON then detect.
 	jsonBytes, err := r.Encode(FormatJSONV1, mustParseEnvelope(t, sealed))
 	if err != nil {
@@ -132,6 +204,10 @@ func TestRegistryDetect(t *testing.T) {
 	_, err = r.Detect([]byte{0xFF, 0xFF, 0xFF, 0xFF})
 	if !errors.Is(err, ErrInvalid) {
 		t.Errorf("Detect(unknown) error = %v, want ErrInvalid", err)
+	}
+	_, err = r.Detect(sealed)
+	if !errors.Is(err, ErrInvalid) {
+		t.Errorf("Detect(internal canonical bytes) error = %v, want ErrInvalid", err)
 	}
 }
 
@@ -158,10 +234,10 @@ func TestRegistryJSONRoundTrip(t *testing.T) {
 		t.Fatalf("Seal: %v", err)
 	}
 
-	// Parse binary, encode to JSON, parse JSON, verify fields match.
-	envBin, err := r.Parse(FormatKVLTBinaryV1, sealed)
+	// Parse internal canonical bytes, encode to JSON, parse JSON, verify fields match.
+	envBin, err := Parse(sealed)
 	if err != nil {
-		t.Fatalf("Parse(binary): %v", err)
+		t.Fatalf("Parse(canonical): %v", err)
 	}
 	jsonBytes, err := r.Encode(FormatJSONV1, envBin)
 	if err != nil {
@@ -202,7 +278,7 @@ func TestJSONCodecAllowsUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	env, err := r.Parse(FormatKVLTBinaryV1, sealed)
+	env, err := Parse(sealed)
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
@@ -317,7 +393,7 @@ func TestConfigurableJSONProfileRoundTrip(t *testing.T) {
 	}
 }
 
-// mustParseEnvelope is a test helper that parses a binary envelope or fails.
+// mustParseEnvelope is a test helper that parses internal canonical envelope bytes or fails.
 func mustParseEnvelope(t *testing.T, b []byte) *Envelope {
 	t.Helper()
 	env, err := Parse(b)

@@ -1,4 +1,4 @@
-export { StatCard, StatusRow, KeyStat, SignalPill, MetricStrip, formatUptime, formatCount } from "./widgets";
+export { StatCard, StatusRow, KeyStat, SignalPill, MetricStrip, formatUptime, formatCount, formatBytes } from "./widgets";
 export { HealthGrid } from "./HealthGrid";
 export { CRKPanel } from "./CRKPanel";
 export { Backlog } from "./Backlog";

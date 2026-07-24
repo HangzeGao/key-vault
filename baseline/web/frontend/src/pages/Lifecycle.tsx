@@ -43,7 +43,7 @@ function decodePayload(payload: number[] | undefined): string {
     };
     return JSON.stringify(redact(JSON.parse(text)), null, 2);
   } catch {
-    return "(binary)";
+    return "(non-text value)";
   }
 }
 

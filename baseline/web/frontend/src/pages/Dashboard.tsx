@@ -10,7 +10,6 @@ import {
   Actions,
   Backlog,
   CRKPanel,
-  DatabaseContent,
   HealthGrid,
   KeyStat,
   MetricStrip,
@@ -70,7 +69,7 @@ export function DashboardPage() {
   });
 
   const healthQ = useHealth();
-  const dbQ = useDBStatus();
+  const dbQ = useDBStatus(30_000);
   const recentAuditQ = useQuery({ queryKey: ["dashboard", "audit", tenantId], queryFn: () => api.get<{ events: AuditEvent[] }>(apiPaths.audit.events({ limit: 8 })), retry: false });
   const recentLifecycleQ = useQuery({ queryKey: ["dashboard", "lifecycle", tenantId], queryFn: () => api.get<{ jobs: LifecycleJob[] }>(apiPaths.lifecycle.jobs({ limit: 8 })), retry: false });
 
@@ -94,20 +93,14 @@ export function DashboardPage() {
   ].filter(Boolean) as Array<{ label: string; href: string }>;
   const recentHighRisk = (recentAuditQ.data?.events ?? []).filter((event) => /ops\.|destroy|policy|crk/i.test(event.Action)).slice(0, 5);
   const crkDigestValid = dbQ.data?.crk_consistency?.digest_valid;
-  const clusterReady = Boolean(status?.database.connected && !status?.cluster.error);
+  const databaseConnected = dbQ.data?.connected ?? status?.database.connected ?? false;
+  const clusterReady = Boolean(databaseConnected && !status?.cluster.error);
   const nodeCount = status?.nodes?.length ?? 0;
 
-  const issueCount = [
-    healthQ.data?.overall === "degraded",
-    healthQ.data?.overall === "warn",
-    !status?.database.connected,
-    Boolean(status?.cluster.error),
-    crkDigestValid === false,
-    (status?.lifecycle?.failed ?? 0) > 0,
-    (backlog?.lifecycle_failed ?? 0) > 0,
-  ].filter(Boolean).length;
-
-  const summaryTone = issueCount > 0 ? "warning" : stateTone(clusterReady, healthQ.data?.overall === "warn");
+  const criticalIssues = [healthQ.data?.overall === "degraded", dbQ.data?.status === "degraded", !databaseConnected, Boolean(status?.cluster.error), crkDigestValid === false];
+  const warningIssues = [healthQ.data?.overall === "warn", dbQ.data?.status === "warn", (status?.lifecycle?.failed ?? 0) > 0, (backlog?.lifecycle_failed ?? 0) > 0];
+  const issueCount = [...criticalIssues, ...warningIssues].filter(Boolean).length;
+  const summaryTone = criticalIssues.some(Boolean) ? "danger" : warningIssues.some(Boolean) ? "warning" : stateTone(clusterReady);
   const summaryLabel = issueCount > 0 ? `${issueCount} item${issueCount > 1 ? "s" : ""} needs attention` : "operational";
 
   if (statusLoading && !status && dbQ.isLoading) {
@@ -135,18 +128,21 @@ export function DashboardPage() {
           <h1 className="section-title">Dashboard</h1>
           <p className="section-subtitle">Ops plane status, key inventory, audit chain heads, and controlled recovery actions for tenant {tenantId}</p>
         </div>
-        <button
-          type="button"
-          className="btn btn-ghost btn-sm"
-          onClick={() => {
-            refetchStatus();
-            healthQ.refetch();
-            dbQ.refetch();
-            showToast("dashboard refreshed", "info");
-          }}
-        >
-          <RefreshCw size={13} /> Refresh
-        </button>
+        <div className="toolbar-row">
+          <Link to="/ui/database" className="btn btn-ghost btn-sm"><Database size={13} /> Database operations</Link>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={() => {
+              refetchStatus();
+              healthQ.refetch();
+              dbQ.refetch();
+              showToast("dashboard refreshed", "info");
+            }}
+          >
+            <RefreshCw size={13} /> Refresh
+          </button>
+        </div>
       </div>
 
       <Panel>
@@ -159,7 +155,7 @@ export function DashboardPage() {
                 <SignalPill label={summaryLabel} tone={summaryTone} />
               </div>
               <div className="dashboard-summary-sub">
-                Health is <strong>{healthQ.data?.overall ?? "unknown"}</strong>; database is <strong>{status?.database.connected ? "connected" : "offline"}</strong>; CRK digest is <strong>{crkDigestValid === undefined ? "unknown" : crkDigestValid ? "valid" : "invalid"}</strong>.
+                Health is <strong>{healthQ.data?.overall ?? "unknown"}</strong>; database is <strong>{databaseConnected ? "connected" : "offline"}</strong>; CRK digest is <strong>{crkDigestValid === undefined ? "unknown" : crkDigestValid ? "valid" : "invalid"}</strong>.
               </div>
             </div>
           </div>
@@ -187,10 +183,10 @@ export function DashboardPage() {
         <StatCard
           icon={<Database />}
           label="Database"
-          value={status ? status.database.driver.toUpperCase() : "-"}
+          value={(dbQ.data?.status ?? "unknown").toUpperCase()}
           sub={[
-            { label: status?.database.connected ? "connected" : "offline", value: "", color: status?.database.connected ? "var(--success)" : "var(--danger)" },
-            { label: "epoch", value: status?.cluster.cluster_epoch ?? "-", color: "var(--text-tertiary)" },
+            { label: dbQ.data?.connected ? "connected" : "offline", value: "", color: dbQ.data?.connected ? "var(--success)" : "var(--danger)" },
+            { label: "ms", value: dbQ.data?.connection.latency_ms ?? "-", color: "var(--text-tertiary)" },
           ]}
         />
         <StatCard
@@ -240,10 +236,6 @@ export function DashboardPage() {
           highlighted={highlighted}
           onHighlight={setHighlighted}
         />
-      </div>
-
-      <div className="dashboard-section">
-        <DatabaseContent keys={keys} tableSizes={dbQ.data?.table_sizes} keyInventory={dbQ.data?.key_inventory} />
       </div>
 
       <div className="dashboard-grid-2">
