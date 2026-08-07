@@ -3,20 +3,18 @@ package crypto
 
 import (
 	"context"
-	cryptorand "crypto/rand"
 	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/kvlt/key-vault/internal/crypto/aead"
 	"github.com/kvlt/key-vault/internal/crypto/envelope"
+	cryptomac "github.com/kvlt/key-vault/internal/crypto/mac"
 	"github.com/kvlt/key-vault/internal/crypto/nonce"
+	cryptosuite "github.com/kvlt/key-vault/internal/crypto/suite"
 	keystate "github.com/kvlt/key-vault/internal/domain/key/state"
 	"github.com/kvlt/key-vault/internal/domain/policy"
 	"github.com/kvlt/key-vault/internal/errorsx"
-	"github.com/kvlt/key-vault/internal/repository"
 	"github.com/kvlt/key-vault/internal/repository/models"
 	"github.com/kvlt/key-vault/internal/resolver/keyresolver"
 )
@@ -38,6 +36,7 @@ type EncryptResult struct {
 	KeyID          string
 	KeyVersion     uint32
 	SuiteID        string
+	ServiceType    cryptosuite.ServiceType
 	Ciphertext     []byte // Envelope v1 bytes
 	EnvelopeFormat string
 }
@@ -56,6 +55,40 @@ type DecryptResult struct {
 	KeyID      string
 	KeyVersion uint32
 	Plaintext  []byte
+}
+
+// Authenticator is a detached, versioned CMAC result. All metadata fields are
+// included in the MAC input and therefore cannot be changed independently.
+type Authenticator struct {
+	Version       uint8
+	SuiteID       string
+	ServiceType   cryptosuite.ServiceType
+	KeyID         string
+	KeyVersion    uint32
+	PolicyVersion uint32
+	Tag           []byte
+}
+
+type AuthenticateCommand struct {
+	TenantID    string
+	KeyID       string
+	Message     []byte
+	PrincipalID string
+}
+
+type AuthenticateResult struct {
+	Authenticator Authenticator
+}
+
+type VerifyCommand struct {
+	TenantID      string
+	Message       []byte
+	Authenticator Authenticator
+	PrincipalID   string
+}
+
+type VerifyResult struct {
+	Valid bool
 }
 
 // ConvertEnvelopeCommand changes only the approved outer representation of an
@@ -81,23 +114,22 @@ type InspectEnvelopeCommand struct {
 	SourceFormat string
 }
 type InspectEnvelopeResult struct {
-	Format          string `json:"format"`
-	Version         uint8  `json:"version"`
-	Flags           uint16 `json:"flags"`
-	SuiteID         string `json:"suite_id"`
-	KeyID           string `json:"key_id"`
-	KeyVersion      uint32 `json:"key_version"`
-	PolicyVersion   uint32 `json:"policy_version"`
-	NonceBytes      int    `json:"nonce_bytes"`
-	TagBytes        int    `json:"tag_bytes"`
-	CiphertextBytes int    `json:"ciphertext_bytes"`
-	AADHash         string `json:"aad_hash,omitempty"`
+	Format          string                  `json:"format"`
+	Version         uint8                   `json:"version"`
+	Flags           uint16                  `json:"flags"`
+	SuiteID         string                  `json:"suite_id"`
+	ServiceType     cryptosuite.ServiceType `json:"service_type"`
+	KeyID           string                  `json:"key_id"`
+	KeyVersion      uint32                  `json:"key_version"`
+	PolicyVersion   uint32                  `json:"policy_version"`
+	NonceBytes      int                     `json:"nonce_bytes"`
+	TagBytes        int                     `json:"tag_bytes"`
+	CiphertextBytes int                     `json:"ciphertext_bytes"`
+	AADHash         string                  `json:"aad_hash,omitempty"`
 }
 
 // Store is the repository subset used by the crypto service.
 type Store interface {
-	GetTenant(ctx context.Context, id string) (*models.Tenant, error)
-	CreateKey(ctx context.Context, k *models.Key, kv *models.KeyVersion) error
 	GetKey(ctx context.Context, tenantID, keyID string) (*models.Key, error)
 	GetKeyVersionByNo(ctx context.Context, keyID string, versionNo uint32) (*models.KeyVersion, error)
 	GetCurrentKeyVersion(ctx context.Context, keyID string) (*models.KeyVersion, error)
@@ -120,10 +152,8 @@ type Service struct {
 
 const maxCallerAADLen = 64 * 1024
 const purposeEncryptDecrypt = "encrypt_decrypt"
+const purposeAuthenticateVerify = "authenticate_verify"
 const defaultTenantID = "t-default"
-const defaultEncryptKeyID = "default-ecb"
-const defaultEncryptKeySuite = "AES_256_ECB"
-const defaultPolicyID = "default-v1"
 
 // Auditor records audit events for crypto operations (design §15.1, EB-FR-09).
 type Auditor interface {
@@ -187,11 +217,7 @@ func (s *Service) Encrypt(ctx context.Context, cmd EncryptCommand) (*EncryptResu
 		cmd.TenantID = defaultTenantID
 	}
 	if cmd.KeyID == "" {
-		keyID, err := s.ensureDefaultEncryptKey(ctx, cmd.TenantID, cmd.PrincipalID)
-		if err != nil {
-			return nil, err
-		}
-		cmd.KeyID = keyID
+		return nil, errorsx.New(errorsx.CodeInvalidArgument, "key_id is required", false)
 	}
 	if len(cmd.Plaintext) > s.maxBodySize {
 		return nil, errorsx.New(errorsx.CodeBadRequest, "plaintext exceeds max size", false)
@@ -203,6 +229,9 @@ func (s *Service) Encrypt(ctx context.Context, cmd EncryptCommand) (*EncryptResu
 	k, err := s.store.GetKey(ctx, cmd.TenantID, cmd.KeyID)
 	if err != nil {
 		return nil, errorsx.New(errorsx.CodeKeyNotFound, "key not found", false)
+	}
+	if !genericUsageAllowed(k) {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "protocol-scoped key cannot be used by the generic crypto interface", false)
 	}
 	if k.Purpose != purposeEncryptDecrypt {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "key purpose does not permit encryption", false)
@@ -222,17 +251,22 @@ func (s *Service) Encrypt(ctx context.Context, cmd EncryptCommand) (*EncryptResu
 	if err != nil {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite not in policy", false)
 	}
-	if !policy.CanEncrypt(suite.Status) {
+	if !policy.CanCreate(suite.Status) {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite not available for encryption", false)
 	}
-	suiteEnum, err := suiteIDFromString(k.SuiteID)
+	suiteEnum, err := cryptosuite.Parse(k.SuiteID)
 	if err != nil {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "invalid suite_id", false)
+	}
+	if !suiteEnum.Supports(cryptosuite.OperationEncrypt) {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite does not provide encryption", false)
 	}
 	if suiteEnum.AuthenticatesAAD() {
 		if err := validateTenantAADPolicy(tenantCfg, cmd.AAD); err != nil {
 			return nil, err
 		}
+	} else if len(cmd.AAD) != 0 {
+		return nil, errorsx.New(errorsx.CodeBadRequest, "aad_b64 is not supported by CTR suites", false)
 	}
 
 	// Get current key version.
@@ -251,7 +285,8 @@ func (s *Service) Encrypt(ctx context.Context, cmd EncryptCommand) (*EncryptResu
 		return nil, errorsx.Wrap(errorsx.CodeTPMUnavailable, "dek lease failed", true, err)
 	}
 
-	// GCM suites require nonce leases. ECB suites carry no nonce in Envelope v1.
+	// GCM and CTR both consume the same durable 96-bit uniqueness lease.
+	// CTR expands that unique prefix into a 128-bit initial counter.
 	var nonceBytes []byte
 	if suiteEnum.NonceLen() > 0 {
 		epoch, err := s.store.ClusterEpoch(ctx)
@@ -268,6 +303,12 @@ func (s *Service) Encrypt(ctx context.Context, cmd EncryptCommand) (*EncryptResu
 		nonceBytes, err = s.nonceMgr.NextNonce(nonceLease.LeaseID)
 		if err != nil {
 			return nil, errorsx.Wrap(errorsx.CodeNonceExhausted, "nonce exhausted", true, err)
+		}
+		if suiteEnum.ServiceType() == cryptosuite.ServiceEncryptOnly {
+			nonceBytes, err = nonce.CTRInitialCounter(nonceBytes)
+			if err != nil {
+				return nil, errorsx.Wrap(errorsx.CodeInternal, "ctr initial counter failed", false, err)
+			}
 		}
 	}
 
@@ -315,6 +356,7 @@ func (s *Service) Encrypt(ctx context.Context, cmd EncryptCommand) (*EncryptResu
 		KeyID:          cmd.KeyID,
 		KeyVersion:     kv.VersionNo,
 		SuiteID:        k.SuiteID,
+		ServiceType:    suiteEnum.ServiceType(),
 		Ciphertext:     envBytes,
 		EnvelopeFormat: string(format),
 	}, nil
@@ -343,6 +385,9 @@ func (s *Service) Decrypt(ctx context.Context, cmd DecryptCommand) (*DecryptResu
 	if err != nil {
 		return nil, errorsx.New(errorsx.CodeKeyNotFound, "key not found", false)
 	}
+	if !genericUsageAllowed(k) {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "protocol-scoped key cannot be used by the generic crypto interface", false)
+	}
 	if k.Purpose != purposeEncryptDecrypt {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "key purpose does not permit decryption", false)
 	}
@@ -360,14 +405,30 @@ func (s *Service) Decrypt(ctx context.Context, cmd DecryptCommand) (*DecryptResu
 	if !keystate.KVCanDecrypt(keystate.KeyVersionStatus(kv.Status)) {
 		return nil, errorsx.New(errorsx.CodeKeyDestroyed, "key version destroyed", false)
 	}
-	suiteEnum, suiteErr := suiteIDFromString(k.SuiteID)
+	suiteEnum, suiteErr := cryptosuite.Parse(k.SuiteID)
 	if suiteErr != nil || uint16(suiteEnum) != uint16(env.SuiteID) {
 		return nil, errorsx.New(errorsx.CodeEnvelopeInvalid, "envelope suite does not match key", false)
+	}
+	if !suiteEnum.Supports(cryptosuite.OperationDecrypt) {
+		return nil, errorsx.New(errorsx.CodeEnvelopeInvalid, "envelope suite does not support decryption", false)
+	}
+	// Decryption is governed by the exact policy version authenticated in the
+	// Envelope, not by whichever version is current when the request arrives.
+	// Historical versions remain in the policy catalog for this decision.
+	historicalPolicy, err := s.policies.GetVersion(k.PolicyID, env.PolicyVersion)
+	if err != nil {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "envelope policy version unavailable", false)
+	}
+	historicalSuite, err := historicalPolicy.SuiteByID(k.SuiteID)
+	if err != nil || !policy.CanConsume(historicalSuite.Status) {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite not available for decryption under envelope policy", false)
 	}
 	if suiteEnum.AuthenticatesAAD() {
 		if err := validateTenantAADPolicy(tenantCfg, cmd.AAD); err != nil {
 			return nil, err
 		}
+	} else if len(cmd.AAD) != 0 {
+		return nil, errorsx.New(errorsx.CodeBadRequest, "aad_b64 is not supported by CTR suites", false)
 	}
 	if suiteEnum.AuthenticatesAAD() && !env.VerifyAADHash(cmd.AAD) {
 		s.audit(ctx, "decrypt.failure", cmd.TenantID, cmd.PrincipalID, k.ID, "failure", "AAD_MISMATCH", map[string]string{"aad_hash": sha256Hex(cmd.AAD)})
@@ -400,6 +461,162 @@ func (s *Service) Decrypt(ctx context.Context, cmd DecryptCommand) (*DecryptResu
 		KeyVersion: kv.VersionNo,
 		Plaintext:  pt,
 	}, nil
+}
+
+// Authenticate computes a detached CMAC. The message is returned unchanged by
+// definition; only the authenticator and its cryptographically bound metadata
+// are produced.
+func (s *Service) Authenticate(ctx context.Context, cmd AuthenticateCommand) (*AuthenticateResult, error) {
+	if cmd.TenantID == "" {
+		cmd.TenantID = defaultTenantID
+	}
+	if cmd.KeyID == "" {
+		return nil, errorsx.New(errorsx.CodeInvalidArgument, "key_id is required", false)
+	}
+	if len(cmd.Message) > s.maxBodySize {
+		return nil, errorsx.New(errorsx.CodeBadRequest, "message exceeds max size", false)
+	}
+	k, err := s.store.GetKey(ctx, cmd.TenantID, cmd.KeyID)
+	if err != nil {
+		return nil, errorsx.New(errorsx.CodeKeyNotFound, "key not found", false)
+	}
+	if !genericUsageAllowed(k) {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "protocol-scoped key cannot be used by the generic crypto interface", false)
+	}
+	if k.Purpose != purposeAuthenticateVerify {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "key purpose does not permit authentication", false)
+	}
+	if keyExpired(k) || !keystate.CanEncrypt(keystate.KeyStatus(k.Status)) {
+		return nil, errorsx.New(errorsx.CodeKeyDisabled, "key not active for authentication", false)
+	}
+	pol, err := s.policies.Get(k.PolicyID)
+	if err != nil {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "policy not found", false)
+	}
+	suite, err := pol.SuiteByID(k.SuiteID)
+	if err != nil || suite.ServiceType != policy.ServiceAuthOnly || !policy.CanCreate(suite.Status) {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite not available for authentication", false)
+	}
+	suiteEnum, err := cryptosuite.Parse(k.SuiteID)
+	if err != nil || !suiteEnum.Supports(cryptosuite.OperationAuthenticate) {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "invalid authentication suite", false)
+	}
+	kv, err := s.store.GetCurrentKeyVersion(ctx, k.ID)
+	if err != nil {
+		return nil, errorsx.Wrap(errorsx.CodeInternal, "version fetch failed", false, err)
+	}
+	if !keystate.KVCanEncrypt(keystate.KeyVersionStatus(kv.Status)) {
+		return nil, errorsx.New(errorsx.CodeKeyDisabled, "key version not active for authentication", false)
+	}
+	lease, err := s.resolver.IssueDEKLease(ctx, kv.ID, k.ID, kv.VersionNo, suiteEnum,
+		cmd.TenantID, purposeAuthenticateVerify, "")
+	if err != nil {
+		return nil, errorsx.Wrap(errorsx.CodeTPMUnavailable, "key lease failed", true, err)
+	}
+	defer zeroize(lease.DEK)
+	metadata := cryptomac.Metadata{
+		Version:       cryptomac.TagVersion,
+		SuiteID:       suiteEnum,
+		TenantID:      cmd.TenantID,
+		KeyID:         k.ID,
+		KeyVersion:    kv.VersionNo,
+		PolicyVersion: pol.Version,
+	}
+	tag, err := cryptomac.Compute(suiteEnum, lease.DEK, metadata, cmd.Message)
+	if err != nil {
+		return nil, errorsx.Wrap(errorsx.CodeInternal, "authentication failed", false, err)
+	}
+	s.audit(ctx, "authenticate.success", cmd.TenantID, cmd.PrincipalID, k.ID, "success", "", map[string]string{
+		"key_version": fmt.Sprintf("%d", kv.VersionNo),
+		"suite_id":    k.SuiteID,
+	})
+	return &AuthenticateResult{Authenticator: Authenticator{
+		Version:       metadata.Version,
+		SuiteID:       k.SuiteID,
+		ServiceType:   suiteEnum.ServiceType(),
+		KeyID:         k.ID,
+		KeyVersion:    kv.VersionNo,
+		PolicyVersion: pol.Version,
+		Tag:           tag,
+	}}, nil
+}
+
+// Verify validates a detached CMAC using the exact historical key and policy
+// versions recorded in the authenticator.
+func (s *Service) Verify(ctx context.Context, cmd VerifyCommand) (*VerifyResult, error) {
+	if cmd.TenantID == "" {
+		cmd.TenantID = defaultTenantID
+	}
+	if len(cmd.Message) > s.maxBodySize {
+		return nil, errorsx.New(errorsx.CodeBadRequest, "message exceeds max size", false)
+	}
+	authenticator := cmd.Authenticator
+	if authenticator.Version != cryptomac.TagVersion || authenticator.KeyID == "" ||
+		authenticator.KeyVersion == 0 || authenticator.PolicyVersion == 0 || len(authenticator.Tag) != 16 {
+		return nil, errorsx.New(errorsx.CodeInvalidArgument, "invalid authenticator", false)
+	}
+	k, err := s.store.GetKey(ctx, cmd.TenantID, authenticator.KeyID)
+	if err != nil {
+		return nil, errorsx.New(errorsx.CodeKeyNotFound, "key not found", false)
+	}
+	if !genericUsageAllowed(k) {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "protocol-scoped key cannot be used by the generic crypto interface", false)
+	}
+	if k.Purpose != purposeAuthenticateVerify {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "key purpose does not permit verification", false)
+	}
+	if keyExpired(k) || !keystate.CanDecrypt(keystate.KeyStatus(k.Status)) {
+		return nil, errorsx.New(errorsx.CodeKeyDestroyed, "key unavailable for verification", false)
+	}
+	suiteEnum, err := cryptosuite.Parse(k.SuiteID)
+	if err != nil || !suiteEnum.Supports(cryptosuite.OperationVerify) || authenticator.SuiteID != k.SuiteID ||
+		authenticator.ServiceType != cryptosuite.ServiceAuthOnly {
+		return nil, errorsx.New(errorsx.CodeInvalidArgument, "authenticator suite does not match key", false)
+	}
+	kv, err := s.store.GetKeyVersionByNo(ctx, k.ID, authenticator.KeyVersion)
+	if err != nil {
+		return nil, errorsx.New(errorsx.CodeKeyNotFound, "key version not found", false)
+	}
+	if !keystate.KVCanDecrypt(keystate.KeyVersionStatus(kv.Status)) {
+		return nil, errorsx.New(errorsx.CodeKeyDestroyed, "key version unavailable for verification", false)
+	}
+	historicalPolicy, err := s.policies.GetVersion(k.PolicyID, authenticator.PolicyVersion)
+	if err != nil {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "authenticator policy version unavailable", false)
+	}
+	historicalSuite, err := historicalPolicy.SuiteByID(k.SuiteID)
+	if err != nil || historicalSuite.ServiceType != policy.ServiceAuthOnly ||
+		!policy.CanConsume(historicalSuite.Status) {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite unavailable for verification", false)
+	}
+	lease, err := s.resolver.IssueDEKLease(ctx, kv.ID, k.ID, kv.VersionNo, suiteEnum,
+		cmd.TenantID, purposeAuthenticateVerify, "")
+	if err != nil {
+		return nil, errorsx.Wrap(errorsx.CodeTPMUnavailable, "key lease failed", true, err)
+	}
+	defer zeroize(lease.DEK)
+	valid, err := cryptomac.Verify(suiteEnum, lease.DEK, cryptomac.Metadata{
+		Version:       authenticator.Version,
+		SuiteID:       suiteEnum,
+		TenantID:      cmd.TenantID,
+		KeyID:         k.ID,
+		KeyVersion:    authenticator.KeyVersion,
+		PolicyVersion: authenticator.PolicyVersion,
+	}, cmd.Message, authenticator.Tag)
+	if err != nil {
+		return nil, errorsx.Wrap(errorsx.CodeInternal, "verification failed", false, err)
+	}
+	result := "success"
+	errorCode := ""
+	if !valid {
+		result = "failure"
+		errorCode = "MAC_MISMATCH"
+	}
+	s.audit(ctx, "verify.result", cmd.TenantID, cmd.PrincipalID, k.ID, result, errorCode, map[string]string{
+		"key_version": fmt.Sprintf("%d", kv.VersionNo),
+		"suite_id":    k.SuiteID,
+	})
+	return &VerifyResult{Valid: valid}, nil
 }
 
 // ConvertEnvelope parses an allowed source format and emits an allowed target
@@ -440,111 +657,11 @@ func (s *Service) InspectEnvelope(ctx context.Context, cmd InspectEnvelopeComman
 	if err != nil {
 		return nil, errorsx.New(errorsx.CodeEnvelopeInvalid, "envelope invalid", false)
 	}
-	result := &InspectEnvelopeResult{Format: string(profile.FormatID), Version: env.Version, Flags: env.Flags, SuiteID: env.SuiteID.String(), KeyID: string(env.KeyID), KeyVersion: env.KeyVersion, PolicyVersion: env.PolicyVersion, NonceBytes: len(env.Nonce), TagBytes: len(env.Tag), CiphertextBytes: len(env.Ciphertext)}
+	result := &InspectEnvelopeResult{Format: string(profile.FormatID), Version: env.Version, Flags: env.Flags, SuiteID: env.SuiteID.String(), ServiceType: env.SuiteID.ServiceType(), KeyID: string(env.KeyID), KeyVersion: env.KeyVersion, PolicyVersion: env.PolicyVersion, NonceBytes: len(env.Nonce), TagBytes: len(env.Tag), CiphertextBytes: len(env.Ciphertext)}
 	if env.SuiteID.AuthenticatesAAD() {
 		result.AADHash = fmt.Sprintf("%x", env.AADHash[:])
 	}
 	return result, nil
-}
-
-// suiteIDFromString maps a suite string to aead.SuiteID.
-func suiteIDFromString(s string) (aead.SuiteID, error) {
-	switch s {
-	case "AES_256_GCM":
-		return aead.SuiteAES256GCM, nil
-	case "SM4_GCM":
-		return aead.SuiteSM4GCM, nil
-	case "AES_256_ECB":
-		return aead.SuiteAES256ECB, nil
-	case "SM4_ECB":
-		return aead.SuiteSM4ECB, nil
-	}
-	return 0, fmt.Errorf("unknown suite %s", s)
-}
-
-func (s *Service) ensureDefaultEncryptKey(ctx context.Context, tenantID, principalID string) (string, error) {
-	if tenantID == "" {
-		tenantID = defaultTenantID
-	}
-	keyID := defaultKeyIDForTenant(tenantID)
-	if k, err := s.store.GetKey(ctx, tenantID, keyID); err == nil && k != nil {
-		if k.SuiteID != defaultEncryptKeySuite {
-			return "", errorsx.New(errorsx.CodePolicyDenied, "default key suite mismatch", false)
-		}
-		return keyID, nil
-	}
-	if _, err := s.store.GetTenant(ctx, tenantID); err != nil {
-		return "", errorsx.New(errorsx.CodePermissionDenied, "tenant not found", false)
-	}
-	pol, err := s.policies.Get(defaultPolicyID)
-	if err != nil {
-		return "", errorsx.New(errorsx.CodePolicyDenied, "default policy not found", false)
-	}
-	suite, err := pol.SuiteByID(defaultEncryptKeySuite)
-	if err != nil {
-		return "", errorsx.New(errorsx.CodePolicyDenied, "default suite not in policy", false)
-	}
-	if !policy.CanEncrypt(suite.Status) {
-		return "", errorsx.New(errorsx.CodePolicyDenied, "default suite not available for encryption", false)
-	}
-	if s.resolver == nil {
-		return "", errorsx.New(errorsx.CodeTPMUnavailable, "resolver unavailable", true)
-	}
-	suiteEnum := aead.SuiteAES256ECB
-	versionID := newID("kv")
-	dm, err := s.resolver.GenerateAndWrapDEK(ctx, suiteEnum, versionID)
-	if err != nil {
-		return "", errorsx.Wrap(errorsx.CodeTPMUnavailable, "default dek generation failed", true, err)
-	}
-	now := time.Now().UTC()
-	key := &models.Key{
-		ID:             keyID,
-		TenantID:       tenantID,
-		Name:           "Default ECB Key",
-		Purpose:        purposeEncryptDecrypt,
-		PolicyID:       defaultPolicyID,
-		SuiteID:        defaultEncryptKeySuite,
-		CurrentVersion: 1,
-		Status:         string(keystate.KeyActive),
-		Tags:           map[string]string{"managed_by": "system", "default": "true"},
-		CreatedAt:      now,
-		UpdatedAt:      now,
-	}
-	kv := &models.KeyVersion{
-		ID:           versionID,
-		KeyID:        keyID,
-		VersionNo:    1,
-		SuiteID:      defaultEncryptKeySuite,
-		WrappedDEK:   dm.WrappedDEK,
-		WrapMetadata: dm.WrapMetadata,
-		Status:       string(keystate.KVActive),
-		CreatedAt:    now,
-	}
-	if err := s.store.CreateKey(ctx, key, kv); err != nil {
-		if errors.Is(err, repository.ErrConflict) {
-			if existing, getErr := s.store.GetKey(ctx, tenantID, keyID); getErr == nil && existing != nil && existing.SuiteID == defaultEncryptKeySuite {
-				return keyID, nil
-			}
-		}
-		return "", errorsx.Wrap(errorsx.CodeDBConflict, "default key create failed", true, err)
-	}
-	s.audit(ctx, "key.default_created", tenantID, principalID, keyID, "success", "", map[string]string{"suite_id": defaultEncryptKeySuite})
-	return keyID, nil
-}
-
-func defaultKeyIDForTenant(tenantID string) string {
-	if tenantID == "" || tenantID == defaultTenantID {
-		return defaultEncryptKeyID
-	}
-	return defaultEncryptKeyID + "-" + tenantID
-}
-
-func newID(prefix string) string {
-	var b [8]byte
-	if _, err := cryptorand.Read(b[:]); err != nil {
-		return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
-	}
-	return prefix + "-" + hex.EncodeToString(b[:])
 }
 
 func zeroize(b []byte) {
@@ -562,6 +679,10 @@ func validateTenantAADPolicy(cfg *models.TenantEnvelopeConfig, callerAAD []byte)
 
 func keyExpired(k *models.Key) bool {
 	return k != nil && !k.ExpiresAt.IsZero() && !time.Now().UTC().Before(k.ExpiresAt)
+}
+
+func genericUsageAllowed(k *models.Key) bool {
+	return k != nil && k.UsageScope == models.KeyUsageGeneric
 }
 
 func envelopeProfile(cfg *models.TenantEnvelopeConfig, format envelope.FormatID) *envelope.FormatProfile {

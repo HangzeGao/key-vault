@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kvlt/key-vault/internal/crypto/aead"
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 )
 
 // FormatID identifies a versioned ciphertext container. It is selected by
@@ -704,59 +704,39 @@ func suiteStringFromAny(v any) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		suite := aead.SuiteID(n)
-		if !suiteKnown(suite) {
+		suiteID := suite.ID(n)
+		if !suiteKnown(suiteID) {
 			return "", fmt.Errorf("envelope: unknown suite_id")
 		}
-		return suiteName(suite), nil
+		return suiteName(suiteID), nil
 	}
 }
 
-func suiteIDFromJSON(s string) (aead.SuiteID, error) {
-	switch strings.TrimSpace(s) {
-	case "AES_256_GCM":
-		return aead.SuiteAES256GCM, nil
-	case "SM4_GCM":
-		return aead.SuiteSM4GCM, nil
-	case "AES_256_ECB":
-		return aead.SuiteAES256ECB, nil
-	case "SM4_ECB":
-		return aead.SuiteSM4ECB, nil
-	default:
-		n, err := strconv.ParseUint(s, 10, 16)
-		if err != nil {
-			return 0, fmt.Errorf("envelope: expected suite_id")
-		}
-		suite := aead.SuiteID(n)
-		if !suiteKnown(suite) {
-			return 0, fmt.Errorf("envelope: unknown suite_id")
-		}
-		return suite, nil
+func suiteIDFromJSON(s string) (suite.ID, error) {
+	trimmed := strings.TrimSpace(s)
+	if suiteID, err := suite.Parse(trimmed); err == nil && suiteKnown(suiteID) {
+		return suiteID, nil
 	}
+	n, err := strconv.ParseUint(trimmed, 10, 16)
+	if err != nil {
+		return 0, fmt.Errorf("envelope: expected suite_id")
+	}
+	suiteID := suite.ID(n)
+	if !suiteKnown(suiteID) {
+		return 0, fmt.Errorf("envelope: unknown suite_id")
+	}
+	return suiteID, nil
 }
 
-func suiteKnown(s aead.SuiteID) bool {
-	switch s {
-	case aead.SuiteAES256GCM, aead.SuiteSM4GCM, aead.SuiteAES256ECB, aead.SuiteSM4ECB:
-		return true
-	default:
-		return false
-	}
+func suiteKnown(s suite.ID) bool {
+	return s.Supports(suite.OperationDecrypt)
 }
 
-func suiteName(s aead.SuiteID) string {
-	switch s {
-	case aead.SuiteAES256GCM:
-		return "AES_256_GCM"
-	case aead.SuiteSM4GCM:
-		return "SM4_GCM"
-	case aead.SuiteAES256ECB:
-		return "AES_256_ECB"
-	case aead.SuiteSM4ECB:
-		return "SM4_ECB"
-	default:
-		return fmt.Sprintf("0x%04x", uint16(s))
+func suiteName(s suite.ID) string {
+	if suiteKnown(s) {
+		return s.String()
 	}
+	return fmt.Sprintf("0x%04x", uint16(s))
 }
 
 func isCoreJSONField(k string) bool {

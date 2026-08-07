@@ -6,6 +6,10 @@ export PATH=$PATH:/usr/local/go/bin
 go mod tidy
 
 export KVLT_HTTP_ADDR="${KVLT_HTTP_ADDR:-0.0.0.0:8080}"
+# The node ID is part of the CRK envelope identity and must remain stable across
+# restarts. The PostgreSQL bootstrap data on this engineering node is enrolled
+# as "node-bootstrap".
+export KVLT_NODE_ID="${KVLT_NODE_ID:-node-bootstrap}"
 export KVLT_TPM_PROVIDER="${KVLT_TPM_PROVIDER:-tpm2}"
 export KVLT_TPM_STATE_DIR="${KVLT_TPM_STATE_DIR:-/tmp/kvlt-tpm}"
 export TPM2TOOLS_TCTI="${TPM2TOOLS_TCTI:-device:/dev/tpmrm0}"
@@ -53,6 +57,7 @@ fi
 echo "$KVLT_STATIC_TOKENS" | jq .
 
 echo "database driver: $KVLT_DB_DRIVER"
+echo "node id: $KVLT_NODE_ID"
 mkdir -p "$KVLT_TPM_STATE_DIR" /tmp/kvlt-wal
 
 # Pre-flight: when using postgres, verify it is reachable before building/starting.

@@ -1,0 +1,8 @@
+# Ground Go -> flight C authenticated root-recovery vector.
+suite_id=SM4_GCM
+key=0123456789abcdeffedcba9876543210
+nonce_prefix=b0b1b2b3b4b5
+spi=7002
+iv_counter=01020304
+plaintext=010102030405060708000000070000000800000009001200112233445566778899aabbccddeeff
+protected_frame=20010043017002010203045473630b4ac04a365a4c116cdafd8b98b1be2e62cf1cebb35d9c9a6029454f0ad325d4fc5aacfee0b10b0696a48bf9c88ffaa5c7e5fc3f48c2

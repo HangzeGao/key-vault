@@ -99,6 +99,7 @@ export function KeyDetailPage() {
               ["Purpose", key.purpose],
               ["Policy", key.policy_id],
               ["Suite", key.suite_id],
+              ["Service Type", key.service_type],
               ["Version", `v${key.current_version}`],
               ["Status", key.status],
               ["Expires", key.expires_at ? new Date(key.expires_at).toLocaleString() : "never"],

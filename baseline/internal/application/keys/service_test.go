@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kvlt/key-vault/internal/domain/policy"
+	"github.com/kvlt/key-vault/internal/errorsx"
 	"github.com/kvlt/key-vault/internal/repository/memory"
 	"github.com/kvlt/key-vault/internal/repository/models"
 )
@@ -17,9 +19,29 @@ func TestSupportedPurpose(t *testing.T) {
 	if !isSupportedPurpose(PurposeKeyWrap) {
 		t.Fatal("key_wrap must be supported")
 	}
+	if !isSupportedPurpose(PurposeAuthenticateVerify) {
+		t.Fatal("authenticate_verify must be supported")
+	}
 	for _, purpose := range []string{"signing", "datakey", ""} {
 		if isSupportedPurpose(purpose) {
 			t.Fatalf("purpose %q must be rejected", purpose)
+		}
+	}
+}
+
+func TestCreateKeyRejectsPurposeSuiteServiceMismatch(t *testing.T) {
+	engine := policy.NewEngine()
+	if err := engine.Load(policy.DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	svc := New(memory.New(), nil, engine)
+	tests := []CreateKeyCommand{
+		{TenantID: "t-default", Name: "bad-auth", Purpose: PurposeAuthenticateVerify, PolicyID: "default-v1", SuiteID: "AES_256_GCM"},
+		{TenantID: "t-default", Name: "bad-encrypt", Purpose: PurposeEncryptDecrypt, PolicyID: "default-v1", SuiteID: "AES_256_CMAC"},
+	}
+	for _, command := range tests {
+		if _, err := svc.CreateKey(context.Background(), command); errorsx.AsCode(err) != errorsx.CodePolicyDenied {
+			t.Fatalf("CreateKey(%s, %s) error = %v", command.Purpose, command.SuiteID, err)
 		}
 	}
 }

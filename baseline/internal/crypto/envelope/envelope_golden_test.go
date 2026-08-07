@@ -7,7 +7,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/kvlt/key-vault/internal/crypto/aead"
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 )
 
 // Golden Test Vectors for Envelope v1 per design 搂8.3.
@@ -26,14 +26,14 @@ func TestGoldenEnvelopeRoundTrip(t *testing.T) {
 		KeyID:      keyID,
 		KeyVersion: 1,
 		Purpose:    "golden-test",
-		SuiteID:    uint16(aead.SuiteAES256GCM),
+		SuiteID:    uint16(suite.AES256GCM),
 	}
 	aadBytes, err := callerAAD.Canonical()
 	if err != nil {
 		t.Fatalf("canonical: %v", err)
 	}
 
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestGoldenEnvelopeRoundTrip(t *testing.T) {
 	if env.KeyVersion != 1 {
 		t.Fatalf("key_version = %d, want 1", env.KeyVersion)
 	}
-	if env.SuiteID != aead.SuiteAES256GCM {
+	if env.SuiteID != suite.AES256GCM {
 		t.Fatalf("suite = %v, want AES_256_GCM", env.SuiteID)
 	}
 }
@@ -84,14 +84,14 @@ func TestGoldenEnvelopeSM4(t *testing.T) {
 		KeyID:      keyID,
 		KeyVersion: 1,
 		Purpose:    "sm4-test",
-		SuiteID:    uint16(aead.SuiteSM4GCM),
+		SuiteID:    uint16(suite.SM4GCM),
 	}
 	aadBytes, err := callerAAD.Canonical()
 	if err != nil {
 		t.Fatalf("canonical: %v", err)
 	}
 
-	sealed, err := Seal(aead.SuiteSM4GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.SM4GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestGoldenEnvelopeSM4(t *testing.T) {
 	if !bytes.Equal(pt, plaintext) {
 		t.Fatalf("plaintext mismatch")
 	}
-	if env.SuiteID != aead.SuiteSM4GCM {
+	if env.SuiteID != suite.SM4GCM {
 		t.Fatalf("suite = %v, want SM4_GCM", env.SuiteID)
 	}
 }
@@ -120,11 +120,11 @@ func TestGoldenEnvelopeAADHash(t *testing.T) {
 		KeyID:      keyID,
 		KeyVersion: 1,
 		Purpose:    "p",
-		SuiteID:    uint16(aead.SuiteAES256GCM),
+		SuiteID:    uint16(suite.AES256GCM),
 	}
 	aadBytes, _ := callerAAD.Canonical()
 
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -154,11 +154,11 @@ func TestGoldenEnvelopeRejectsTamperedCiphertext(t *testing.T) {
 		KeyID:      keyID,
 		KeyVersion: 1,
 		Purpose:    "p",
-		SuiteID:    uint16(aead.SuiteAES256GCM),
+		SuiteID:    uint16(suite.AES256GCM),
 	}
 	aadBytes, _ := callerAAD.Canonical()
 
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -187,11 +187,11 @@ func TestGoldenEnvelopeRejectsTamperedAAD(t *testing.T) {
 		KeyID:      keyID,
 		KeyVersion: 1,
 		Purpose:    "original-purpose",
-		SuiteID:    uint16(aead.SuiteAES256GCM),
+		SuiteID:    uint16(suite.AES256GCM),
 	}
 	aadBytes, _ := callerAAD.Canonical()
 
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestGoldenEnvelopeRejectsTamperedAAD(t *testing.T) {
 		KeyID:      keyID,
 		KeyVersion: 1,
 		Purpose:    "wrong-purpose",
-		SuiteID:    uint16(aead.SuiteAES256GCM),
+		SuiteID:    uint16(suite.AES256GCM),
 	}
 	wrongBytes, _ := wrongAAD.Canonical()
 
@@ -249,9 +249,9 @@ func TestGoldenEnvelopeRejectsReservedFlags(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0x11}, 12)
 	plaintext := []byte("flag test")
 	keyID := "k"
-	callerAAD := testCallerAAD{TenantID: "t", KeyID: keyID, KeyVersion: 1, Purpose: "p", SuiteID: uint16(aead.SuiteAES256GCM)}
+	callerAAD := testCallerAAD{TenantID: "t", KeyID: keyID, KeyVersion: 1, Purpose: "p", SuiteID: uint16(suite.AES256GCM)}
 	aadBytes, _ := callerAAD.Canonical()
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -269,9 +269,9 @@ func TestGoldenEnvelopeRejectsTrailingBytes(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0x11}, 12)
 	plaintext := []byte("trailing")
 	keyID := "k"
-	callerAAD := testCallerAAD{TenantID: "t", KeyID: keyID, KeyVersion: 1, Purpose: "p", SuiteID: uint16(aead.SuiteAES256GCM)}
+	callerAAD := testCallerAAD{TenantID: "t", KeyID: keyID, KeyVersion: 1, Purpose: "p", SuiteID: uint16(suite.AES256GCM)}
 	aadBytes, _ := callerAAD.Canonical()
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -297,50 +297,40 @@ func TestGoldenEnvelopeRejectsUnknownSuite(t *testing.T) {
 	}
 }
 
-func TestEnvelopeECBRoundTrip(t *testing.T) {
+func TestEnvelopeCTRRoundTrip(t *testing.T) {
 	key := bytes.Repeat([]byte{0x55}, 32)
-	plaintext := []byte("ECB no-padding test payload")
-	keyID := "key-ecb-001"
-	callerAAD := testCallerAAD{
-		TenantID:   "tenant-ecb",
-		KeyID:      keyID,
-		KeyVersion: 1,
-		Purpose:    "ecb-test",
-		SuiteID:    uint16(aead.SuiteAES256ECB),
-	}
-	aadBytes, err := callerAAD.Canonical()
-	if err != nil {
-		t.Fatalf("canonical: %v", err)
-	}
-	sealed, err := Seal(aead.SuiteAES256ECB, key, keyID, 1, 1, nil, plaintext, aadBytes)
+	plaintext := []byte("CTR unaligned test payload")
+	keyID := "key-ctr-001"
+	iv := bytes.Repeat([]byte{0x77}, 16)
+	sealed, err := Seal(suite.AES256CTR, key, keyID, 1, 1, iv, plaintext, nil)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	env, opened, err := Open(sealed, key, []byte("different aad is ignored by ecb"))
+	env, opened, err := Open(sealed, key, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	if !bytes.Equal(opened, plaintext) {
 		t.Fatalf("plaintext mismatch: got %q want %q", opened, plaintext)
 	}
-	if env.SuiteID != aead.SuiteAES256ECB {
-		t.Fatalf("suite = %v, want AES_256_ECB", env.SuiteID)
+	if env.SuiteID != suite.AES256CTR {
+		t.Fatalf("suite = %v, want AES_256_CTR", env.SuiteID)
 	}
-	if len(env.Nonce) != 0 || len(env.Tag) != 0 {
-		t.Fatalf("ECB envelope nonce/tag lengths = %d/%d, want 0/0", len(env.Nonce), len(env.Tag))
+	if len(env.Nonce) != 16 || len(env.Tag) != 0 {
+		t.Fatalf("CTR envelope nonce/tag lengths = %d/%d, want 16/0", len(env.Nonce), len(env.Tag))
 	}
 	if env.AADHash != ([32]byte{}) {
-		t.Fatalf("ECB aad_hash = %x, want zero", env.AADHash)
+		t.Fatalf("CTR aad_hash = %x, want zero", env.AADHash)
 	}
-	if len(env.Ciphertext) != aead.SuiteAES256ECB.CiphertextLen(len(plaintext)) {
-		t.Fatalf("ECB ciphertext length = %d, want %d", len(env.Ciphertext), aead.SuiteAES256ECB.CiphertextLen(len(plaintext)))
+	if len(env.Ciphertext) != len(plaintext) {
+		t.Fatalf("CTR ciphertext length = %d, want %d", len(env.Ciphertext), len(plaintext))
 	}
-	wantWireLen := BaseHeaderSize + len(keyID) + len(env.Ciphertext)
+	wantWireLen := BaseHeaderSize + len(keyID) + len(iv) + len(env.Ciphertext)
 	if len(sealed) != wantWireLen {
-		t.Fatalf("ECB canonical length = %d, want %d without aad_hash", len(sealed), wantWireLen)
+		t.Fatalf("CTR canonical length = %d, want %d without tag/aad_hash", len(sealed), wantWireLen)
 	}
 	if !env.VerifyAADHash([]byte("any aad")) {
-		t.Fatal("ECB VerifyAADHash must ignore caller AAD")
+		t.Fatal("CTR VerifyAADHash must ignore caller AAD")
 	}
 }
 
@@ -350,9 +340,9 @@ func TestGoldenEnvelopeEncodeRoundTrip(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0x11}, 12)
 	plaintext := []byte("round-trip")
 	keyID := "k-rt"
-	callerAAD := testCallerAAD{TenantID: "t", KeyID: keyID, KeyVersion: 1, Purpose: "p", SuiteID: uint16(aead.SuiteAES256GCM)}
+	callerAAD := testCallerAAD{TenantID: "t", KeyID: keyID, KeyVersion: 1, Purpose: "p", SuiteID: uint16(suite.AES256GCM)}
 	aadBytes, _ := callerAAD.Canonical()
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -382,9 +372,9 @@ func TestGoldenEnvelopeHeaderLayout(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0x11}, 12)
 	plaintext := []byte("layout")
 	keyID := "k-layout"
-	callerAAD := testCallerAAD{TenantID: "t", KeyID: keyID, KeyVersion: 1, Purpose: "p", SuiteID: uint16(aead.SuiteAES256GCM)}
+	callerAAD := testCallerAAD{TenantID: "t", KeyID: keyID, KeyVersion: 1, Purpose: "p", SuiteID: uint16(suite.AES256GCM)}
 	aadBytes, _ := callerAAD.Canonical()
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 7, 9, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 7, 9, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -452,10 +442,10 @@ func TestGoldenEnvelopeHexVector(t *testing.T) {
 		KeyID:      keyID,
 		KeyVersion: 1,
 		Purpose:    "P",
-		SuiteID:    uint16(aead.SuiteAES256GCM),
+		SuiteID:    uint16(suite.AES256GCM),
 	}
 	aadBytes, _ := callerAAD.Canonical()
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -463,7 +453,7 @@ func TestGoldenEnvelopeHexVector(t *testing.T) {
 	header := sealed[:FixedHeaderSize]
 	t.Logf("header hex: %s", hex.EncodeToString(header))
 	// Verify the header is deterministic across calls.
-	sealed2, _ := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed2, _ := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if !bytes.Equal(sealed, sealed2) {
 		t.Fatal("Seal is not deterministic with fixed inputs")
 	}

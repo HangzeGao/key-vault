@@ -597,8 +597,7 @@ func (h *Handler) getDBStatus(w http.ResponseWriter, r *http.Request) {
 	if latest, err := h.store.GetLatestCRKVersion(ctx); err == nil {
 		response.CRKConsistency.LatestVersion = latest.Version
 		response.CRKConsistency.Status = latest.Status
-		// Check envelope for default node.
-		if rec, env, ok := h.tryLoadCRKEnvelope(ctx, latest.ID, "node-bootstrap"); ok {
+		if rec, env, ok := h.tryLoadCRKEnvelope(ctx, latest.ID, h.configuredNodeID()); ok {
 			expected := crkAADDigest(env)
 			valid := env.CRKAADDigest == expected
 			response.CRKConsistency.DigestValid = &valid
@@ -688,7 +687,7 @@ func (h *Handler) refreshResolver(w http.ResponseWriter, r *http.Request) {
 	}
 	nodeID := r.URL.Query().Get("node_id")
 	if nodeID == "" {
-		nodeID = "node-bootstrap"
+		nodeID = h.configuredNodeID()
 	}
 	rec, err := h.store.GetCRKNodeEnvelope(ctx, latest.ID, nodeID)
 	if err != nil {
@@ -795,9 +794,16 @@ func (h *Handler) loadCRKEnvelope(w http.ResponseWriter, r *http.Request) (*mode
 	}
 	nodeID := r.URL.Query().Get("node_id")
 	if nodeID == "" {
-		nodeID = "node-bootstrap"
+		nodeID = h.configuredNodeID()
 	}
 	return h.tryLoadCRKEnvelopeErr(w, r, crkVersionID, nodeID)
+}
+
+func (h *Handler) configuredNodeID() string {
+	if h.cfg != nil && h.cfg.Server.NodeID != "" {
+		return h.cfg.Server.NodeID
+	}
+	return "node-development"
 }
 
 func (h *Handler) tryLoadCRKEnvelopeErr(w http.ResponseWriter, r *http.Request, crkVersionID, nodeID string) (*models.CRKNodeEnvelope, *provider.CRKEnvelope, bool) {

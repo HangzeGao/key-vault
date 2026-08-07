@@ -74,7 +74,6 @@ type Manager struct {
 	engine      *policy.Engine
 	signingKeys map[string]*SigningKey
 	current     *SignedPolicy
-	currentRaw  *policy.Policy
 	auditor     Auditor
 }
 
@@ -94,18 +93,39 @@ func New(engine *policy.Engine, auditor Auditor) *Manager {
 
 // AddSigningKey registers a trusted signing key.
 func (m *Manager) AddSigningKey(keyID string, pub ed25519.PublicKey) {
+	_ = m.AddTrustedSigningKey(keyID, pub, "active")
+}
+
+// AddTrustedSigningKey registers a persistent trust-bundle entry. Duplicate
+// identifiers are rejected so file ordering cannot silently replace trust.
+func (m *Manager) AddTrustedSigningKey(keyID string, pub ed25519.PublicKey, status string) error {
+	if keyID == "" || len(pub) != ed25519.PublicKeySize {
+		return fmt.Errorf("policy: invalid trusted signing key")
+	}
+	if status != "active" && status != "revoked" {
+		return fmt.Errorf("policy: invalid signing key status %q", status)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, exists := m.signingKeys[keyID]; exists {
+		return fmt.Errorf("policy: duplicate signing key %s", keyID)
+	}
 	m.signingKeys[keyID] = &SigningKey{
 		KeyID:     keyID,
-		PublicKey: pub,
-		Status:    "active",
+		PublicKey: append(ed25519.PublicKey(nil), pub...),
+		Status:    status,
 		AddedAt:   time.Now().UTC(),
 	}
+	return nil
 }
 
 // LoadSigned loads and verifies a signed policy package per the baseline load order.
 func (m *Manager) LoadSigned(ctx context.Context, sp *SignedPolicy) error {
+	if sp == nil {
+		return fmt.Errorf("policy: nil signed policy")
+	}
+	sp = cloneSignedPolicy(sp)
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -118,6 +138,21 @@ func (m *Manager) LoadSigned(ctx context.Context, sp *SignedPolicy) error {
 	}
 	if len(sp.Suites) == 0 {
 		return fmt.Errorf("policy: no suites defined")
+	}
+	if sp.Status != "active" {
+		return fmt.Errorf("policy: package status must be active")
+	}
+	if sp.EffectiveAt.IsZero() || sp.EffectiveAt.After(time.Now().UTC()) {
+		return fmt.Errorf("policy: effective_at is missing or in the future")
+	}
+	if sp.Cryptoperiod.DefaultDays <= 0 ||
+		sp.Cryptoperiod.MaxDays < sp.Cryptoperiod.DefaultDays ||
+		sp.Cryptoperiod.UpdateNoticeDays < 0 ||
+		sp.Cryptoperiod.UpdateNoticeDays > sp.Cryptoperiod.MaxDays {
+		return fmt.Errorf("policy: invalid cryptoperiod")
+	}
+	if sp.Signature.Alg != "Ed25519" {
+		return fmt.Errorf("policy: signature algorithm must be Ed25519")
 	}
 	if sp.Signature.KeyID == "" || sp.Signature.Sig == "" {
 		err := fmt.Errorf("policy: missing signature")
@@ -157,6 +192,17 @@ func (m *Manager) LoadSigned(ctx context.Context, sp *SignedPolicy) error {
 		m.auditReload(ctx, sp.PolicyID, sp.Version, "failure", "signature verification failed")
 		return fmt.Errorf("policy: signature verification failed")
 	}
+	if m.current != nil && m.current.PolicyID == sp.PolicyID {
+		if sp.Version < m.current.Version {
+			m.auditReload(ctx, sp.PolicyID, sp.Version, "failure", "policy rollback rejected")
+			return fmt.Errorf("policy: version rollback rejected")
+		}
+		if sp.Version == m.current.Version &&
+			sp.Signature.PayloadHash != m.current.Signature.PayloadHash {
+			m.auditReload(ctx, sp.PolicyID, sp.Version, "failure", "policy version is immutable")
+			return fmt.Errorf("policy: version %d is immutable", sp.Version)
+		}
+	}
 
 	// Step 4: Semantic validation — convert to policy.Policy and load into engine.
 	pp := &policy.Policy{
@@ -172,22 +218,17 @@ func (m *Manager) LoadSigned(ctx context.Context, sp *SignedPolicy) error {
 			SignedPayloadHash: sp.Signature.PayloadHash,
 		},
 	}
-	// Load into a temp engine to validate without breaking current.
-	tempEng := policy.NewEngine()
-	if err := tempEng.Load(pp); err != nil {
+	// Activate in the shared versioned catalog. Engine.Load validates before
+	// taking its write lock, so a rejected package leaves the last valid policy
+	// active and every application module keeps the same Engine pointer.
+	if err := m.engine.Load(pp); err != nil {
 		m.auditReload(ctx, sp.PolicyID, sp.Version, "failure", "semantic validation: "+err.Error())
 		return fmt.Errorf("policy: semantic: %w", err)
 	}
 
-	// Step 5: Atomic cache switch — replace engine state.
-	// Remove old policy and load new.
-	if m.currentRaw != nil {
-		// Keep old as fallback reference.
-	}
+	// Step 5: Publish the accepted package as current.
+	// Publish manager metadata only after the shared catalog accepts the policy.
 	m.current = sp
-	m.currentRaw = pp
-	// Reload into the real engine.
-	m.engine = tempEng
 
 	m.auditReload(ctx, sp.PolicyID, sp.Version, "success", "policy loaded")
 	return nil
@@ -195,9 +236,7 @@ func (m *Manager) LoadSigned(ctx context.Context, sp *SignedPolicy) error {
 
 // Reload triggers a hot reload from the current signed policy (re-verification).
 func (m *Manager) Reload(ctx context.Context) error {
-	m.mu.RLock()
-	current := m.current
-	m.mu.RUnlock()
+	current := m.Current()
 	if current == nil {
 		return fmt.Errorf("policy: no current signed policy to reload")
 	}
@@ -208,13 +247,11 @@ func (m *Manager) Reload(ctx context.Context) error {
 func (m *Manager) Current() *SignedPolicy {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.current
+	return cloneSignedPolicy(m.current)
 }
 
-// Engine returns the current policy engine.
+// Engine returns the stable shared policy catalog.
 func (m *Manager) Engine() *policy.Engine {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
 	return m.engine
 }
 
@@ -225,9 +262,25 @@ func (m *Manager) SigningKeys() []*SigningKey {
 	out := make([]*SigningKey, 0, len(m.signingKeys))
 	for _, k := range m.signingKeys {
 		c := *k
+		c.PublicKey = append(ed25519.PublicKey(nil), k.PublicKey...)
 		out = append(out, &c)
 	}
 	return out
+}
+
+func cloneSignedPolicy(sp *SignedPolicy) *SignedPolicy {
+	if sp == nil {
+		return nil
+	}
+	out := *sp
+	out.Suites = make([]policy.Suite, len(sp.Suites))
+	copy(out.Suites, sp.Suites)
+	for i := range out.Suites {
+		out.Suites[i].Compliance = append([]string(nil), sp.Suites[i].Compliance...)
+	}
+	out.GrayRules.TenantAllowlist = append([]string(nil), sp.GrayRules.TenantAllowlist...)
+	out.GrayRules.KeyAllowlist = append([]string(nil), sp.GrayRules.KeyAllowlist...)
+	return &out
 }
 
 // auditReload records a policy reload audit event.

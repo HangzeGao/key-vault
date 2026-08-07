@@ -1,0 +1,86 @@
+# Template only. Mount real certificates, public policy files, secret pepper,
+# and restore evidence using your deployment secret/configuration system.
+environment: production
+
+server:
+  https_listen_addr: ":8443"
+  tls_cert_file: /run/kvlt/tls/server.crt
+  tls_key_file: /run/kvlt/tls/server.key
+  tls_client_ca_file: /run/kvlt/tls/client-ca.crt
+  read_header_timeout: 5s
+  read_timeout: 15s
+  write_timeout: 15s
+  idle_timeout: 60s
+  max_header_bytes: 16384
+  max_request_body: 65536
+  plane_isolation_mode: physical
+  active_plane: management
+  node_id: kvlt-management-01
+  allowed_origins:
+    - https://vault-console.example.com
+
+database:
+  driver: postgres
+  dsn: postgres://kvlt@postgres.internal/kvlt?sslmode=verify-full
+
+tpm:
+  provider: native
+  tcti: device:/dev/tpmrm0
+  policy_pcrs: [7]
+
+auth:
+  jwt_issuer: https://identity.example.com
+  jwt_audience: key-vault
+  jwt_alg_whitelist: [RS256, ES256]
+  jwk_set_url: https://identity.example.com/.well-known/jwks.json
+  jwk_cache_ttl: 5m
+  default_token_ttl: 15m
+  hmac_enabled: false
+
+policy:
+  trusted_keys_path: /run/kvlt/policy/trusted-keys.json
+  signed_policy_path: /run/kvlt/policy/policy.json
+
+audit:
+  wal_dir: /var/lib/kvlt/audit-wal
+  wal_max_size_bytes: 67108864
+  wal_enabled: true
+  buffer_size: 1024
+  redaction_pepper_file: /run/kvlt/secrets/audit-redaction-pepper
+
+recovery:
+  pitr_enabled: true
+  restore_drill_evidence_file: /run/kvlt/recovery/latest-restore-drill.json
+
+nonce:
+  lease_size: 1024
+  prefetch_watermark: 0.70
+  throttle_watermark: 0.90
+  lease_ttl: 10m
+  rate_window: 1m
+  rate_sigma_threshold: 3.0
+  unused_ratio_alert: 0.50
+
+lifecycle:
+  owner_id: kvlt-management-01
+  lease_ttl: 30s
+  max_attempts: 5
+  poll_interval: 5s
+  expiry_scan_interval: 1m
+  expiry_warning_window: 168h
+
+# These values are mission-profile inputs. Validate them against the selected
+# CCSDS 355.0-B-2 transfer-frame profile before deployment.
+ccsds:
+  aos_primary_header_length: 6
+  max_frame_length: 65536
+
+baseline:
+  version: replace-with-approved-baseline
+  selinux_status: enforcing
+  kernel_version: replace-with-approved-kernel
+  virt_platform: replace-with-approved-platform
+  tpm2_tss_version: replace-with-approved-version
+  swtpm_isolated: false
+
+log_level: INFO

@@ -32,8 +32,18 @@ func New(store Store, registry *envelope.Registry) *Handler {
 
 // Routes registers the tenant envelope config routes.
 func (h *Handler) Routes(mux *http.ServeMux) {
+	h.ManagementRoutes(mux)
+	h.DataRoutes(mux)
+}
+
+// ManagementRoutes registers tenant-owned configuration routes.
+func (h *Handler) ManagementRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ui/api/v1/tenants/{tenant_id}/envelope-config", h.getEnvelopeConfig)
 	mux.HandleFunc("PUT /ui/api/v1/tenants/{tenant_id}/envelope-config", h.updateEnvelopeConfig)
+}
+
+// DataRoutes exposes only the read-only format capability route.
+func (h *Handler) DataRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ui/api/v1/envelope/formats", h.listFormats)
 }
 

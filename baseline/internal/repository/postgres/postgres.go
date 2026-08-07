@@ -72,6 +72,9 @@ var schemaMigrations = []migration{
 	{version: 2, name: "enforce_encrypt_decrypt_purpose", sql: migrationV2PurposeSQL},
 	{version: 3, name: "archive_destroyed_keys", sql: migrationV3ArchiveDestroyedKeysSQL},
 	{version: 4, name: "key_upload_download", sql: migrationV4KeyUploadDownloadSQL},
+	{version: 5, name: "authentication_key_purpose", sql: migrationV5AuthenticationKeyPurposeSQL},
+	{version: 6, name: "key_usage_scope", sql: migrationV6KeyUsageScopeSQL},
+	{version: 7, name: "ccsds_security_state", sql: migrationV7CCSDSSecurityStateSQL},
 }
 
 // Migrate applies each embedded schema migration exactly once. A transaction-
@@ -249,9 +252,9 @@ func (s *Store) CreateKey(ctx context.Context, k *models.Key, kv *models.KeyVers
 		expiresAt = k.ExpiresAt
 	}
 	_, err = tx.Exec(ctx,
-		`INSERT INTO keys (id, tenant_id, name, purpose, policy_id, suite_id, current_version, status, tags, expires_at, archived_at, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12)`,
-		k.ID, k.TenantID, k.Name, k.Purpose, k.PolicyID, k.SuiteID, k.CurrentVersion, k.Status, tagsJSON, expiresAt, k.CreatedAt, k.UpdatedAt)
+		`INSERT INTO keys (id, tenant_id, name, purpose, usage_scope, policy_id, suite_id, current_version, status, tags, expires_at, archived_at, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, $12, $13)`,
+		k.ID, k.TenantID, k.Name, k.Purpose, k.UsageScope, k.PolicyID, k.SuiteID, k.CurrentVersion, k.Status, tagsJSON, expiresAt, k.CreatedAt, k.UpdatedAt)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return fmt.Errorf("%w: key %s exists", ErrConflict, k.ID)
@@ -270,7 +273,7 @@ func (s *Store) CreateKey(ctx context.Context, k *models.Key, kv *models.KeyVers
 
 func (s *Store) GetKey(ctx context.Context, tenantID, keyID string) (*models.Key, error) {
 	row := s.pool.QueryRow(ctx,
-		`SELECT id, tenant_id, name, purpose, policy_id, suite_id, current_version, status, tags, expires_at, archived_at, created_at, updated_at
+		`SELECT id, tenant_id, name, purpose, usage_scope, policy_id, suite_id, current_version, status, tags, expires_at, archived_at, created_at, updated_at
 		 FROM keys WHERE id=$1 AND tenant_id=$2`, keyID, tenantID)
 	k, err := scanKey(row)
 	if err != nil {
@@ -284,7 +287,7 @@ func (s *Store) GetKey(ctx context.Context, tenantID, keyID string) (*models.Key
 
 func (s *Store) ListKeys(ctx context.Context, tenantID string) ([]*models.Key, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, tenant_id, name, purpose, policy_id, suite_id, current_version, status, tags, expires_at, archived_at, created_at, updated_at
+		`SELECT id, tenant_id, name, purpose, usage_scope, policy_id, suite_id, current_version, status, tags, expires_at, archived_at, created_at, updated_at
 		 FROM keys WHERE tenant_id=$1 AND archived_at IS NULL ORDER BY created_at DESC`, tenantID)
 	if err != nil {
 		return nil, err
@@ -303,7 +306,7 @@ func (s *Store) ListKeys(ctx context.Context, tenantID string) ([]*models.Key, e
 
 func (s *Store) ListKeysIncludingArchived(ctx context.Context, tenantID string) ([]*models.Key, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, tenant_id, name, purpose, policy_id, suite_id, current_version, status, tags, expires_at, archived_at, created_at, updated_at
+		`SELECT id, tenant_id, name, purpose, usage_scope, policy_id, suite_id, current_version, status, tags, expires_at, archived_at, created_at, updated_at
 		 FROM keys WHERE tenant_id=$1 ORDER BY created_at DESC`, tenantID)
 	if err != nil {
 		return nil, err
@@ -322,7 +325,7 @@ func (s *Store) ListKeysIncludingArchived(ctx context.Context, tenantID string) 
 
 func (s *Store) ListAllKeys(ctx context.Context) ([]*models.Key, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT id, tenant_id, name, purpose, policy_id, suite_id, current_version, status, tags, expires_at, archived_at, created_at, updated_at
+		`SELECT id, tenant_id, name, purpose, usage_scope, policy_id, suite_id, current_version, status, tags, expires_at, archived_at, created_at, updated_at
 		 FROM keys ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -627,7 +630,7 @@ func scanKey(row scanner) (*models.Key, error) {
 	var tagsJSON []byte
 	var expiresAt *time.Time
 	var archivedAt *time.Time
-	err := row.Scan(&k.ID, &k.TenantID, &k.Name, &k.Purpose, &k.PolicyID, &k.SuiteID, &k.CurrentVersion, &k.Status, &tagsJSON, &expiresAt, &archivedAt, &k.CreatedAt, &k.UpdatedAt)
+	err := row.Scan(&k.ID, &k.TenantID, &k.Name, &k.Purpose, &k.UsageScope, &k.PolicyID, &k.SuiteID, &k.CurrentVersion, &k.Status, &tagsJSON, &expiresAt, &archivedAt, &k.CreatedAt, &k.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

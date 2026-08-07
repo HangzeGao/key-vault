@@ -73,6 +73,20 @@ func TestAPIAccessPlaneAndScopeMatrix(t *testing.T) {
 			wantStatus: http.StatusNoContent,
 		},
 		{
+			name:       "data plane can authenticate with dedicated scope",
+			method:     http.MethodPost,
+			path:       "/ui/api/v1/crypto/authenticate",
+			principal:  &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"crypto:authenticate"}},
+			wantStatus: http.StatusNoContent,
+		},
+		{
+			name:       "authenticate scope cannot verify",
+			method:     http.MethodPost,
+			path:       "/ui/api/v1/crypto/verify",
+			principal:  &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"crypto:authenticate"}},
+			wantStatus: http.StatusForbidden,
+		},
+		{
 			name:   "data plane cannot list keys",
 			method: http.MethodGet,
 			path:   "/ui/api/v1/keys",

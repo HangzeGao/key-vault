@@ -14,6 +14,7 @@ import (
 
 	"github.com/kvlt/key-vault/internal/application/keys"
 	"github.com/kvlt/key-vault/internal/crypto/aead"
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 	"github.com/kvlt/key-vault/internal/errorsx"
 	"github.com/kvlt/key-vault/internal/repository"
 	"github.com/kvlt/key-vault/internal/repository/models"
@@ -272,12 +273,12 @@ func (s *Service) selectVersion(ctx context.Context, key *models.Key, version ui
 	return s.store.GetKeyVersionByNo(ctx, key.ID, version)
 }
 
-func wrappingSuite(id string) (aead.SuiteID, error) {
+func wrappingSuite(id string) (suite.ID, error) {
 	switch id {
 	case "AES_256_GCM":
-		return aead.SuiteAES256GCM, nil
+		return suite.AES256GCM, nil
 	case "SM4_GCM":
-		return aead.SuiteSM4GCM, nil
+		return suite.SM4GCM, nil
 	default:
 		return 0, errors.New("kek must use an authenticated GCM suite")
 	}

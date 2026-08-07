@@ -2,6 +2,7 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -21,6 +22,8 @@ import (
 	"github.com/kvlt/key-vault/internal/application/crypto"
 	"github.com/kvlt/key-vault/internal/application/keys"
 	"github.com/kvlt/key-vault/internal/application/keytransfer"
+	"github.com/kvlt/key-vault/internal/application/protection"
+	"github.com/kvlt/key-vault/internal/audit/redaction"
 	"github.com/kvlt/key-vault/internal/auditchain"
 	"github.com/kvlt/key-vault/internal/auth/hmacsign"
 	"github.com/kvlt/key-vault/internal/auth/jwt"
@@ -33,6 +36,7 @@ import (
 	"github.com/kvlt/key-vault/internal/lifecycle"
 	"github.com/kvlt/key-vault/internal/outbox"
 	"github.com/kvlt/key-vault/internal/policysig"
+	"github.com/kvlt/key-vault/internal/protocol/ccsds"
 	"github.com/kvlt/key-vault/internal/repository"
 	"github.com/kvlt/key-vault/internal/repository/memory"
 	"github.com/kvlt/key-vault/internal/repository/models"
@@ -51,6 +55,8 @@ type App struct {
 	PolicyMgr          *policysig.Manager
 	KeyService         *keys.Service
 	CryptoService      *crypto.Service
+	CCSDSFrameSecurity *ccsds.FrameSecurity
+	CCSDSStore         ccsds.Store
 	KeyTransferService *keytransfer.Service
 	NonceManager       *nonce.Manager
 	JWTVerifier        *jwt.Verifier
@@ -65,6 +71,15 @@ type App struct {
 
 // Build assembles the application from config.
 func Build(ctx context.Context, cfg *config.Config) (*App, error) {
+	if cfg == nil {
+		return nil, errors.New("bootstrap: nil config")
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("bootstrap: validate config: %w", err)
+	}
+	if err := configureRedactionPepper(cfg); err != nil {
+		return nil, err
+	}
 	for _, finding := range cfg.Diagnostics() {
 		if finding.Level == "warn" {
 			slog.Warn("configuration posture", "code", finding.Code, "message", finding.Message)
@@ -121,10 +136,6 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 
 	// 3. Policy engine.
 	polEng := policy.NewEngine()
-	defPol := policy.DefaultPolicy()
-	if err := polEng.Load(defPol); err != nil {
-		return nil, fmt.Errorf("bootstrap: policy: %w", err)
-	}
 
 	// 4. Resolver.
 	resolver := keyresolver.New(tpm, "kvlt-nrwk-v1", 5*time.Minute)
@@ -138,8 +149,37 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	keySvc := keys.New(store, resolver, polEng)
 	cryptoSvc := crypto.New(store, resolver, polEng, nonceMgr, cfg.Server.MaxRequestBody)
 	keyTransferSvc := keytransfer.New(store, resolver, keySvc)
+	var ccsdsStore ccsds.Store
+	if durable, ok := store.(ccsds.Store); ok {
+		ccsdsStore = durable
+	} else {
+		ccsdsStore, err = ccsds.NewMemoryStore()
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap: CCSDS memory store: %w", err)
+		}
+	}
+	rawProtection := protection.New(store, resolver, polEng, cfg.CCSDS.MaxFrameLength)
+	ccsdsFrameSecurity, err := ccsds.New(rawProtection, ccsdsStore, ccsds.Options{
+		AOSPrimaryHeaderLength: cfg.CCSDS.AOSPrimaryHeaderLength,
+		MaxFrameLength:         cfg.CCSDS.MaxFrameLength,
+		NodeID:                 cfg.Server.NodeID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap: CCSDS frame security: %w", err)
+	}
 	// 7. Auth verifiers.
 	jwtVerifier := jwt.NewVerifier(cfg.Auth.JWTIssuer, cfg.Auth.JWTAudience, cfg.Auth.JWTAlgWhite)
+	jwtVerifier.SetMaxTokenTTL(cfg.Auth.DefaultTokenTTL)
+	if cfg.Auth.JWKSetURL != "" {
+		keySet, err := jwt.NewRemoteKeySet(cfg.Auth.JWKSetURL, cfg.Auth.JWKCacheTTL, nil)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap: jwt key set: %w", err)
+		}
+		if err := keySet.Refresh(ctx); err != nil {
+			return nil, fmt.Errorf("bootstrap: initial JWKS fetch: %w", err)
+		}
+		jwtVerifier.SetPublicKeySet(keySet)
+	}
 	hmacVerifier := hmacsign.NewVerifier(cfg.Auth.HMACMaxSkew)
 
 	// 8. Bootstrap: create default tenant, NRWK, CRK, CRK envelope.
@@ -177,18 +217,8 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 
 	// Policy signature manager.
 	policyMgr := policysig.New(polEng, &policyAuditAdapter{ac: auditChain})
-	// Generate an Ed25519 key pair for baseline policy signing.
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("bootstrap: policy key: %w", err)
-	}
-	policyMgr.AddSigningKey("policy-key-v1", pub)
-	signedPol, err := policysig.GenerateDefaultSignedPolicy(priv, "policy-key-v1")
-	if err != nil {
-		return nil, fmt.Errorf("bootstrap: signed policy: %w", err)
-	}
-	if err := policyMgr.LoadSigned(ctx, signedPol); err != nil {
-		return nil, fmt.Errorf("bootstrap: load signed policy: %w", err)
+	if err := configureSignedPolicy(ctx, cfg, policyMgr); err != nil {
+		return nil, err
 	}
 
 	// Lifecycle worker.
@@ -202,8 +232,10 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	})
 	worker.SetExpiryChecker(keySvc)
 	worker.SetDestroyExecutor(keySvc)
-	if err := keySvc.ReconcileDestroyDueJobs(ctx); err != nil {
-		return nil, fmt.Errorf("bootstrap: reconcile destroy jobs: %w", err)
+	if cfg.Server.ActivePlane == "management" || cfg.Server.ActivePlane == "all" {
+		if err := keySvc.ReconcileDestroyDueJobs(ctx); err != nil {
+			return nil, fmt.Errorf("bootstrap: reconcile destroy jobs: %w", err)
+		}
 	}
 
 	return &App{
@@ -215,6 +247,8 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		PolicyMgr:          policyMgr,
 		KeyService:         keySvc,
 		CryptoService:      cryptoSvc,
+		CCSDSFrameSecurity: ccsdsFrameSecurity,
+		CCSDSStore:         ccsdsStore,
 		KeyTransferService: keyTransferSvc,
 		NonceManager:       nonceMgr,
 		JWTVerifier:        jwtVerifier,
@@ -226,6 +260,69 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 		OutboxSvc:          outboxSvc,
 		Worker:             worker,
 	}, nil
+}
+
+func configureRedactionPepper(cfg *config.Config) error {
+	if cfg.Audit.RedactionPepperFile == "" {
+		if cfg.Environment == "production" {
+			return errors.New("bootstrap: production redaction pepper is not configured")
+		}
+		return nil
+	}
+	raw, err := os.ReadFile(cfg.Audit.RedactionPepperFile)
+	if err != nil {
+		return fmt.Errorf("bootstrap: read redaction pepper: %w", err)
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) < 32 || len(raw) > 4096 {
+		return errors.New("bootstrap: redaction pepper must contain 32 to 4096 bytes")
+	}
+	redaction.SetPepper(raw)
+	return nil
+}
+
+func configureSignedPolicy(ctx context.Context, cfg *config.Config, manager *policysig.Manager) error {
+	if cfg.Policy.TrustedKeysPath != "" || cfg.Policy.SignedPolicyPath != "" {
+		if cfg.Policy.TrustedKeysPath == "" || cfg.Policy.SignedPolicyPath == "" {
+			return errors.New("bootstrap: policy trust bundle and signed policy must be configured together")
+		}
+		bundle, err := policysig.LoadTrustBundle(cfg.Policy.TrustedKeysPath)
+		if err != nil {
+			return fmt.Errorf("bootstrap: load policy trust bundle: %w", err)
+		}
+		if err := policysig.InstallTrustBundle(manager, bundle); err != nil {
+			return fmt.Errorf("bootstrap: install policy trust bundle: %w", err)
+		}
+		signed, err := policysig.LoadSignedPolicy(cfg.Policy.SignedPolicyPath)
+		if err != nil {
+			return fmt.Errorf("bootstrap: load signed policy file: %w", err)
+		}
+		if err := manager.LoadSigned(ctx, signed); err != nil {
+			return fmt.Errorf("bootstrap: verify signed policy: %w", err)
+		}
+		return nil
+	}
+	if cfg.Environment == "production" {
+		return errors.New("bootstrap: production policy trust is not configured")
+	}
+
+	// Development-only convenience. Production never creates a trust root at
+	// runtime and therefore remains stable across restarts.
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return fmt.Errorf("bootstrap: development policy key: %w", err)
+	}
+	if err := manager.AddTrustedSigningKey("development-policy-key", pub, "active"); err != nil {
+		return err
+	}
+	signed, err := policysig.GenerateDefaultSignedPolicy(priv, "development-policy-key")
+	if err != nil {
+		return fmt.Errorf("bootstrap: development signed policy: %w", err)
+	}
+	if err := manager.LoadSigned(ctx, signed); err != nil {
+		return fmt.Errorf("bootstrap: load development signed policy: %w", err)
+	}
+	return nil
 }
 
 // policyAuditAdapter connects the audit chain service to the policy manager Auditor interface.
@@ -287,8 +384,7 @@ func (a *cryptoAuditAdapter) Record(ctx context.Context, req crypto.AuditRequest
 }
 
 func hashTruncate(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:8])
+	return redaction.ShortHash(s)
 }
 
 // loadStaticTokens reads static token → principal mappings from the
@@ -402,6 +498,11 @@ func safePreview(s string, n int) string {
 // bootstrapCluster creates the default tenant, NRWK, CRK, and CRK envelope.
 func bootstrapCluster(ctx context.Context, cfg *config.Config, store repository.Repository,
 	tpm provider.Provider, resolver *keyresolver.Resolver) error {
+	nodeID := cfg.Server.NodeID
+	plane := cfg.Server.ActivePlane
+	if plane == "" || plane == "all" {
+		plane = "management"
+	}
 	// Default tenant.
 	tenant := &models.Tenant{
 		ID:     "t-default",
@@ -434,7 +535,7 @@ func bootstrapCluster(ctx context.Context, cfg *config.Config, store repository.
 	// Initialize resolver (loads/creates NRWK).
 	baseline := hashBaseline(cfg.Baseline)
 	policyDigest := sha256.Sum256([]byte("kvlt-default-policy-v1"))
-	if err := resolver.Init(ctx, "kvlt-cluster-v1", "node-bootstrap", "management", baseline, policyDigest[:]); err != nil {
+	if err := resolver.Init(ctx, "kvlt-cluster-v1", nodeID, plane, baseline, policyDigest[:]); err != nil {
 		return err
 	}
 
@@ -444,8 +545,15 @@ func bootstrapCluster(ctx context.Context, cfg *config.Config, store repository.
 		// Already bootstrapped — load the persisted CRK envelope into the resolver.
 		// Without this, the resolver has no CRK envelope and DEK lease/unwrap fails
 		// with "no CRK envelope" after a restart with durable storage.
-		crkEnv, gerr := store.GetCRKNodeEnvelope(ctx, latestCRK.ID, "node-bootstrap")
+		crkEnv, gerr := store.GetCRKNodeEnvelope(ctx, latestCRK.ID, nodeID)
 		if gerr != nil {
+			if errors.Is(gerr, repository.ErrNotFound) {
+				return fmt.Errorf(
+					"bootstrap: CRK envelope not found for node %q and CRK version %q; set KVLT_NODE_ID to the enrolled node or provision a node-specific envelope",
+					nodeID,
+					latestCRK.ID,
+				)
+			}
 			return fmt.Errorf("bootstrap: load crk envelope: %w", gerr)
 		}
 		var env provider.CRKEnvelope
@@ -484,8 +592,8 @@ func bootstrapCluster(ctx context.Context, cfg *config.Config, store repository.
 	}
 	a := aad.CRKAAD{
 		ClusterID:      "kvlt-cluster-v1",
-		NodeID:         "node-bootstrap",
-		PlaneRole:      "management",
+		NodeID:         nodeID,
+		PlaneRole:      plane,
 		CRKVersion:     1,
 		NRWKName:       "kvlt-nrwk-v1",
 		BaselineDigest: baseline,
@@ -502,9 +610,9 @@ func bootstrapCluster(ctx context.Context, cfg *config.Config, store repository.
 		return err
 	}
 	crkNodeEnv := &models.CRKNodeEnvelope{
-		ID:           "crkenv-bootstrap",
+		ID:           "crkenv-" + nodeID,
 		CRKVersionID: crkVer.ID,
-		NodeID:       "node-bootstrap",
+		NodeID:       nodeID,
 		Envelope:     envBytes,
 	}
 	if err := store.CreateCRKNodeEnvelope(ctx, crkNodeEnv); err != nil {

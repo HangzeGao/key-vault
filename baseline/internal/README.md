@@ -6,7 +6,9 @@ preserve plane isolation, and prefer small interfaces owned by the consuming pac
 
 ## Architecture Boundaries
 
-The backend is organized around four logical planes:
+The backend is organized around four module planes. Management, data, and ops
+HTTP routes are registered in separate production processes; the Key Plane is
+still an in-process deep module and remains a production release blocker:
 
 | Plane | Backend responsibility | Must not do |
 | --- | --- | --- |
@@ -55,7 +57,7 @@ should depend on narrow local interfaces instead of concrete repository implemen
 | `lifecycle` | Async lifecycle worker and transactional outbox processing. | `worker.go` | Handles expiry scans, destroy jobs, cache invalidation, and audit forwarding. Expired keys emit `key.expired`; keys within warning window emit `key.expiry_approaching`. |
 | `logging` | Structured logger with mandatory redaction. | `logging.go` | Add sensitive field names here before logging any new security-relevant metadata. |
 | `outbox` | Transactional outbox service wrapper. | `service.go` | Repository-backed interface for creating/listing events. Worker owns delivery behavior. |
-| `policysig` | Signed policy package generation, verification, and reload. | `manager.go` | Policy reload is a management-plane operation and must be audited. |
+| `policysig` | Signed policy package loading, verification, and reload. | `manager.go`, `files.go` | Production trust anchors and signed packages are persistent external files. Accepted versions are activated in the shared versioned policy catalog without replacing its identity. |
 | `repository` | Storage boundary and implementations. | `repository.go`, `models`, `memory`, `postgres` | Interface lives at the boundary. Implementations must preserve tenant scoping and optimistic/idempotent semantics. |
 | `resolver` | Key resolver and DEK lease handling. | `keyresolver` | This is the main internal key-plane boundary. Data plane services must use it rather than directly touching TPM/CRK material. |
 | `tpm` | TPM/vTPM provider abstraction. | `provider` | Hardware and software providers must expose the same seal/unseal contract. Software provider is for local baseline only. |
@@ -90,6 +92,7 @@ RequestID -> BodyLimit -> ReadBody -> Auth -> APIAccess -> handler
 
 - encrypt/decrypt and batch equivalents
 - policy and key status checks
+- current-policy decisions for encryption and exact Envelope policy-version decisions for decryption
 - key resolver interaction for DEK lease/unwrap
 - envelope format selection and tenant envelope config application
 
@@ -120,6 +123,11 @@ Rules:
 - Data plane code must not call TPM providers directly.
 - Do not add plaintext DEK/CRK fields to DTOs, audit payloads, logs, or API responses.
 - Envelope custom fields are transport/profile metadata only; they must not weaken AAD or policy checks.
+- Signed policy semantics bind `AUTH_ONLY` to CMAC, `ENCRYPT_ONLY` to CTR, and
+  `AUTH_ENCRYPT` to GCM and explicit key purposes. Unsupported shapes,
+  including ECB, are rejected.
+- Encrypt callers must select an approved Key explicitly; services must not
+  auto-create a default cryptographic key from a missing request field.
 
 ## Lifecycle Modules
 

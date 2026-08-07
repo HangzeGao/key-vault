@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kvlt/key-vault/internal/crypto/aead"
+	cryptosuite "github.com/kvlt/key-vault/internal/crypto/suite"
 	keystate "github.com/kvlt/key-vault/internal/domain/key/state"
 	"github.com/kvlt/key-vault/internal/domain/policy"
 	"github.com/kvlt/key-vault/internal/errorsx"
@@ -27,6 +27,7 @@ type CreateKeyCommand struct {
 	KeyID          string
 	Name           string
 	Purpose        string
+	UsageScope     models.KeyUsageScope
 	PolicyID       string
 	SuiteID        string
 	Tags           map[string]string
@@ -37,18 +38,20 @@ type CreateKeyCommand struct {
 
 // KeyDTO is the public representation of a key. Never includes wrapped_dek.
 type KeyDTO struct {
-	KeyID          string            `json:"key_id"`
-	TenantID       string            `json:"tenant_id"`
-	Name           string            `json:"name"`
-	Purpose        string            `json:"purpose"`
-	PolicyID       string            `json:"policy_id"`
-	SuiteID        string            `json:"suite_id"`
-	CurrentVersion uint32            `json:"current_version"`
-	Status         string            `json:"status"`
-	Tags           map[string]string `json:"tags,omitempty"`
-	ExpiresAt      *time.Time        `json:"expires_at,omitempty"`
-	ArchivedAt     *time.Time        `json:"archived_at,omitempty"`
-	CreatedAt      time.Time         `json:"created_at"`
+	KeyID          string                  `json:"key_id"`
+	TenantID       string                  `json:"tenant_id"`
+	Name           string                  `json:"name"`
+	Purpose        string                  `json:"purpose"`
+	UsageScope     models.KeyUsageScope    `json:"usage_scope"`
+	PolicyID       string                  `json:"policy_id"`
+	SuiteID        string                  `json:"suite_id"`
+	ServiceType    cryptosuite.ServiceType `json:"service_type"`
+	CurrentVersion uint32                  `json:"current_version"`
+	Status         string                  `json:"status"`
+	Tags           map[string]string       `json:"tags,omitempty"`
+	ExpiresAt      *time.Time              `json:"expires_at,omitempty"`
+	ArchivedAt     *time.Time              `json:"archived_at,omitempty"`
+	CreatedAt      time.Time               `json:"created_at"`
 }
 
 type PrepareKeyVersionCommand struct {
@@ -75,6 +78,7 @@ type ImportKeyCommand struct {
 	KeyID          string
 	Name           string
 	Purpose        string
+	UsageScope     models.KeyUsageScope
 	PolicyID       string
 	SuiteID        string
 	Tags           map[string]string
@@ -106,13 +110,25 @@ type Service struct {
 
 const (
 	PurposeEncryptDecrypt = "encrypt_decrypt"
+	// PurposeAuthenticateVerify is restricted to authentication-only suites.
+	PurposeAuthenticateVerify = "authenticate_verify"
 	// PurposeKeyWrap identifies a pre-shared KEK. It may wrap data keys for
 	// protocol-neutral key upload/download and must never encrypt business data.
 	PurposeKeyWrap = "key_wrap"
 )
 
 func isSupportedPurpose(purpose string) bool {
-	return purpose == PurposeEncryptDecrypt || purpose == PurposeKeyWrap
+	return purpose == PurposeEncryptDecrypt || purpose == PurposeAuthenticateVerify || purpose == PurposeKeyWrap
+}
+
+func normalizeUsageScope(scope models.KeyUsageScope) (models.KeyUsageScope, error) {
+	if scope == "" {
+		return models.KeyUsageGeneric, nil
+	}
+	if scope != models.KeyUsageGeneric && scope != models.KeyUsageProtocol {
+		return "", errorsx.New(errorsx.CodeInvalidArgument, "unsupported key usage_scope", false)
+	}
+	return scope, nil
 }
 
 // Auditor records audit events for key lifecycle operations (design §15.1, EB-FR-09).
@@ -220,6 +236,10 @@ func (s *Service) CreateKey(ctx context.Context, cmd CreateKeyCommand) (*KeyDTO,
 	if cmd.Purpose == PurposeKeyWrap {
 		return nil, errorsx.New(errorsx.CodeInvalidArgument, "key_wrap keys must be imported from pre-shared key material", false)
 	}
+	usageScope, err := normalizeUsageScope(cmd.UsageScope)
+	if err != nil {
+		return nil, err
+	}
 
 	// Idempotency: if a key is present, replay the cached result.
 	if cmd.IdempotencyKey != "" {
@@ -240,11 +260,11 @@ func (s *Service) CreateKey(ctx context.Context, cmd CreateKeyCommand) (*KeyDTO,
 	if err != nil {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "unknown suite", false)
 	}
-	if !policy.CanEncrypt(suite.Status) {
-		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite not available for encryption", false)
+	if !policy.CanCreate(suite.Status) {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite not available for new operations", false)
 	}
-	if suite.Mode != policy.ModeGCM && suite.Mode != policy.ModeECB {
-		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite mode is not supported", false)
+	if err := validatePurposeSuite(cmd.Purpose, suite); err != nil {
+		return nil, err
 	}
 
 	// Validate tenant exists.
@@ -252,7 +272,7 @@ func (s *Service) CreateKey(ctx context.Context, cmd CreateKeyCommand) (*KeyDTO,
 		return nil, errorsx.New(errorsx.CodePermissionDenied, "tenant not found", false)
 	}
 
-	suiteEnum, err := suiteIDFromString(cmd.SuiteID)
+	suiteEnum, err := cryptosuite.Parse(cmd.SuiteID)
 	if err != nil {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "invalid suite_id", false)
 	}
@@ -275,6 +295,7 @@ func (s *Service) CreateKey(ctx context.Context, cmd CreateKeyCommand) (*KeyDTO,
 		TenantID:       cmd.TenantID,
 		Name:           cmd.Name,
 		Purpose:        cmd.Purpose,
+		UsageScope:     usageScope,
 		PolicyID:       cmd.PolicyID,
 		SuiteID:        cmd.SuiteID,
 		CurrentVersion: 1,
@@ -331,6 +352,13 @@ func (s *Service) ImportKey(ctx context.Context, cmd ImportKeyCommand) (*KeyDTO,
 	if len(cmd.ExternalKey) == 0 {
 		return nil, errorsx.New(errorsx.CodeInvalidArgument, "missing external_key", false)
 	}
+	usageScope, err := normalizeUsageScope(cmd.UsageScope)
+	if err != nil {
+		return nil, err
+	}
+	if cmd.Purpose == PurposeKeyWrap && usageScope != models.KeyUsageGeneric {
+		return nil, errorsx.New(errorsx.CodeInvalidArgument, "key_wrap keys must use GENERIC scope", false)
+	}
 
 	// Idempotency replay.
 	if cmd.IdempotencyKey != "" {
@@ -350,18 +378,18 @@ func (s *Service) ImportKey(ctx context.Context, cmd ImportKeyCommand) (*KeyDTO,
 	if err != nil {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "unknown suite", false)
 	}
-	if !policy.CanEncrypt(suite.Status) {
-		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite not available for encryption", false)
+	if !policy.CanCreate(suite.Status) {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite not available for new operations", false)
 	}
-	if suite.Mode != policy.ModeGCM && suite.Mode != policy.ModeECB {
-		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite mode is not supported", false)
+	if err := validatePurposeSuite(cmd.Purpose, suite); err != nil {
+		return nil, err
 	}
 
 	if _, err := s.store.GetTenant(ctx, cmd.TenantID); err != nil {
 		return nil, errorsx.New(errorsx.CodePermissionDenied, "tenant not found", false)
 	}
 
-	suiteEnum, err := suiteIDFromString(cmd.SuiteID)
+	suiteEnum, err := cryptosuite.Parse(cmd.SuiteID)
 	if err != nil {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "invalid suite_id", false)
 	}
@@ -389,6 +417,7 @@ func (s *Service) ImportKey(ctx context.Context, cmd ImportKeyCommand) (*KeyDTO,
 		TenantID:       cmd.TenantID,
 		Name:           cmd.Name,
 		Purpose:        cmd.Purpose,
+		UsageScope:     usageScope,
 		PolicyID:       cmd.PolicyID,
 		SuiteID:        cmd.SuiteID,
 		CurrentVersion: 1,
@@ -686,7 +715,7 @@ func (s *Service) PrepareKeyVersion(ctx context.Context, cmd PrepareKeyVersionCo
 	if k.Status != string(keystate.KeyActive) {
 		return nil, errorsx.New(errorsx.CodeKeyDisabled, "key not active", false)
 	}
-	suite, err := suiteIDFromString(k.SuiteID)
+	suite, err := cryptosuite.Parse(k.SuiteID)
 	if err != nil {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "invalid suite_id", false)
 	}
@@ -725,19 +754,24 @@ func (s *Service) ActivateKeyVersion(ctx context.Context, tenantID, keyID string
 	return toDTO(k), nil
 }
 
-// suiteIDFromString maps a suite string to aead.SuiteID.
-func suiteIDFromString(s string) (aead.SuiteID, error) {
-	switch s {
-	case "AES_256_GCM":
-		return aead.SuiteAES256GCM, nil
-	case "SM4_GCM":
-		return aead.SuiteSM4GCM, nil
-	case "AES_256_ECB":
-		return aead.SuiteAES256ECB, nil
-	case "SM4_ECB":
-		return aead.SuiteSM4ECB, nil
+func validatePurposeSuite(purpose string, suite *policy.Suite) error {
+	suiteID, err := cryptosuite.Parse(suite.SuiteID)
+	if err != nil {
+		return errorsx.New(errorsx.CodePolicyDenied, "unsupported suite", false)
 	}
-	return 0, fmt.Errorf("unknown suite %s", s)
+	if purpose == PurposeKeyWrap {
+		if suiteID.ServiceType() != cryptosuite.ServiceAuthEncrypt {
+			return errorsx.New(errorsx.CodePolicyDenied, "key_wrap purpose requires an authenticated-encryption suite", false)
+		}
+		return nil
+	}
+	if purpose != PurposeEncryptDecrypt && purpose != PurposeAuthenticateVerify {
+		return errorsx.New(errorsx.CodeInvalidArgument, "unsupported key purpose", false)
+	}
+	if suiteID.KeyPurpose() != purpose {
+		return errorsx.New(errorsx.CodePolicyDenied, "key purpose does not match suite service type", false)
+	}
+	return nil
 }
 
 func toDTO(k *models.Key) *KeyDTO {
@@ -753,13 +787,16 @@ func toDTO(k *models.Key) *KeyDTO {
 	if status == string(keystate.KeyActive) && keyExpired(k) {
 		status = "EXPIRED"
 	}
+	suiteID, _ := cryptosuite.Parse(k.SuiteID)
 	return &KeyDTO{
 		KeyID:          k.ID,
 		TenantID:       k.TenantID,
 		Name:           k.Name,
 		Purpose:        k.Purpose,
+		UsageScope:     k.UsageScope,
 		PolicyID:       k.PolicyID,
 		SuiteID:        k.SuiteID,
+		ServiceType:    suiteID.ServiceType(),
 		CurrentVersion: k.CurrentVersion,
 		Status:         status,
 		Tags:           k.Tags,

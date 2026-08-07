@@ -47,8 +47,8 @@ flowchart LR
 | INV-01 | CRK/DEK 明文不得离开可信边界 | API、日志、数据库、备份、审计载荷和 UI 均不得包含明文密钥材料。 |
 | INV-02 | 数据库不得存储明文密钥 | `key_versions.wrapped_material` 只能保存受 CRK 或根材料保护的密文。 |
 | INV-03 | 数据面不得直连 TPM/vTPM | 数据面只能通过密钥面受控接口获得内部 DEK lease。 |
-| INV-04 | GCM nonce 不得复用 | 按 KeyVersion 采用计数器租约或经评审机制控制重复风险；ECB suite 不使用 nonce。 |
-| INV-05 | GCM AAD 必须一致 | GCM 解密必须使用加密时完全一致的 caller AAD bytes，并通过 AEAD 认证 AAD；ECB 忽略 caller AAD，不校验 `aad_hash`。 |
+| INV-04 | GCM nonce 与 CTR 初始计数器前缀不得复用 | 按 KeyVersion 采用持久化计数器租约控制唯一性。 |
+| INV-05 | GCM AAD 必须一致 | GCM 解密必须使用加密时完全一致的 caller AAD bytes，并通过 AEAD 认证 AAD。 |
 | INV-06 | 长期契约演进 | Envelope、数据面 AAD bytes、系统内部 AAD canonical、错误码和状态机必须明确版本化演进。 |
 | INV-07 | 租户身份来自认证上下文 | 请求体或路径 tenant 只用于一致性校验。 |
 | INV-08 | 管理与数据权限隔离 | 管理 scope 不自动获得数据面权限，数据 token 不能调用管理 API。 |
@@ -186,7 +186,7 @@ flowchart TB
 | 平面 | 职责 | 禁止事项 |
 | --- | --- | --- |
 | 管理面 | Key CRUD、受控导入、启停、轮转、销毁计划、延期、租户配置、Envelope 字段配置、策略管理。 | 返回明文密钥；执行数据面加解密热路径；绕过状态机。 |
-| 数据面 | Encrypt、Decrypt、批量加解密、Envelope 编解码、`aad_b64` 数据面一致性输入、GCM nonce 控制、按租户配置输出允许的 Envelope 格式。 | 改变 Key 生命周期；直连 TPM/vTPM；向客户端返回明文密钥材料。 |
+| 数据面 | CTR/GCM Encrypt、Decrypt、CMAC Authenticate、Verify、批量加解密、Envelope 编解码、`aad_b64` 数据面一致性输入、nonce 唯一性控制、按租户配置输出允许的 Envelope 格式。 | 改变 Key 生命周期；直连 TPM/vTPM；向客户端返回明文密钥材料。 |
 | 运维面 | 只读诊断、CRK envelope 脱敏状态、白名单修复、resolver 刷新、lifecycle/outbox 干预、数据库迁移状态查看、break-glass 应急治理。 | 任意 SQL；直接查看或导出 CRK/DEK/wrapped material；绕过审计；绕过 24 小时销毁冷静期。 |
 | 密钥面 | CRK 解封、DEK wrap/unwrap、短 TTL DEK lease、TPM/vTPM 交互。 | 暴露公网 API；承担业务授权决策；记录或返回明文密钥。 |
 | 审计面 | 审计事件、哈希链、验证报告、按权限删除基线审计事件、outbox 审计转发。 | 审计失败时静默成功；记录明文、token、DEK、CRK 或完整敏感载荷。 |
@@ -270,7 +270,7 @@ sequenceDiagram
 
 ### 6.2.1 Key 有效期
 
-Key 可在创建和受控导入时指定显式 `key_id` 与 `expires_at`。数据面 Encrypt 未提供 `key_id` 时，服务端使用/自动创建租户默认 `AES_256_ECB` Key，以支持最小 body 加密。`expires_at` 到期后，Key 对外查询状态应呈现为 `EXPIRED`，加密和解密均 fail-closed。生命周期 worker 应周期扫描到期 Key，并通过领域状态机或等效检查形成可观测状态；用户需要继续使用时，只能通过管理面延期。
+Key 在创建和受控导入时使用显式 `key_id` 与可选 `expires_at`。数据面 Encrypt 必须显式引用已审批的 Key，禁止隐式生成默认 Key。`expires_at` 到期后，Key 对外查询状态应呈现为 `EXPIRED`，加密和解密均 fail-closed。生命周期 worker 应周期扫描到期 Key，并通过领域状态机或等效检查形成可观测状态；用户需要继续使用时，只能通过管理面延期。
 
 ### 6.3 安全删除
 
@@ -291,7 +291,7 @@ sequenceDiagram
     C->>API: POST /ui/api/v1/crypto/encrypt
     API->>D: 认证、授权、Key、策略、大小校验
     D->>N: GCM suite 申请或生成 nonce
-    N-->>D: nonce 或 NONCE_UNSAFE；ECB suite 跳过
+    N-->>D: nonce 或 NONCE_UNSAFE
     D->>K: 请求内部 DEK lease
     K-->>D: 短 TTL DEK lease
     D->>E: 执行加密并构造 Envelope v1
@@ -314,7 +314,7 @@ sequenceDiagram
 
 服务端内部 canonical 编码用于 GCM 认证边界和统一解析，不作为对外 API 格式暴露。租户 profile 只能改变 JSON 呈现，不能替代核心认证字段；外部 JSON/profile 只需通过字段映射还原完整 CoreEnvelope。
 
-数据面 caller AAD 是调用方提供的 opaque bytes。第三方系统可按自己的 JSON、XML、Protobuf、header 或业务上下文生成 AAD，但 canonical 步骤必须在调用方或 SDK 完成。GCM suite 将 `aad_b64` 解码结果作为 AEAD AAD 使用，并执行最大 64 KiB 长度限制、`SHA-256(aad_bytes)` 审计和加解密一致性校验；ECB suite 忽略 caller AAD，Envelope JSON/profile 不携带 `nonce`、`tag`、`aad_hash`，解密不校验 AAD。AAD 明文不进入 Envelope 核心字段，也不得写入审计日志。
+数据面 caller AAD 是调用方提供的 opaque bytes。第三方系统可按自己的 JSON、XML、Protobuf、header 或业务上下文生成 AAD，但 canonical 步骤必须在调用方或 SDK 完成。GCM suite 将 `aad_b64` 解码结果作为 AEAD AAD 使用，并执行最大 64 KiB 长度限制、`SHA-256(aad_bytes)` 审计和加解密一致性校验。AAD 明文不进入 Envelope 核心字段，也不得写入审计日志。
 
 ## 7. 数据模型
 
@@ -348,7 +348,7 @@ sequenceDiagram
 | `POST /ui/api/v1/keys/{id}:rotate` / `/rotate` | 生成新 KeyVersion。 |
 | `POST /ui/api/v1/keys/{id}/schedule-destroy` | 计划销毁入口。 |
 | `POST /ui/api/v1/keys/{id}/cancel-destroy` | 取消计划销毁。 |
-| `POST /ui/api/v1/crypto/encrypt` | 小对象加密；最小 body 为 `{"plaintext":"<base64>"}`，未提供 `key_id` 时使用租户默认 `AES_256_ECB` Key。 |
+| `POST /ui/api/v1/crypto/encrypt` | 小对象加密；请求必须显式提供 `key_id` 与 `plaintext`。 |
 | `POST /ui/api/v1/crypto/decrypt` | 小对象解密；请求体直接使用 Envelope JSON 本体，最小 body 为加密响应返回的 Envelope JSON。 |
 | `POST /ui/api/v1/crypto/encrypt-batch` | 批量加密。 |
 | `POST /ui/api/v1/crypto/decrypt-batch` | 批量解密，采用 entries 输入模型。 |

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -12,6 +14,17 @@ func TestLifecycleExpiryWarningWindowDefault(t *testing.T) {
 	}
 	if cfg.Lifecycle.ExpiryWarningWindow != 7*24*time.Hour {
 		t.Fatalf("ExpiryWarningWindow = %s, want 168h", cfg.Lifecycle.ExpiryWarningWindow)
+	}
+}
+
+func TestCCSDSFrameBoundariesAreExplicitAndValidated(t *testing.T) {
+	cfg := Default()
+	if cfg.CCSDS.AOSPrimaryHeaderLength != 6 {
+		t.Fatalf("unexpected CCSDS defaults: %+v", cfg.CCSDS)
+	}
+	cfg.CCSDS.MaxFrameLength = cfg.CCSDS.AOSPrimaryHeaderLength
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("CCSDS max frame length not exceeding the header was accepted")
 	}
 }
 
@@ -34,38 +47,64 @@ func TestProductionRejectsNonDurableOrFallbackSecurityBoundaries(t *testing.T) {
 	}{
 		{"memory repository", func(c *Config) {
 			c.Database.Driver = "memory"
-			c.TPM.Provider = "native"
-			c.Server.PlaneIsolationMode = "physical"
 		}},
 		{"software TPM", func(c *Config) {
-			c.Database.Driver = "postgres"
 			c.TPM.Provider = "software"
-			c.Server.PlaneIsolationMode = "physical"
 		}},
 		{"logical isolation", func(c *Config) {
-			c.Database.Driver = "postgres"
-			c.TPM.Provider = "native"
 			c.Server.PlaneIsolationMode = "logical"
+		}},
+		{"all planes in one process", func(c *Config) {
+			c.Server.ActivePlane = "all"
+		}},
+		{"HMAC enabled", func(c *Config) {
+			c.Auth.HMACEnabled = true
 		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := Default()
-			cfg.Environment = "production"
+			cfg := productionConfig(t)
 			tt.mutate(cfg)
 			if err := cfg.Validate(); err == nil {
 				t.Fatal("unsafe production config accepted")
 			}
 		})
 	}
-	cfg := Default()
-	cfg.Environment = "production"
-	cfg.Database.Driver = "postgres"
-	cfg.TPM.Provider = "native"
-	cfg.Server.PlaneIsolationMode = "physical"
+	cfg := productionConfig(t)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("safe production config rejected: %v", err)
 	}
+}
+
+func productionConfig(t *testing.T) *Config {
+	t.Helper()
+	dir := t.TempDir()
+	file := filepath.Join(dir, "required")
+	if err := os.WriteFile(file, []byte("0123456789abcdef0123456789abcdef"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Default()
+	cfg.Environment = "production"
+	cfg.Database = DatabaseConfig{Driver: "postgres", DSN: "postgres://kvlt@db/kvlt"}
+	cfg.TPM = TPMConfig{Provider: "native", TCTI: "device:/dev/tpmrm0"}
+	cfg.Server.PlaneIsolationMode = "physical"
+	cfg.Server.ActivePlane = "management"
+	cfg.Server.NodeID = "node-01"
+	cfg.Server.HTTPSListenAddr = ":8443"
+	cfg.Server.TLSCertFile = file
+	cfg.Server.TLSKeyFile = file
+	cfg.Server.TLSClientCAFile = file
+	cfg.Auth.JWTIssuer = "https://id.example.test"
+	cfg.Auth.JWTAudience = "key-vault"
+	cfg.Auth.JWKSetURL = "https://id.example.test/.well-known/jwks.json"
+	cfg.Auth.JWTAlgWhite = []string{"RS256", "ES256"}
+	cfg.Auth.HMACEnabled = false
+	cfg.Policy.TrustedKeysPath = file
+	cfg.Policy.SignedPolicyPath = file
+	cfg.Audit.RedactionPepperFile = file
+	cfg.Recovery.PITREnabled = true
+	cfg.Recovery.RestoreDrillEvidenceFile = file
+	return cfg
 }
 
 func TestProductionFingerprintGuardRejectsAmbiguousConfig(t *testing.T) {

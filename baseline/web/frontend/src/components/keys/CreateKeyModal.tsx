@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Modal } from "../index";
 import type { CreateKeyReq } from "../../lib/types";
-import { SYMMETRIC_SUITES } from "../../lib/suites";
+import { suitesForPurpose } from "../../lib/suites";
 
 interface Props {
   onClose: () => void;
@@ -15,6 +15,7 @@ export function CreateKeyModal({ onClose, onCreate, loading, policyID }: Props) 
   const [keyId, setKeyId] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [suite, setSuite] = useState("AES_256_GCM");
+  const [purpose, setPurpose] = useState<"encrypt_decrypt" | "authenticate_verify">("encrypt_decrypt");
   const [idempotencyKey, setIdempotencyKey] = useState("");
 
   return (
@@ -30,12 +31,19 @@ export function CreateKeyModal({ onClose, onCreate, loading, policyID }: Props) 
         </div>
         <div>
           <label className="input-label">Purpose</label>
-          <div className="input input-static">encrypt_decrypt <span>Symmetric encryption only</span></div>
+          <select className="select" value={purpose} onChange={(event) => {
+            const next = event.target.value as "encrypt_decrypt" | "authenticate_verify";
+            setPurpose(next);
+            setSuite(next === "authenticate_verify" ? "AES_256_CMAC" : "AES_256_GCM");
+          }}>
+            <option value="encrypt_decrypt">Encrypt / decrypt</option>
+            <option value="authenticate_verify">Authenticate / verify</option>
+          </select>
         </div>
         <div>
           <label className="input-label">Suite</label>
           <select className="select" value={suite} onChange={(e) => setSuite(e.target.value)}>
-            {SYMMETRIC_SUITES.map((item) => <option key={item.id} value={item.id}>{item.id}</option>)}
+            {suitesForPurpose(purpose).map((item) => <option key={item.id} value={item.id}>{item.id} — {item.serviceType}</option>)}
           </select>
         </div>
         <div>
@@ -62,7 +70,7 @@ export function CreateKeyModal({ onClose, onCreate, loading, policyID }: Props) 
               tenant_id: "",
               key_id: keyId.trim() || undefined,
               name: name.trim(),
-              purpose: "encrypt_decrypt",
+              purpose,
               policy_id: policyID!,
               suite_id: suite,
               expires_at: expiresAt ? new Date(expiresAt).toISOString() : undefined,

@@ -28,7 +28,7 @@ interface RepairResponse {
 
 export function CRKPanel() {
   const [crkVersionID, setCRKVersionID] = useState("");
-  const [nodeID, setNodeID] = useState("node-bootstrap");
+  const [nodeID, setNodeID] = useState("");
   const [status, setStatus] = useState<CRKEnvelopeStatus | null>(null);
   const qc = useQueryClient();
 
@@ -61,7 +61,7 @@ export function CRKPanel() {
           </div>
           <div>
             <label className="input-label">Node ID</label>
-            <input className="input" value={nodeID} onChange={(e) => setNodeID(e.target.value)} placeholder="node-bootstrap" />
+            <input className="input" value={nodeID} onChange={(e) => setNodeID(e.target.value)} placeholder="configured node if empty" />
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>

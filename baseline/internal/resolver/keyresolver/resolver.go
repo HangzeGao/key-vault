@@ -21,6 +21,7 @@ import (
 
 	"github.com/kvlt/key-vault/internal/crypto/aad"
 	"github.com/kvlt/key-vault/internal/crypto/aead"
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 	"github.com/kvlt/key-vault/internal/tpm/provider"
 )
 
@@ -44,7 +45,7 @@ type DEKLease struct {
 	TenantID     string
 	KeyID        string
 	KeyVersion   uint32
-	SuiteID      aead.SuiteID
+	SuiteID      suite.ID
 	Purpose      string
 	NodeID       string
 	DEK          []byte // plaintext DEK; zeroized on expiry
@@ -167,16 +168,16 @@ func (r *Resolver) withCRK(ctx context.Context, fn func(crk []byte) error) error
 // GenerateAndWrapDEK generates a new DEK and seals it under the CRK.
 // Returns the wrapped DEK + metadata. The plaintext DEK is zeroized
 // before return; the caller does NOT receive it.
-func (r *Resolver) GenerateAndWrapDEK(ctx context.Context, suite aead.SuiteID, keyVersionID string) (*DEKMaterial, error) {
+func (r *Resolver) GenerateAndWrapDEK(ctx context.Context, suiteID suite.ID, keyVersionID string) (*DEKMaterial, error) {
 	var out *DEKMaterial
 	err := r.withCRK(ctx, func(crk []byte) error {
-		dek := make([]byte, suite.KeyBytes())
+		dek := make([]byte, suiteID.KeyBytes())
 		if _, err := rand.Read(dek); err != nil {
 			return fmt.Errorf("resolver: rand dek: %w", err)
 		}
 		defer zeroize(dek)
 		// Seal DEK under CRK using AES-256-GCM (CRK is 32 bytes).
-		a, err := aead.New(aead.SuiteAES256GCM, crk)
+		a, err := aead.New(suite.AES256GCM, crk)
 		if err != nil {
 			return fmt.Errorf("resolver: aead new: %w", err)
 		}
@@ -218,9 +219,9 @@ func (r *Resolver) GenerateAndWrapDEK(ctx context.Context, suite aead.SuiteID, k
 //
 // The caller MUST validate that keyPlaintext length matches suite.KeyBytes()
 // before calling; this function performs a defensive length check as well.
-func (r *Resolver) WrapExternalKey(ctx context.Context, suite aead.SuiteID, keyVersionID string, keyPlaintext []byte) (*DEKMaterial, error) {
-	if len(keyPlaintext) != suite.KeyBytes() {
-		return nil, fmt.Errorf("resolver: imported key length mismatch: got %d, want %d", len(keyPlaintext), suite.KeyBytes())
+func (r *Resolver) WrapExternalKey(ctx context.Context, suiteID suite.ID, keyVersionID string, keyPlaintext []byte) (*DEKMaterial, error) {
+	if len(keyPlaintext) != suiteID.KeyBytes() {
+		return nil, fmt.Errorf("resolver: imported key length mismatch: got %d, want %d", len(keyPlaintext), suiteID.KeyBytes())
 	}
 	var out *DEKMaterial
 	err := r.withCRK(ctx, func(crk []byte) error {
@@ -228,7 +229,7 @@ func (r *Resolver) WrapExternalKey(ctx context.Context, suite aead.SuiteID, keyV
 		keyMaterial := make([]byte, len(keyPlaintext))
 		copy(keyMaterial, keyPlaintext)
 		defer zeroize(keyMaterial)
-		a, err := aead.New(aead.SuiteAES256GCM, crk)
+		a, err := aead.New(suite.AES256GCM, crk)
 		if err != nil {
 			return fmt.Errorf("resolver: aead new: %w", err)
 		}
@@ -272,7 +273,7 @@ func (r *Resolver) UnwrapDEK(ctx context.Context, wrappedDEK []byte, metaJSON []
 		if err := json.Unmarshal(metaJSON, &meta); err != nil {
 			return fmt.Errorf("resolver: parse meta: %w", err)
 		}
-		a, err := aead.New(aead.SuiteAES256GCM, crk)
+		a, err := aead.New(suite.AES256GCM, crk)
 		if err != nil {
 			return fmt.Errorf("resolver: aead new: %w", err)
 		}
@@ -296,7 +297,7 @@ func (r *Resolver) UnwrapDEK(ctx context.Context, wrappedDEK []byte, metaJSON []
 // IssueDEKLease unwraps a DEK and grants a short-TTL lease to the data plane.
 // The lease is cached; subsequent calls for the same (keyVersionID, nodeID, purpose)
 // return the cached lease until expiry.
-func (r *Resolver) IssueDEKLease(ctx context.Context, keyVersionID, keyID string, keyVersion uint32, suite aead.SuiteID, tenantID, purpose, nodeID string) (*DEKLease, error) {
+func (r *Resolver) IssueDEKLease(ctx context.Context, keyVersionID, keyID string, keyVersion uint32, suiteID suite.ID, tenantID, purpose, nodeID string) (*DEKLease, error) {
 	cacheKey := keyVersionID + "|" + nodeID + "|" + purpose
 	r.mu.Lock()
 	if l, ok := r.leaseCache[cacheKey]; ok {
@@ -325,7 +326,7 @@ func (r *Resolver) IssueDEKLease(ctx context.Context, keyVersionID, keyID string
 		TenantID:     tenantID,
 		KeyID:        keyID,
 		KeyVersion:   keyVersion,
-		SuiteID:      suite,
+		SuiteID:      suiteID,
 		Purpose:      purpose,
 		NodeID:       nodeID,
 		DEK:          dek,

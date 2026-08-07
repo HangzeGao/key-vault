@@ -1,0 +1,9 @@
+# Ground-to-flight fixed interoperability vector.
+# TC profile: primary(5) || SPI(2) || IV_COUNTER(4) || AES-256-CTR data || FECF(2)
+suite_id=AES_256_CTR
+key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+nonce_prefix=a0a1a2a3a4a5
+spi=1001
+iv_counter=0000002a
+plaintext=cafe0102030405060708090a0b0c0d0e0f10111213
+protected_frame=200104210710010000002a108a650829a86c3b580dcd4530616c0f1ec3c5752c332d

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Modal } from "../index";
 import type { ImportKeyReq } from "../../lib/types";
-import { SYMMETRIC_SUITES, suiteKeyBytes } from "../../lib/suites";
+import { SYMMETRIC_SUITES, serviceTypeForSuite, suiteKeyBytes, suitesForPurpose } from "../../lib/suites";
 
 interface Props {
   onClose: () => void;
@@ -15,14 +15,14 @@ export function ImportKeyModal({ onClose, onImport, loading, policyID }: Props) 
   const [keyId, setKeyId] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
   const [suite, setSuite] = useState("AES_256_GCM");
-  const [purpose, setPurpose] = useState<"encrypt_decrypt" | "key_wrap">("encrypt_decrypt");
+  const [purpose, setPurpose] = useState<"encrypt_decrypt" | "authenticate_verify" | "key_wrap">("encrypt_decrypt");
   const [externalKey, setExternalKey] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState("");
 
   const expectedBytes = suiteKeyBytes[suite] ?? 32;
   const availableSuites = purpose === "key_wrap"
     ? SYMMETRIC_SUITES.filter((item) => item.id === "AES_256_GCM" || item.id === "SM4_GCM")
-    : SYMMETRIC_SUITES;
+    : suitesForPurpose(purpose);
 
   // Validate base64 and length.
   let dekValid = false;
@@ -41,7 +41,9 @@ export function ImportKeyModal({ onClose, onImport, loading, policyID }: Props) 
   }
   const keyTerm = purpose === "key_wrap"
     ? "Key Encryption Key (KEK)"
-    : "Data Encryption Key (DEK)";
+    : purpose === "authenticate_verify"
+      ? "Message Authentication Key"
+      : "Data Encryption Key (DEK)";
 
   return (
     <Modal title="Import External Key (Controlled Import)" onClose={onClose}>
@@ -61,19 +63,26 @@ export function ImportKeyModal({ onClose, onImport, loading, policyID }: Props) 
         <div>
           <label className="input-label">Purpose</label>
           <select className="select" value={purpose} onChange={(event) => {
-            const next = event.target.value as "encrypt_decrypt" | "key_wrap";
+            const next = event.target.value as "encrypt_decrypt" | "authenticate_verify" | "key_wrap";
             setPurpose(next);
             if (next === "key_wrap" && suite !== "AES_256_GCM" && suite !== "SM4_GCM") {
               setSuite("SM4_GCM");
+            } else if (next === "authenticate_verify") {
+              setSuite("AES_256_CMAC");
+            } else if (next === "encrypt_decrypt" && serviceTypeForSuite(suite) === "AUTH_ONLY") {
+              setSuite("AES_256_GCM");
             }
           }}>
             <option value="encrypt_decrypt">Data Encryption Key (DEK)</option>
+            <option value="authenticate_verify">Message Authentication Key</option>
             <option value="key_wrap">Key Encryption Key (KEK)</option>
           </select>
           <div style={{ marginTop: 5, fontSize: 11, color: "var(--text-tertiary)" }}>
             {purpose === "key_wrap"
               ? "Used only to protect keys during Key Upload and Key Download."
-              : "Used for application data encryption and decryption."}
+              : purpose === "authenticate_verify"
+                ? "Used only to create and verify detached CMAC authenticators."
+                : "Used for application data encryption and decryption."}
           </div>
         </div>
         <div>

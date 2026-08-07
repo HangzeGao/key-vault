@@ -1,6 +1,7 @@
-// Package aead wraps supported block-cipher suites behind a uniform interface.
-// Per design §8.4, basic algorithms must come from mature libraries;
-// AES uses Go standard library; SM4 uses github.com/emmansun/gmsm.
+// Package aead implements the confidentiality capabilities of supported
+// symmetric suites. GCM provides authenticated encryption while CTR provides
+// confidentiality only. Authentication-only CMAC lives in crypto/mac so a
+// caller cannot accidentally treat a MAC as encryption.
 package aead
 
 import (
@@ -9,113 +10,26 @@ import (
 	"fmt"
 
 	"github.com/emmansun/gmsm/sm4"
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 )
 
-// SuiteID identifies an algorithm suite. Values are stable and part of
-// the Envelope v1 internal canonical encoding (design §8.3, §8.1).
-type SuiteID uint16
-
-const (
-	SuiteAES256GCM SuiteID = 0x0001
-	SuiteSM4GCM    SuiteID = 0x0002
-	SuiteAES256ECB SuiteID = 0x0003
-	SuiteSM4ECB    SuiteID = 0x0004
-)
-
-func (s SuiteID) String() string {
-	switch s {
-	case SuiteAES256GCM:
-		return "AES_256_GCM"
-	case SuiteSM4GCM:
-		return "SM4_GCM"
-	case SuiteAES256ECB:
-		return "AES_256_ECB"
-	case SuiteSM4ECB:
-		return "SM4_ECB"
-	default:
-		return fmt.Sprintf("SUITE_0x%04X", uint16(s))
-	}
-}
-
-// KeyBits returns the key length in bits for the suite.
-func (s SuiteID) KeyBits() int {
-	switch s {
-	case SuiteAES256GCM, SuiteAES256ECB:
-		return 256
-	case SuiteSM4GCM, SuiteSM4ECB:
-		return 128
-	default:
-		return 0
-	}
-}
-
-// KeyBytes returns the key length in bytes.
-func (s SuiteID) KeyBytes() int { return s.KeyBits() / 8 }
-
-// NonceLen returns the GCM nonce length (12 bytes for both AES-GCM and SM4-GCM).
-func (s SuiteID) NonceLen() int {
-	switch s {
-	case SuiteAES256GCM, SuiteSM4GCM:
-		return 12
-	case SuiteAES256ECB, SuiteSM4ECB:
-		return 0
-	}
-	return 0
-}
-
-// TagLen returns the AEAD tag length.
-func (s SuiteID) TagLen() int {
-	switch s {
-	case SuiteAES256GCM, SuiteSM4GCM:
-		return 16
-	case SuiteAES256ECB, SuiteSM4ECB:
-		return 0
-	}
-	return 0
-}
-
-// AuthenticatesAAD reports whether caller AAD is cryptographically bound by
-// the suite. ECB suites have no AAD semantics.
-func (s SuiteID) AuthenticatesAAD() bool {
-	switch s {
-	case SuiteAES256GCM, SuiteSM4GCM:
-		return true
-	default:
-		return false
-	}
-}
-
-// CiphertextLen returns the exact encrypted payload size for a plaintext length.
-func (s SuiteID) CiphertextLen(plaintextLen int) int {
-	switch s {
-	case SuiteAES256ECB, SuiteSM4ECB:
-		blockSize := aes.BlockSize
-		if s == SuiteSM4ECB {
-			blockSize = sm4.BlockSize
-		}
-		return plaintextLen + blockSize - plaintextLen%blockSize
-	default:
-		return plaintextLen
-	}
-}
-
-// AEAD is the uniform cipher interface used by the envelope. GCM suites provide
-// authenticated encryption; ECB suites ignore nonce/AAD and return an empty tag.
-type AEAD interface {
+// Cipher is the encryption interface used by the envelope. Suite metadata tells
+// callers whether the returned tag is mandatory (GCM) or empty (CTR).
+type Cipher interface {
 	Encrypt(plaintext, nonce, aad []byte) (ciphertext, tag []byte)
 	Decrypt(ciphertext, tag, nonce, aad []byte) ([]byte, error)
 	NonceSize() int
 	TagSize() int
 }
 
-// New constructs an AEAD for the given suite and key.
-func New(suite SuiteID, key []byte) (AEAD, error) {
-	if len(key) != suite.KeyBytes() {
+// New constructs an encryption primitive for the given suite and key.
+func New(suiteID suite.ID, key []byte) (Cipher, error) {
+	if len(key) != suiteID.KeyBytes() {
 		return nil, fmt.Errorf("aead: key length %d does not match suite %s (%d)",
-			len(key), suite, suite.KeyBytes())
+			len(key), suiteID, suiteID.KeyBytes())
 	}
-	switch suite {
-	case SuiteAES256GCM:
+	switch suiteID {
+	case suite.AES256GCM:
 		b, err := aes.NewCipher(key)
 		if err != nil {
 			return nil, fmt.Errorf("aead: aes new: %w", err)
@@ -125,7 +39,7 @@ func New(suite SuiteID, key []byte) (AEAD, error) {
 			return nil, fmt.Errorf("aead: gcm new: %w", err)
 		}
 		return &gcmAEAD{g: g}, nil
-	case SuiteSM4GCM:
+	case suite.SM4GCM:
 		b, err := sm4.NewCipher(key)
 		if err != nil {
 			return nil, fmt.Errorf("aead: sm4 new: %w", err)
@@ -135,20 +49,22 @@ func New(suite SuiteID, key []byte) (AEAD, error) {
 			return nil, fmt.Errorf("aead: sm4 gcm new: %w", err)
 		}
 		return &gcmAEAD{g: g}, nil
-	case SuiteAES256ECB:
+	case suite.AES256CTR:
 		b, err := aes.NewCipher(key)
 		if err != nil {
 			return nil, fmt.Errorf("aead: aes new: %w", err)
 		}
-		return &ecbCipher{block: b}, nil
-	case SuiteSM4ECB:
+		return &ctrCipher{block: b}, nil
+	case suite.SM4CTR:
 		b, err := sm4.NewCipher(key)
 		if err != nil {
 			return nil, fmt.Errorf("aead: sm4 new: %w", err)
 		}
-		return &ecbCipher{block: b}, nil
+		return &ctrCipher{block: b}, nil
+	case suite.AES256CMAC, suite.SM4CMAC:
+		return nil, fmt.Errorf("aead: suite %s is authentication-only", suiteID)
 	default:
-		return nil, fmt.Errorf("aead: suite %s not supported for new encryption in the engineering baseline", suite)
+		return nil, fmt.Errorf("aead: suite %s does not support encryption", suiteID)
 	}
 }
 
@@ -157,11 +73,9 @@ type gcmAEAD struct {
 }
 
 func (a *gcmAEAD) Encrypt(plaintext, nonce, aad []byte) (ciphertext, tag []byte) {
-	// Use Seal with dst=nil to get ciphertext||tag, then split.
 	out := a.g.Seal(nil, nonce, plaintext, aad)
 	tagLen := a.g.Overhead()
 	if len(out) < tagLen {
-		// Should never happen.
 		panic("aead: seal output shorter than tag")
 	}
 	return out[:len(out)-tagLen], out[len(out)-tagLen:]
@@ -180,70 +94,36 @@ func (a *gcmAEAD) Decrypt(ciphertext, tag, nonce, aad []byte) ([]byte, error) {
 func (a *gcmAEAD) NonceSize() int { return a.g.NonceSize() }
 func (a *gcmAEAD) TagSize() int   { return a.g.Overhead() }
 
-type ecbCipher struct {
+type ctrCipher struct {
 	block cipher.Block
 }
 
-func (e *ecbCipher) Encrypt(plaintext, nonce, aad []byte) (ciphertext, tag []byte) {
-	_ = aad
-	if len(nonce) != 0 {
-		panic("aead: ECB nonce must be empty")
+func (c *ctrCipher) Encrypt(plaintext, nonce, aad []byte) (ciphertext, tag []byte) {
+	if len(aad) != 0 {
+		panic("aead: CTR does not accept AAD")
 	}
-	blockSize := e.block.BlockSize()
-	padded := pkcs7Pad(plaintext, blockSize)
-	out := make([]byte, len(padded))
-	for off := 0; off < len(padded); off += blockSize {
-		e.block.Encrypt(out[off:off+blockSize], padded[off:off+blockSize])
+	if len(nonce) != c.block.BlockSize() {
+		panic("aead: CTR initial counter length mismatch")
 	}
+	out := make([]byte, len(plaintext))
+	cipher.NewCTR(c.block, nonce).XORKeyStream(out, plaintext)
 	return out, nil
 }
 
-func (e *ecbCipher) Decrypt(ciphertext, tag, nonce, aad []byte) ([]byte, error) {
-	_ = aad
-	if len(nonce) != 0 {
-		return nil, fmt.Errorf("aead: ECB nonce must be empty")
+func (c *ctrCipher) Decrypt(ciphertext, tag, nonce, aad []byte) ([]byte, error) {
+	if len(aad) != 0 {
+		return nil, fmt.Errorf("aead: CTR does not accept AAD")
 	}
 	if len(tag) != 0 {
-		return nil, fmt.Errorf("aead: ECB tag must be empty")
+		return nil, fmt.Errorf("aead: CTR tag must be empty")
 	}
-	blockSize := e.block.BlockSize()
-	if len(ciphertext) == 0 || len(ciphertext)%blockSize != 0 {
-		return nil, fmt.Errorf("aead: invalid ECB ciphertext")
+	if len(nonce) != c.block.BlockSize() {
+		return nil, fmt.Errorf("aead: CTR initial counter length mismatch")
 	}
-	padded := make([]byte, len(ciphertext))
-	for off := 0; off < len(ciphertext); off += blockSize {
-		e.block.Decrypt(padded[off:off+blockSize], ciphertext[off:off+blockSize])
-	}
-	return pkcs7Unpad(padded, blockSize)
-}
-
-func (e *ecbCipher) NonceSize() int { return 0 }
-func (e *ecbCipher) TagSize() int   { return 0 }
-
-func pkcs7Pad(plaintext []byte, blockSize int) []byte {
-	padLen := blockSize - len(plaintext)%blockSize
-	out := make([]byte, len(plaintext)+padLen)
-	copy(out, plaintext)
-	for i := len(plaintext); i < len(out); i++ {
-		out[i] = byte(padLen)
-	}
-	return out
-}
-
-func pkcs7Unpad(padded []byte, blockSize int) ([]byte, error) {
-	if len(padded) == 0 || len(padded)%blockSize != 0 {
-		return nil, fmt.Errorf("aead: invalid PKCS7 padding")
-	}
-	padLen := int(padded[len(padded)-1])
-	if padLen == 0 || padLen > blockSize || padLen > len(padded) {
-		return nil, fmt.Errorf("aead: invalid PKCS7 padding")
-	}
-	for _, b := range padded[len(padded)-padLen:] {
-		if int(b) != padLen {
-			return nil, fmt.Errorf("aead: invalid PKCS7 padding")
-		}
-	}
-	out := make([]byte, len(padded)-padLen)
-	copy(out, padded[:len(padded)-padLen])
+	out := make([]byte, len(ciphertext))
+	cipher.NewCTR(c.block, nonce).XORKeyStream(out, ciphertext)
 	return out, nil
 }
+
+func (c *ctrCipher) NonceSize() int { return c.block.BlockSize() }
+func (c *ctrCipher) TagSize() int   { return 0 }

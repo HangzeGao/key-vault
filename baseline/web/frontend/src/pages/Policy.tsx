@@ -108,10 +108,11 @@ export function PolicyPage() {
               <th>Algorithm</th>
               <th>Key Bits</th>
               <th>Mode</th>
+              <th>Service Type</th>
               <th>Nonce</th>
               <th>Status</th>
-              <th>Encrypt</th>
-              <th>Decrypt</th>
+              <th>Create</th>
+              <th>Consume</th>
               <th>Compliance</th>
             </tr>
           </thead>
@@ -122,6 +123,7 @@ export function PolicyPage() {
                 <td className="mono">{s.algorithm}</td>
                 <td className="mono">{s.key_bits}</td>
                 <td><span className="suite-badge">{s.mode}</span></td>
+                <td><span className="suite-badge">{s.service_type}</span></td>
                 <td className="mono" style={{ fontSize: 11 }}>{s.nonce || "-"}</td>
                 <td>
                   <span style={{ color: SUITE_STATUS_COLOR[s.status] ?? "var(--text-tertiary)", fontFamily: '"JetBrains Mono", monospace', fontSize: 11, textTransform: "uppercase" }}>

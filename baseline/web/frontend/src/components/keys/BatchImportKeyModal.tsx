@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Upload, CheckCircle, XCircle } from "lucide-react";
 import { Modal, showToast } from "../index";
 import type { BatchImportKeyResult, ImportKeyReq } from "../../lib/types";
+import { purposeForSuite } from "../../lib/suites";
 
 interface Props {
   onClose: () => void;
@@ -27,7 +28,7 @@ function parseEntries(text: string, policyID: string): ImportKeyReq[] {
     tenant_id: row.tenant_id ?? "",
     name: row.name ?? "",
     key_id: row.key_id || undefined,
-    purpose: "encrypt_decrypt",
+    purpose: row.purpose || purposeForSuite(row.suite_id || "AES_256_GCM"),
     policy_id: policyID,
     suite_id: row.suite_id || "AES_256_GCM",
     external_key: row.external_key || "",

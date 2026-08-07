@@ -9,18 +9,15 @@ interface AuthState {
   logout: () => void;
 }
 
-export const useAuth = create<AuthState>()(
-  persist(
-    (set) => ({
-      token: null,
-      tenantId: "t-default",
-      setToken: (token) => set({ token }),
-      setTenantId: (tenantId) => set({ tenantId }),
-      logout: () => set({ token: null }),
-    }),
-    { name: "kvlt-auth" }
-  )
-);
+// Credentials are intentionally process-memory only. Persisting bearer tokens
+// in localStorage exposes them to any script that executes in the origin.
+export const useAuth = create<AuthState>()((set) => ({
+  token: null,
+  tenantId: "t-default",
+  setToken: (token) => set({ token }),
+  setTenantId: (tenantId) => set({ tenantId }),
+  logout: () => set({ token: null }),
+}));
 
 export type Theme = "dark" | "light";
 

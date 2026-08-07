@@ -7,7 +7,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/kvlt/key-vault/internal/crypto/aead"
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 )
 
 // TestDefaultRegistryFormats verifies that only binary and JSON formats are
@@ -30,9 +30,9 @@ func TestDefaultRegistryFormats(t *testing.T) {
 	}
 }
 
-func TestJSONCodecOmitsAADHashForECB(t *testing.T) {
+func TestJSONCodecOmitsAuthenticationFieldsForCTR(t *testing.T) {
 	key := bytes.Repeat([]byte{0x66}, 32)
-	sealed, err := Seal(aead.SuiteAES256ECB, key, "key-ecb-json", 1, 1, nil, []byte("payload"), []byte("ignored"))
+	sealed, err := Seal(suite.AES256CTR, key, "key-ctr-json", 1, 1, bytes.Repeat([]byte{1}, 16), []byte("payload"), nil)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -48,30 +48,30 @@ func TestJSONCodecOmitsAADHashForECB(t *testing.T) {
 	if err := json.Unmarshal(encoded, &obj); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
-	for _, field := range []string{"nonce", "tag", "aad_hash"} {
+	for _, field := range []string{"tag", "aad_hash"} {
 		if _, ok := obj[field]; ok {
-			t.Fatalf("ECB JSON unexpectedly carried %s: %s", field, encoded)
+			t.Fatalf("CTR JSON unexpectedly carried %s: %s", field, encoded)
 		}
 	}
 	parsed, err := DefaultRegistry().Parse(FormatJSONV1, encoded)
 	if err != nil {
 		t.Fatalf("Parse JSON: %v", err)
 	}
-	if parsed.SuiteID != aead.SuiteAES256ECB {
-		t.Fatalf("suite = %s, want AES_256_ECB", parsed.SuiteID)
+	if parsed.SuiteID != suite.AES256CTR {
+		t.Fatalf("suite = %s, want AES_256_CTR", parsed.SuiteID)
 	}
 	reencoded, err := parsed.Encode()
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
 	if !bytes.Equal(sealed, reencoded) {
-		t.Fatal("ECB JSON -> canonical round-trip changed envelope")
+		t.Fatal("CTR JSON -> canonical round-trip changed envelope")
 	}
 }
 
 func TestJSONCodecAdaptiveRequiredFields(t *testing.T) {
 	key := bytes.Repeat([]byte{0x67}, 32)
-	sealed, err := Seal(aead.SuiteAES256ECB, key, "key-ecb-min", 1, 1, nil, []byte("payload"), nil)
+	sealed, err := Seal(suite.AES256CTR, key, "key-ctr-min", 1, 1, bytes.Repeat([]byte{2}, 16), []byte("payload"), nil)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -86,6 +86,7 @@ func TestJSONCodecAdaptiveRequiredFields(t *testing.T) {
 		KeyID:         string(env.KeyID),
 		KeyVersion:    env.KeyVersion,
 		PolicyVersion: env.PolicyVersion,
+		Nonce:         base64.RawStdEncoding.EncodeToString(env.Nonce),
 		Ciphertext:    base64.RawStdEncoding.EncodeToString(env.Ciphertext),
 	}
 	raw, err := json.Marshal(minimal)
@@ -94,13 +95,13 @@ func TestJSONCodecAdaptiveRequiredFields(t *testing.T) {
 	}
 	parsed, err := DefaultRegistry().Parse(FormatJSONV1, raw)
 	if err != nil {
-		t.Fatalf("Parse ECB minimal JSON: %v", err)
+		t.Fatalf("Parse CTR minimal JSON: %v", err)
 	}
-	if parsed.SuiteID != aead.SuiteAES256ECB || len(parsed.Nonce) != 0 || len(parsed.Tag) != 0 {
-		t.Fatalf("unexpected parsed ECB envelope: suite=%s nonce=%d tag=%d", parsed.SuiteID, len(parsed.Nonce), len(parsed.Tag))
+	if parsed.SuiteID != suite.AES256CTR || len(parsed.Nonce) != 16 || len(parsed.Tag) != 0 {
+		t.Fatalf("unexpected parsed CTR envelope: suite=%s nonce=%d tag=%d", parsed.SuiteID, len(parsed.Nonce), len(parsed.Tag))
 	}
 
-	minimal.SuiteID = suiteName(aead.SuiteAES256GCM)
+	minimal.SuiteID = suiteName(suite.AES256GCM)
 	raw, err = json.Marshal(minimal)
 	if err != nil {
 		t.Fatalf("Marshal GCM: %v", err)
@@ -110,9 +111,9 @@ func TestJSONCodecAdaptiveRequiredFields(t *testing.T) {
 	}
 }
 
-func TestConfigurableJSONAdaptiveRequiredFieldsForECB(t *testing.T) {
+func TestConfigurableJSONAdaptiveRequiredFieldsForCTR(t *testing.T) {
 	key := bytes.Repeat([]byte{0x68}, 32)
-	sealed, err := Seal(aead.SuiteAES256ECB, key, "key-ecb-profile", 1, 1, nil, []byte("payload"), nil)
+	sealed, err := Seal(suite.AES256CTR, key, "key-ctr-profile", 1, 1, bytes.Repeat([]byte{3}, 16), []byte("payload"), nil)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -129,9 +130,9 @@ func TestConfigurableJSONAdaptiveRequiredFieldsForECB(t *testing.T) {
 	if err := json.Unmarshal(encoded, &obj); err != nil {
 		t.Fatalf("json.Unmarshal: %v", err)
 	}
-	for _, field := range []string{"nonce", "tag", "aad_hash"} {
+	for _, field := range []string{"tag", "aad_hash"} {
 		if _, ok := obj[field]; ok {
-			t.Fatalf("ECB configurable JSON unexpectedly carried %s: %s", field, encoded)
+			t.Fatalf("CTR configurable JSON unexpectedly carried %s: %s", field, encoded)
 		}
 	}
 	parsed, _, err := DefaultRegistry().ParseWithProfile(profile, encoded)
@@ -143,7 +144,7 @@ func TestConfigurableJSONAdaptiveRequiredFieldsForECB(t *testing.T) {
 		t.Fatalf("Encode: %v", err)
 	}
 	if !bytes.Equal(sealed, reencoded) {
-		t.Fatal("ECB configurable JSON -> canonical round-trip changed envelope")
+		t.Fatal("CTR configurable JSON -> canonical round-trip changed envelope")
 	}
 }
 
@@ -178,11 +179,11 @@ func TestRegistryDetect(t *testing.T) {
 		KeyID:      keyID,
 		KeyVersion: 1,
 		Purpose:    "detect",
-		SuiteID:    uint16(aead.SuiteAES256GCM),
+		SuiteID:    uint16(suite.AES256GCM),
 	}
 	aadBytes, _ := callerAAD.Canonical()
 
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -225,11 +226,11 @@ func TestRegistryJSONRoundTrip(t *testing.T) {
 		KeyID:      keyID,
 		KeyVersion: 1,
 		Purpose:    "json-rt",
-		SuiteID:    uint16(aead.SuiteAES256GCM),
+		SuiteID:    uint16(suite.AES256GCM),
 	}
 	aadBytes, _ := callerAAD.Canonical()
 
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -271,10 +272,10 @@ func TestJSONCodecAllowsUnknownFields(t *testing.T) {
 	keyID := "key-strict-001"
 	callerAAD := testCallerAAD{
 		TenantID: "t-strict", KeyID: keyID, KeyVersion: 1,
-		Purpose: "strict", SuiteID: uint16(aead.SuiteAES256GCM),
+		Purpose: "strict", SuiteID: uint16(suite.AES256GCM),
 	}
 	aadBytes, _ := callerAAD.Canonical()
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -329,10 +330,10 @@ func TestConfigurableJSONProfileRoundTrip(t *testing.T) {
 		KeyID:      keyID,
 		KeyVersion: 1,
 		Purpose:    "config",
-		SuiteID:    uint16(aead.SuiteAES256GCM),
+		SuiteID:    uint16(suite.AES256GCM),
 	}
 	aadBytes, _ := callerAAD.Canonical()
-	sealed, err := Seal(aead.SuiteAES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
+	sealed, err := Seal(suite.AES256GCM, key, keyID, 1, 1, nonce, plaintext, aadBytes)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}

@@ -5,9 +5,12 @@ package policy
 import (
 	"fmt"
 	"os"
+	"reflect"
 	"sort"
 	"strings"
+	"sync"
 
+	cryptosuite "github.com/kvlt/key-vault/internal/crypto/suite"
 	"gopkg.in/yaml.v3"
 )
 
@@ -25,21 +28,29 @@ const (
 type Mode string
 
 const (
-	ModeGCM Mode = "GCM"
-	ModeECB Mode = "ECB"
+	ModeGCM  Mode = "GCM"
+	ModeCTR  Mode = "CTR"
+	ModeCMAC Mode = "CMAC"
+)
+
+const (
+	ServiceAuthOnly    = cryptosuite.ServiceAuthOnly
+	ServiceEncryptOnly = cryptosuite.ServiceEncryptOnly
+	ServiceAuthEncrypt = cryptosuite.ServiceAuthEncrypt
 )
 
 // Suite is a single cipher suite definition.
 type Suite struct {
-	SuiteID     string      `yaml:"suite_id" json:"suite_id"`
-	Algorithm   string      `yaml:"algorithm" json:"algorithm"`
-	KeyBits     int         `yaml:"key_bits" json:"key_bits"`
-	Mode        Mode        `yaml:"mode" json:"mode"`
-	MAC         string      `yaml:"mac,omitempty" json:"mac,omitempty"`
-	Composition string      `yaml:"composition,omitempty" json:"composition,omitempty"`
-	Nonce       string      `yaml:"nonce" json:"nonce"`
-	Status      SuiteStatus `yaml:"status" json:"status"`
-	Compliance  []string    `yaml:"compliance,omitempty" json:"compliance,omitempty"`
+	SuiteID     string                  `yaml:"suite_id" json:"suite_id"`
+	Algorithm   string                  `yaml:"algorithm" json:"algorithm"`
+	KeyBits     int                     `yaml:"key_bits" json:"key_bits"`
+	Mode        Mode                    `yaml:"mode" json:"mode"`
+	ServiceType cryptosuite.ServiceType `yaml:"service_type" json:"service_type"`
+	MAC         string                  `yaml:"mac,omitempty" json:"mac,omitempty"`
+	Composition string                  `yaml:"composition,omitempty" json:"composition,omitempty"`
+	Nonce       string                  `yaml:"nonce" json:"nonce"`
+	Status      SuiteStatus             `yaml:"status" json:"status"`
+	Compliance  []string                `yaml:"compliance,omitempty" json:"compliance,omitempty"`
 }
 
 // Signature carries policy package signature metadata.
@@ -60,73 +71,144 @@ type Policy struct {
 	Signature    Signature `yaml:"signature"`
 }
 
-// Engine validates policies and answers allow/deny questions.
+// Engine is the versioned policy catalog used by runtime decision points.
+//
+// Load atomically activates a validated policy version while retaining earlier
+// versions for operations, such as decrypt, whose contract is bound to the
+// policy version recorded in an Envelope. Returned policies are snapshots, so
+// callers cannot mutate the catalog after validation.
 type Engine struct {
-	policies map[string]*Policy
+	mu       sync.RWMutex
+	policies map[string]map[uint32]*Policy
+	current  map[string]uint32
 }
 
 // NewEngine constructs an empty engine.
 func NewEngine() *Engine {
-	return &Engine{policies: make(map[string]*Policy)}
+	return &Engine{
+		policies: make(map[string]map[uint32]*Policy),
+		current:  make(map[string]uint32),
+	}
 }
 
-// Load adds a policy to the engine. It validates baseline defaults:
+// Load validates, stores, and atomically activates a policy version:
 //   - all suites must match a supported suite definition
 //   - default_suite must be active
 //   - signature field must exist
 func (e *Engine) Load(p *Policy) error {
-	if p == nil {
-		return fmt.Errorf("policy: nil")
+	validated, err := validateAndClone(p)
+	if err != nil {
+		return err
 	}
-	if p.PolicyID == "" {
-		return fmt.Errorf("policy: missing policy_id")
-	}
-	if p.DefaultSuite == "" {
-		return fmt.Errorf("policy: missing default_suite")
-	}
-	// Validate suites.
-	ids := make(map[string]*Suite, len(p.Suites))
-	for i := range p.Suites {
-		s := &p.Suites[i]
-		if _, dup := ids[s.SuiteID]; dup {
-			return fmt.Errorf("policy: duplicate suite %s", s.SuiteID)
-		}
-		ids[s.SuiteID] = s
-		if err := validateSuiteDefinition(s); err != nil {
-			return err
-		}
-	}
-	// Default suite must be active.
-	def, ok := ids[p.DefaultSuite]
-	if !ok {
-		return fmt.Errorf("policy: default_suite %s not defined", p.DefaultSuite)
-	}
-	if def.Status != SuiteStatusActive {
-		return fmt.Errorf("policy: default_suite must be active, got %s", def.Status)
-	}
-	// Signature field must exist; signed package verification validates values.
-	_ = p.Signature
 
-	e.policies[p.PolicyID] = p
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	versions := e.policies[validated.PolicyID]
+	if versions == nil {
+		versions = make(map[uint32]*Policy)
+		e.policies[validated.PolicyID] = versions
+	}
+	if existing, ok := versions[validated.Version]; ok {
+		if !reflect.DeepEqual(existing, validated) {
+			return fmt.Errorf("policy: version %d is immutable", validated.Version)
+		}
+		// Exact re-verification is idempotent and does not change the active
+		// version or historical catalog.
+		return nil
+	}
+	versions[validated.Version] = validated
+	e.current[validated.PolicyID] = validated.Version
 	return nil
 }
 
-// Get returns a policy by ID.
+func validateAndClone(p *Policy) (*Policy, error) {
+	if p == nil {
+		return nil, fmt.Errorf("policy: nil")
+	}
+	if p.PolicyID == "" {
+		return nil, fmt.Errorf("policy: missing policy_id")
+	}
+	if p.Version == 0 {
+		return nil, fmt.Errorf("policy: version must be greater than zero")
+	}
+	if p.DefaultSuite == "" {
+		return nil, fmt.Errorf("policy: missing default_suite")
+	}
+	candidate := clonePolicy(p)
+	// Validate suites.
+	ids := make(map[string]*Suite, len(candidate.Suites))
+	for i := range candidate.Suites {
+		s := &candidate.Suites[i]
+		if _, dup := ids[s.SuiteID]; dup {
+			return nil, fmt.Errorf("policy: duplicate suite %s", s.SuiteID)
+		}
+		ids[s.SuiteID] = s
+		if err := validateSuiteDefinition(s); err != nil {
+			return nil, err
+		}
+	}
+	// Default suite must be active.
+	def, ok := ids[candidate.DefaultSuite]
+	if !ok {
+		return nil, fmt.Errorf("policy: default_suite %s not defined", candidate.DefaultSuite)
+	}
+	if def.Status != SuiteStatusActive {
+		return nil, fmt.Errorf("policy: default_suite must be active, got %s", def.Status)
+	}
+	// Signature field must exist; signed package verification validates values.
+	_ = candidate.Signature
+	return candidate, nil
+}
+
+// Get returns a snapshot of the currently active policy by ID.
 func (e *Engine) Get(policyID string) (*Policy, error) {
-	p, ok := e.policies[policyID]
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	version, ok := e.current[policyID]
 	if !ok {
 		return nil, fmt.Errorf("policy: %s not found", policyID)
 	}
-	return p, nil
+	return clonePolicy(e.policies[policyID][version]), nil
 }
 
-// CanEncrypt returns whether the suite may be used for new encryption.
-func CanEncrypt(s SuiteStatus) bool {
-	return s == SuiteStatusActive || s == SuiteStatusDeprecated
+// GetVersion returns the immutable policy snapshot bound to a historical
+// Envelope or other versioned decision.
+func (e *Engine) GetVersion(policyID string, version uint32) (*Policy, error) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	versions, ok := e.policies[policyID]
+	if !ok {
+		return nil, fmt.Errorf("policy: %s not found", policyID)
+	}
+	p, ok := versions[version]
+	if !ok {
+		return nil, fmt.Errorf("policy: %s version %d not found", policyID, version)
+	}
+	return clonePolicy(p), nil
 }
 
-// CanDecrypt returns whether the suite may be used for decryption.
-func CanDecrypt(s SuiteStatus) bool {
+func clonePolicy(p *Policy) *Policy {
+	if p == nil {
+		return nil
+	}
+	out := *p
+	out.Suites = make([]Suite, len(p.Suites))
+	copy(out.Suites, p.Suites)
+	for i := range out.Suites {
+		out.Suites[i].Compliance = append([]string(nil), p.Suites[i].Compliance...)
+	}
+	return &out
+}
+
+// CanCreate returns whether a suite may be used for a new protection operation.
+func CanCreate(s SuiteStatus) bool {
+	return s == SuiteStatusActive
+}
+
+// CanConsume returns whether an existing ciphertext or authenticator may be
+// consumed. Deprecated suites remain readable/verifiable but cannot create new
+// protected data.
+func CanConsume(s SuiteStatus) bool {
 	switch s {
 	case SuiteStatusActive, SuiteStatusDeprecated:
 		return true
@@ -138,22 +220,15 @@ func validateSuiteDefinition(s *Suite) error {
 	if s == nil {
 		return fmt.Errorf("policy: nil suite")
 	}
-	switch s.SuiteID {
-	case "AES_256_GCM":
-		return validateSuiteShape(s, "AES", 256, ModeGCM)
-	case "SM4_GCM":
-		return validateSuiteShape(s, "SM4", 128, ModeGCM)
-	case "AES_256_ECB":
-		return validateSuiteShape(s, "AES", 256, ModeECB)
-	case "SM4_ECB":
-		return validateSuiteShape(s, "SM4", 128, ModeECB)
-	default:
+	id, err := cryptosuite.Parse(s.SuiteID)
+	if err != nil {
 		return fmt.Errorf("policy: unsupported suite %s", s.SuiteID)
 	}
-}
-
-func validateSuiteShape(s *Suite, algorithm string, keyBits int, mode Mode) error {
-	if s.Algorithm != algorithm || s.KeyBits != keyBits || s.Mode != mode {
+	descriptor, _ := cryptosuite.Describe(id)
+	if s.Algorithm != descriptor.Algorithm || s.KeyBits != descriptor.KeyBits ||
+		s.Mode != Mode(descriptor.Mode) || s.ServiceType != descriptor.ServiceType ||
+		s.Nonce != descriptor.NonceStrategy || s.MAC != descriptor.MAC ||
+		s.Composition != descriptor.Composition {
 		return fmt.Errorf("policy: suite %s definition mismatch", s.SuiteID)
 	}
 	return nil
@@ -194,11 +269,32 @@ func DefaultPolicy() *Policy {
 		Status:       "active",
 		DefaultSuite: "AES_256_GCM",
 		Suites: []Suite{
-			{SuiteID: "AES_256_GCM", Algorithm: "AES", KeyBits: 256, Mode: ModeGCM, Nonce: "lease_counter", Status: SuiteStatusActive},
-			{SuiteID: "SM4_GCM", Algorithm: "SM4", KeyBits: 128, Mode: ModeGCM, Nonce: "lease_counter", Status: SuiteStatusActive, Compliance: []string{"GM_T_0054"}},
-			{SuiteID: "AES_256_ECB", Algorithm: "AES", KeyBits: 256, Mode: ModeECB, Nonce: "none", Status: SuiteStatusActive},
-			{SuiteID: "SM4_ECB", Algorithm: "SM4", KeyBits: 128, Mode: ModeECB, Nonce: "none", Status: SuiteStatusActive, Compliance: []string{"GM_T_0054"}},
+			defaultSuite(cryptosuite.AES256GCM, SuiteStatusActive, nil),
+			defaultSuite(cryptosuite.SM4GCM, SuiteStatusActive, []string{"GM_T_0054"}),
+			defaultSuite(cryptosuite.AES256CTR, SuiteStatusActive, nil),
+			defaultSuite(cryptosuite.SM4CTR, SuiteStatusActive, []string{"GM_T_0054"}),
+			defaultSuite(cryptosuite.AES256CMAC, SuiteStatusActive, nil),
+			defaultSuite(cryptosuite.SM4CMAC, SuiteStatusActive, []string{"GB_T_15821_1"}),
 		},
 		Signature: Signature{},
+	}
+}
+
+func defaultSuite(id cryptosuite.ID, status SuiteStatus, compliance []string) Suite {
+	descriptor, err := cryptosuite.Describe(id)
+	if err != nil {
+		panic(err)
+	}
+	return Suite{
+		SuiteID:     descriptor.Name,
+		Algorithm:   descriptor.Algorithm,
+		KeyBits:     descriptor.KeyBits,
+		Mode:        Mode(descriptor.Mode),
+		ServiceType: descriptor.ServiceType,
+		MAC:         descriptor.MAC,
+		Composition: descriptor.Composition,
+		Nonce:       descriptor.NonceStrategy,
+		Status:      status,
+		Compliance:  append([]string(nil), compliance...),
 	}
 }

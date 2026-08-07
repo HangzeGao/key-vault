@@ -11,6 +11,7 @@ import (
 	appkeys "github.com/kvlt/key-vault/internal/application/keys"
 	"github.com/kvlt/key-vault/internal/crypto/aad"
 	"github.com/kvlt/key-vault/internal/crypto/aead"
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 	"github.com/kvlt/key-vault/internal/domain/policy"
 	"github.com/kvlt/key-vault/internal/repository/memory"
 	"github.com/kvlt/key-vault/internal/repository/models"
@@ -28,7 +29,7 @@ func TestCreateUploadWrapsDataKeyAndConfirmActivatesPendingVersion(t *testing.T)
 	}
 
 	kekPlain := bytes.Repeat([]byte{0x11}, 16)
-	kekMaterial, err := resolver.WrapExternalKey(ctx, aead.SuiteSM4GCM, "kek-v1", kekPlain)
+	kekMaterial, err := resolver.WrapExternalKey(ctx, suite.SM4GCM, "kek-v1", kekPlain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +45,7 @@ func TestCreateUploadWrapsDataKeyAndConfirmActivatesPendingVersion(t *testing.T)
 	}
 
 	oldData := bytes.Repeat([]byte{0x22}, 16)
-	oldMaterial, err := resolver.WrapExternalKey(ctx, aead.SuiteSM4GCM, "data-v1", oldData)
+	oldMaterial, err := resolver.WrapExternalKey(ctx, suite.SM4GCM, "data-v1", oldData)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func TestCreateUploadWrapsDataKeyAndConfirmActivatesPendingVersion(t *testing.T)
 	}
 
 	newData := bytes.Repeat([]byte{0x33}, 16)
-	newMaterial, err := resolver.WrapExternalKey(ctx, aead.SuiteSM4GCM, "data-v2", newData)
+	newMaterial, err := resolver.WrapExternalKey(ctx, suite.SM4GCM, "data-v2", newData)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +89,7 @@ func TestCreateUploadWrapsDataKeyAndConfirmActivatesPendingVersion(t *testing.T)
 	nonce, _ := base64.StdEncoding.DecodeString(dto.Nonce)
 	tag, _ := base64.StdEncoding.DecodeString(dto.Tag)
 	aadBytes, _ := base64.StdEncoding.DecodeString(dto.AADB64)
-	cipherImpl, err := aead.New(aead.SuiteSM4GCM, kekPlain)
+	cipherImpl, err := aead.New(suite.SM4GCM, kekPlain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +140,7 @@ func TestImportDownloadCreatesKeyThenPendingVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	kekPlain := bytes.Repeat([]byte{0x51}, 16)
-	kekMaterial, err := resolver.WrapExternalKey(ctx, aead.SuiteSM4GCM, "download-kek-v1", kekPlain)
+	kekMaterial, err := resolver.WrapExternalKey(ctx, suite.SM4GCM, "download-kek-v1", kekPlain)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +171,7 @@ func TestImportDownloadCreatesKeyThenPendingVersion(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cipherImpl, err := aead.New(aead.SuiteSM4GCM, kekPlain)
+		cipherImpl, err := aead.New(suite.SM4GCM, kekPlain)
 		if err != nil {
 			t.Fatal(err)
 		}

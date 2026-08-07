@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/kvlt/key-vault/internal/crypto/aead"
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 )
 
 // Fuzz tests for Envelope v1 parsing per design 搂8.3 "Envelope 瑙ｆ瀽瀹夊叏".
@@ -17,10 +17,10 @@ func FuzzParse(f *testing.F) {
 	// Seed corpus: valid envelopes + edge cases.
 	key := bytes.Repeat([]byte{0x42}, 32)
 	nonce := bytes.Repeat([]byte{0x11}, 12)
-	callerAAD := testCallerAAD{TenantID: "t", KeyID: "k", KeyVersion: 1, Purpose: "p", SuiteID: uint16(aead.SuiteAES256GCM)}
+	callerAAD := testCallerAAD{TenantID: "t", KeyID: "k", KeyVersion: 1, Purpose: "p", SuiteID: uint16(suite.AES256GCM)}
 	aadBytes, _ := callerAAD.Canonical()
 
-	valid, _ := Seal(aead.SuiteAES256GCM, key, "k", 1, 1, nonce, []byte("seed"), aadBytes)
+	valid, _ := Seal(suite.AES256GCM, key, "k", 1, 1, nonce, []byte("seed"), aadBytes)
 	f.Add(valid)                                            // valid envelope
 	f.Add([]byte("KVLT"))                                   // magic only
 	f.Add(make([]byte, 61))                                 // minimum header, all zeros
@@ -86,10 +86,10 @@ func FuzzParse(f *testing.F) {
 func FuzzOpen(f *testing.F) {
 	key := bytes.Repeat([]byte{0x42}, 32)
 	nonce := bytes.Repeat([]byte{0x11}, 12)
-	callerAAD := testCallerAAD{TenantID: "t", KeyID: "k", KeyVersion: 1, Purpose: "p", SuiteID: uint16(aead.SuiteAES256GCM)}
+	callerAAD := testCallerAAD{TenantID: "t", KeyID: "k", KeyVersion: 1, Purpose: "p", SuiteID: uint16(suite.AES256GCM)}
 	aadBytes, _ := callerAAD.Canonical()
 
-	valid, _ := Seal(aead.SuiteAES256GCM, key, "k", 1, 1, nonce, []byte("fuzz-open"), aadBytes)
+	valid, _ := Seal(suite.AES256GCM, key, "k", 1, 1, nonce, []byte("fuzz-open"), aadBytes)
 	f.Add(valid)
 	f.Add([]byte{})
 	f.Add(make([]byte, 100))
@@ -124,10 +124,10 @@ func FuzzSealOpenRoundTrip(f *testing.F) {
 		}
 		key := bytes.Repeat([]byte{0x42}, 32)
 		nonce := bytes.Repeat([]byte{0x11}, 12)
-		callerAAD := testCallerAAD{TenantID: "t", KeyID: "k", KeyVersion: 1, Purpose: "p", SuiteID: uint16(aead.SuiteAES256GCM)}
+		callerAAD := testCallerAAD{TenantID: "t", KeyID: "k", KeyVersion: 1, Purpose: "p", SuiteID: uint16(suite.AES256GCM)}
 		aadBytes, _ := callerAAD.Canonical()
 
-		sealed, err := Seal(aead.SuiteAES256GCM, key, "k", 1, 1, nonce, plaintext, aadBytes)
+		sealed, err := Seal(suite.AES256GCM, key, "k", 1, 1, nonce, plaintext, aadBytes)
 		if err != nil {
 			t.Fatalf("Seal: %v", err)
 		}

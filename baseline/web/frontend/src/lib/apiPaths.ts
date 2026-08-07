@@ -25,6 +25,7 @@ export const apiPaths = {
   keyDownload: (id: string) => `${BFF}/key-downloads/${encodeURIComponent(id)}`,
   crypto: {
     encrypt: `${BFF}/crypto/encrypt`, decrypt: `${BFF}/crypto/decrypt`, convert: `${BFF}/crypto/envelopes:convert`, inspect: `${BFF}/crypto/envelopes:inspect`,
+    authenticate: `${BFF}/crypto/authenticate`, verify: `${BFF}/crypto/verify`,
     encryptBatch: `${BFF}/crypto/encrypt-batch`, decryptBatch: `${BFF}/crypto/decrypt-batch`,
   },
   envelopeFormats: `${BFF}/envelope/formats`,

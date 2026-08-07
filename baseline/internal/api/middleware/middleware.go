@@ -94,7 +94,7 @@ func Auth(cfg AuthConfig) func(http.Handler) http.Handler {
 					}
 				}
 				if p == nil && cfg.JWTVerifier != nil {
-					claims, err := cfg.JWTVerifier.Verify(token)
+					claims, err := cfg.JWTVerifier.VerifyContext(r.Context(), token)
 					if err != nil {
 						writeError(w, errorsx.New(errorsx.CodeAuthFailed, "jwt invalid", false), requestID(r))
 						return
@@ -114,7 +114,7 @@ func Auth(cfg AuthConfig) func(http.Handler) http.Handler {
 					AuthMethod: "hmac",
 					NodeID:     nodeID,
 					Plane:      principal.PlaneData,
-					Scopes:     []string{"crypto:encrypt", "crypto:decrypt"},
+					Scopes:     []string{"crypto:encrypt", "crypto:decrypt", "crypto:authenticate", "crypto:verify"},
 					Roles:      []string{"data"},
 				}
 			}
@@ -270,6 +270,10 @@ func accessRuleFor(method, path string) (accessRule, bool) {
 			return accessRule{planes: data, scopes: []string{"crypto:encrypt"}}, true
 		case "/ui/api/v1/crypto/decrypt", "/ui/api/v1/crypto/decrypt-batch", "/ui/api/v1/crypto/envelopes:inspect", "/ui/api/v1/crypto/envelopes:convert":
 			return accessRule{planes: data, scopes: []string{"crypto:decrypt"}}, true
+		case "/ui/api/v1/crypto/authenticate":
+			return accessRule{planes: data, scopes: []string{"crypto:authenticate"}}, true
+		case "/ui/api/v1/crypto/verify":
+			return accessRule{planes: data, scopes: []string{"crypto:verify"}}, true
 		}
 	}
 

@@ -5,12 +5,14 @@ This directory contains the single engineering baseline implementation for the T
 Implemented baseline capabilities:
 
 - Key lifecycle: create, import path, query, enable, disable, rotate, and schedule destroy.
-- Server-side Encrypt/Decrypt and batch Encrypt/Decrypt.
-- AES/SM4 policy suites with algorithm and mode bound to each key.
+- Server-side encryption/decryption and detached authentication/verification.
+- A closed service mapping: `AUTH_ONLY` → CMAC, `ENCRYPT_ONLY` → CTR, and
+  `AUTH_ENCRYPT` → GCM, for both AES and SM4 suites.
 - Envelope v1 and canonical AAD.
 - TPM-backed key boundary: plaintext key material is not returned by API responses.
 - Protocol-neutral Key Encryption Key (KEK) upload/download with staged confirmation and activation.
-- Logical isolation for management, data, ops, key, and audit planes.
+- Process-scoped HTTP route isolation for management, data, and ops planes,
+  plus internal key-resolver and audit module boundaries.
 - Hash-chained audit, lifecycle worker, signed policy reload, and tenant envelope configuration.
 - Embedded React UI served under `/ui/`.
 
@@ -20,6 +22,9 @@ Current engineering limits:
 - Static demo tokens are for isolated development only.
 - Trusted-node and attestation workflows are intentionally not part of this baseline.
 - Client DataKey or plaintext key export is intentionally not provided.
+- A separately deployed Key Plane, transactional CRK rotation, and node-specific
+  CRK envelope distribution remain production blockers. See
+  [Production Security Gate](docs/PRODUCTION_SECURITY.md).
 
 ## Docker
 
@@ -30,6 +35,9 @@ docker compose ps
 ```
 
 Open <http://localhost:8080/ui/login>.
+
+This Compose profile is development-only. It intentionally uses plain HTTP,
+static tokens, and a non-production TPM provider.
 
 Demo tokens:
 
@@ -50,6 +58,9 @@ cd web/frontend
 npm ci
 npm run build
 ```
+
+Production configuration shape: [config.production.example.yaml](config.production.example.yaml).
+Protection-mode contracts and examples: [Crypto Modes](docs/CRYPTO_MODES.md).
 
 ## HTTP Entry Points
 

@@ -16,12 +16,20 @@ type Tenant struct {
 	UpdatedAt    time.Time
 }
 
+type KeyUsageScope string
+
+const (
+	KeyUsageGeneric  KeyUsageScope = "GENERIC"
+	KeyUsageProtocol KeyUsageScope = "PROTOCOL"
+)
+
 // Key is a logical key.
 type Key struct {
 	ID             string
 	TenantID       string
 	Name           string
-	Purpose        string // encrypt_decrypt | key_wrap
+	Purpose        string // encrypt_decrypt | authenticate_verify | key_wrap
+	UsageScope     KeyUsageScope
 	PolicyID       string
 	SuiteID        string
 	CurrentVersion uint32

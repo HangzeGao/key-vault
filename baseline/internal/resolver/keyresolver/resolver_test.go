@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/kvlt/key-vault/internal/crypto/aad"
-	"github.com/kvlt/key-vault/internal/crypto/aead"
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 	"github.com/kvlt/key-vault/internal/tpm/provider"
 )
 
@@ -15,7 +15,7 @@ func TestIssueDEKLeaseCacheDoesNotShareReturnedDEK(t *testing.T) {
 	ctx := context.Background()
 	r := newTestResolver(t, ctx)
 
-	material, err := r.GenerateAndWrapDEK(ctx, aead.SuiteAES256GCM, "kv-1")
+	material, err := r.GenerateAndWrapDEK(ctx, suite.AES256GCM, "kv-1")
 	if err != nil {
 		t.Fatalf("GenerateAndWrapDEK: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestIssueDEKLeaseCacheDoesNotShareReturnedDEK(t *testing.T) {
 		return material.WrappedDEK, material.WrapMetadata, nil
 	})
 
-	first, err := r.IssueDEKLease(ctx, "kv-1", "key-1", 1, aead.SuiteAES256GCM, "tenant-1", "batch-encrypt", "node-1")
+	first, err := r.IssueDEKLease(ctx, "kv-1", "key-1", 1, suite.AES256GCM, "tenant-1", "batch-encrypt", "node-1")
 	if err != nil {
 		t.Fatalf("IssueDEKLease first: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestIssueDEKLeaseCacheDoesNotShareReturnedDEK(t *testing.T) {
 
 	zeroize(first.DEK)
 
-	second, err := r.IssueDEKLease(ctx, "kv-1", "key-1", 1, aead.SuiteAES256GCM, "tenant-1", "batch-encrypt", "node-1")
+	second, err := r.IssueDEKLease(ctx, "kv-1", "key-1", 1, suite.AES256GCM, "tenant-1", "batch-encrypt", "node-1")
 	if err != nil {
 		t.Fatalf("IssueDEKLease second: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestIssueDEKLeaseCacheDoesNotShareReturnedDEK(t *testing.T) {
 	}
 
 	second.DEK[0] ^= 0xff
-	third, err := r.IssueDEKLease(ctx, "kv-1", "key-1", 1, aead.SuiteAES256GCM, "tenant-1", "batch-encrypt", "node-1")
+	third, err := r.IssueDEKLease(ctx, "kv-1", "key-1", 1, suite.AES256GCM, "tenant-1", "batch-encrypt", "node-1")
 	if err != nil {
 		t.Fatalf("IssueDEKLease third: %v", err)
 	}

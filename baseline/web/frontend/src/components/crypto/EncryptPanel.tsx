@@ -23,6 +23,8 @@ export function EncryptPanel({ keys, formatOptions, onSendToDecrypt }: Props) {
   const [encResult, setEncResult] = useState<EncryptResponse | null>(null);
   const [envelopeFormat, setEnvelopeFormat] = useState("");
   const envelopeText = encResult ? JSON.stringify(encResult, null, 2) : "";
+  const selectedKey = keys.find((key) => key.key_id === keyId);
+  const isCTR = selectedKey?.service_type === "ENCRYPT_ONLY";
 
   const parseExtensions = () => {
     const raw = encExtensions.trim();
@@ -64,8 +66,12 @@ export function EncryptPanel({ keys, formatOptions, onSendToDecrypt }: Props) {
             className="input"
             list="crypto-key-options"
             value={keyId}
-            onChange={(e) => setKeyId(e.target.value)}
-            placeholder="default ECB key if empty"
+            onChange={(e) => {
+              setKeyId(e.target.value);
+              const next = keys.find((key) => key.key_id === e.target.value);
+              if (next?.service_type === "ENCRYPT_ONLY") setEncAAD("");
+            }}
+            placeholder="key_id is required"
           />
           <datalist id="crypto-key-options">
             {keys.map((k) => (
@@ -99,7 +105,8 @@ export function EncryptPanel({ keys, formatOptions, onSendToDecrypt }: Props) {
             className="textarea mono"
             value={encAAD}
             onChange={(e) => setEncAAD(e.target.value)}
-            placeholder="caller canonical AAD bytes"
+            placeholder={isCTR ? "CTR provides confidentiality only; AAD is unavailable" : "caller canonical AAD bytes"}
+            disabled={isCTR}
             style={{ minHeight: 84 }}
           />
         </div>

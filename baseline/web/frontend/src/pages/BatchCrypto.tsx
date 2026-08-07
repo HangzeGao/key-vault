@@ -351,7 +351,7 @@ export function BatchCryptoPage() {
           <pre style={{ margin: 0, padding: 10, background: "var(--bg-inset)", border: "1px solid var(--border)", borderRadius: 2, whiteSpace: "pre-wrap" }}>
 {`{
   "tenant_id": "t-default",
-  "entries": [ { "envelope": { "version": 1, "suite_id": "AES_256_ECB", "...": "..." }, "aad_b64": "<base64 caller AAD bytes>" } ]
+  "entries": [ { "envelope": { "version": 1, "suite_id": "AES_256_GCM", "...": "..." }, "aad_b64": "<base64 caller AAD bytes>" } ]
 }`}
           </pre>
           <div style={{ marginTop: 8, color: "var(--text-tertiary)" }}>

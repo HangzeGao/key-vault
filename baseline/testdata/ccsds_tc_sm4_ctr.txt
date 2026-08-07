@@ -1,0 +1,9 @@
+# Ground-to-flight fixed interoperability vector.
+# TC profile: primary(5) || SPI(2) || IV_COUNTER(4) || SM4-CTR data || FECF(2)
+suite_id=SM4_CTR
+key=0123456789abcdeffedcba9876543210
+nonce_prefix=a1a2a3a4a5a6
+spi=2002
+iv_counter=00000009
+plaintext=cafe0102030405060708090a0b0c0d0e0f10111213
+protected_frame=200104210720020000000959e9033eed45a204c57df96b36000dca441b6fa0e2baa0

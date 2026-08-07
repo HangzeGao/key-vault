@@ -37,6 +37,7 @@ import (
 	"fmt"
 
 	"github.com/kvlt/key-vault/internal/crypto/aead"
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 )
 
 // Magic is the 4-byte envelope magic.
@@ -94,7 +95,7 @@ const FixedHeaderSize = BaseHeaderSize + AADHashSize
 type Envelope struct {
 	Version       uint8
 	Flags         uint16
-	SuiteID       aead.SuiteID
+	SuiteID       suite.ID
 	KeyID         []byte
 	KeyVersion    uint32
 	PolicyVersion uint32
@@ -166,16 +167,22 @@ func encodeProtectedHeader(h ProtectedHeader) []byte {
 // Seal builds a complete Envelope v1 byte slice from plaintext + caller AAD.
 // It generates the AAD hash, encrypts, and assembles the internal canonical encoding.
 // The caller MUST supply a unique nonce (from the nonce lease).
-func Seal(suite aead.SuiteID, key []byte, keyID string, keyVersion uint32,
+func Seal(suiteID suite.ID, key []byte, keyID string, keyVersion uint32,
 	policyVersion uint32, nonce, plaintext []byte, callerAAD []byte) ([]byte, error) {
 
-	a, err := aead.New(suite, key)
+	if !suiteID.Supports(suite.OperationEncrypt) {
+		return nil, fmt.Errorf("envelope: suite %s does not support encryption", suiteID)
+	}
+	if !suiteID.AuthenticatesAAD() && len(callerAAD) != 0 {
+		return nil, fmt.Errorf("envelope: suite %s does not support AAD", suiteID)
+	}
+	a, err := aead.New(suiteID, key)
 	if err != nil {
 		return nil, err
 	}
-	if len(nonce) != suite.NonceLen() {
+	if len(nonce) != suiteID.NonceLen() {
 		return nil, fmt.Errorf("envelope: nonce length %d does not match suite %s",
-			len(nonce), suite)
+			len(nonce), suiteID)
 	}
 	if len(keyID) > MaxKeyIDLen {
 		return nil, fmt.Errorf("envelope: key_id too long")
@@ -183,7 +190,7 @@ func Seal(suite aead.SuiteID, key []byte, keyID string, keyVersion uint32,
 	if len(plaintext) > MaxCiphertextLen {
 		return nil, fmt.Errorf("envelope: plaintext too long")
 	}
-	ciphertextLen := suite.CiphertextLen(len(plaintext))
+	ciphertextLen := suiteID.CiphertextLen(len(plaintext))
 	if ciphertextLen > MaxCiphertextLen {
 		return nil, fmt.Errorf("envelope: plaintext too long")
 	}
@@ -192,19 +199,22 @@ func Seal(suite aead.SuiteID, key []byte, keyID string, keyVersion uint32,
 		Magic:         Magic,
 		Version:       Version1,
 		Flags:         0,
-		SuiteID:       uint16(suite),
+		SuiteID:       uint16(suiteID),
 		KeyIDLen:      uint16(len(keyID)),
 		KeyVersion:    keyVersion,
 		PolicyVersion: policyVersion,
 		NonceLen:      uint8(len(nonce)),
-		TagLen:        uint8(suite.TagLen()),
+		TagLen:        uint8(suiteID.TagLen()),
 		CiphertextLen: uint64(ciphertextLen),
 	}
 
-	cipherAAD := callerAADForSuite(suite, callerAAD)
-	aadHash := aadHashForSuite(suite, cipherAAD)
-	aeadAAD := BuildAEADAAD(hdr, cipherAAD)
-	ciphertext, tag := a.Encrypt(plaintext, nonce, aeadAAD)
+	cipherAAD := callerAADForSuite(suiteID, callerAAD)
+	aadHash := aadHashForSuite(suiteID, cipherAAD)
+	var operationAAD []byte
+	if suiteID.AuthenticatesAAD() {
+		operationAAD = BuildAEADAAD(hdr, cipherAAD)
+	}
+	ciphertext, tag := a.Encrypt(plaintext, nonce, operationAAD)
 
 	return assemble(hdr, aadHash, []byte(keyID), nonce, ciphertext, tag)
 }
@@ -223,9 +233,9 @@ func assemble(hdr ProtectedHeader, aadHash [32]byte, keyID, nonce, ciphertext, t
 	if hdr.CiphertextLen != uint64(len(ciphertext)) {
 		return nil, fmt.Errorf("envelope: ciphertext_len mismatch")
 	}
-	out := make([]byte, 0, headerSizeForSuite(aead.SuiteID(hdr.SuiteID))+len(keyID)+len(nonce)+len(ciphertext)+len(tag))
+	out := make([]byte, 0, headerSizeForSuite(suite.ID(hdr.SuiteID))+len(keyID)+len(nonce)+len(ciphertext)+len(tag))
 	out = append(out, encodeProtectedHeader(hdr)...)
-	if aead.SuiteID(hdr.SuiteID).AuthenticatesAAD() {
+	if suite.ID(hdr.SuiteID).AuthenticatesAAD() {
 		out = append(out, aadHash[:]...)
 	}
 	out = append(out, keyID...)
@@ -249,8 +259,14 @@ func Open(b []byte, key []byte, callerAAD []byte) (*Envelope, []byte, error) {
 		return nil, nil, err
 	}
 	hdr := env.protectedHeader()
-	aeadAAD := BuildAEADAAD(hdr, callerAADForSuite(env.SuiteID, callerAAD))
-	pt, err := a.Decrypt(env.Ciphertext, env.Tag, env.Nonce, aeadAAD)
+	if !env.SuiteID.AuthenticatesAAD() && len(callerAAD) != 0 {
+		return nil, nil, fmt.Errorf("%w: suite does not support AAD", ErrInvalid)
+	}
+	var operationAAD []byte
+	if env.SuiteID.AuthenticatesAAD() {
+		operationAAD = BuildAEADAAD(hdr, callerAADForSuite(env.SuiteID, callerAAD))
+	}
+	pt, err := a.Decrypt(env.Ciphertext, env.Tag, env.Nonce, operationAAD)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: decrypt failed", ErrInvalid)
 	}
@@ -279,7 +295,7 @@ func Parse(b []byte) (*Envelope, error) {
 	if flags&^allowedV1Flags != 0 {
 		return nil, fmt.Errorf("%w: unknown flags 0x%04x", ErrInvalid, flags)
 	}
-	suiteID := aead.SuiteID(binary.BigEndian.Uint16(b[7:9]))
+	suiteID := suite.ID(binary.BigEndian.Uint16(b[7:9]))
 	keyIDLen := binary.BigEndian.Uint16(b[9:11])
 	keyVersion := binary.BigEndian.Uint32(b[11:15])
 	policyVersion := binary.BigEndian.Uint32(b[15:19])
@@ -343,7 +359,7 @@ func slice(b []byte, off, n int) []byte {
 	return b[off : off+n]
 }
 
-func validateLengths(suite aead.SuiteID, keyIDLen, nonceLen, tagLen uint16, ciphertextLen uint64) error {
+func validateLengths(suiteID suite.ID, keyIDLen, nonceLen, tagLen uint16, ciphertextLen uint64) error {
 	if int(keyIDLen) > MaxKeyIDLen {
 		return fmt.Errorf("%w: key_id_len too large", ErrInvalid)
 	}
@@ -357,18 +373,15 @@ func validateLengths(suite aead.SuiteID, keyIDLen, nonceLen, tagLen uint16, ciph
 		return fmt.Errorf("%w: ciphertext_len too large", ErrInvalid)
 	}
 	// Suite-fixed tag and nonce lengths.
-	if int(tagLen) != suite.TagLen() {
+	if int(tagLen) != suiteID.TagLen() {
 		return fmt.Errorf("%w: tag_len does not match suite", ErrInvalid)
 	}
-	if int(nonceLen) != suite.NonceLen() {
+	if int(nonceLen) != suiteID.NonceLen() {
 		return fmt.Errorf("%w: nonce_len does not match suite", ErrInvalid)
 	}
 	// Validate suite is known.
-	switch suite {
-	case aead.SuiteAES256GCM, aead.SuiteSM4GCM, aead.SuiteAES256ECB, aead.SuiteSM4ECB:
-		// known
-	default:
-		return fmt.Errorf("%w: unknown suite_id 0x%04x", ErrInvalid, uint16(suite))
+	if !suiteID.Supports(suite.OperationDecrypt) {
+		return fmt.Errorf("%w: unknown suite_id 0x%04x", ErrInvalid, uint16(suiteID))
 	}
 	return nil
 }
@@ -388,7 +401,7 @@ func (e *Envelope) protectedHeader() ProtectedHeader {
 }
 
 // VerifyAADHash returns true if the envelope's aad_hash matches SHA-256(callerAAD).
-// ECB suites have no AAD semantics, so their AAD hash is intentionally ignored.
+// CTR suites have no AAD semantics, so their AAD hash is intentionally ignored.
 // For GCM this is ONLY a fast consistency check; AEAD verification is authoritative.
 func (e *Envelope) VerifyAADHash(callerAAD []byte) bool {
 	if !e.SuiteID.AuthenticatesAAD() {
@@ -398,22 +411,22 @@ func (e *Envelope) VerifyAADHash(callerAAD []byte) bool {
 	return got == e.AADHash
 }
 
-func callerAADForSuite(suite aead.SuiteID, callerAAD []byte) []byte {
-	if suite.AuthenticatesAAD() {
+func callerAADForSuite(suiteID suite.ID, callerAAD []byte) []byte {
+	if suiteID.AuthenticatesAAD() {
 		return callerAAD
 	}
 	return nil
 }
 
-func aadHashForSuite(suite aead.SuiteID, callerAAD []byte) [32]byte {
-	if suite.AuthenticatesAAD() {
+func aadHashForSuite(suiteID suite.ID, callerAAD []byte) [32]byte {
+	if suiteID.AuthenticatesAAD() {
 		return sha256.Sum256(callerAAD)
 	}
 	return [32]byte{}
 }
 
-func headerSizeForSuite(suite aead.SuiteID) int {
-	if suite.AuthenticatesAAD() {
+func headerSizeForSuite(suiteID suite.ID) int {
+	if suiteID.AuthenticatesAAD() {
 		return FixedHeaderSize
 	}
 	return BaseHeaderSize

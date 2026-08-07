@@ -8,6 +8,7 @@ import (
 
 	"github.com/kvlt/key-vault/internal/api/middleware"
 	"github.com/kvlt/key-vault/internal/application/crypto"
+	cryptosuite "github.com/kvlt/key-vault/internal/crypto/suite"
 	apperrors "github.com/kvlt/key-vault/internal/errorsx"
 )
 
@@ -25,8 +26,138 @@ func New(svc *crypto.Service) *Handler {
 func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /ui/api/v1/crypto/encrypt", h.encrypt)
 	mux.HandleFunc("POST /ui/api/v1/crypto/decrypt", h.decrypt)
+	mux.HandleFunc("POST /ui/api/v1/crypto/authenticate", h.authenticate)
+	mux.HandleFunc("POST /ui/api/v1/crypto/verify", h.verify)
 	mux.HandleFunc("POST /ui/api/v1/crypto/envelopes:convert", h.convertEnvelope)
 	mux.HandleFunc("POST /ui/api/v1/crypto/envelopes:inspect", h.inspectEnvelope)
+}
+
+type authenticateReq struct {
+	TenantID string `json:"tenant_id"`
+	KeyID    string `json:"key_id"`
+	Message  string `json:"message"` // base64
+}
+
+type authenticatorJSON struct {
+	Version       uint8                   `json:"version"`
+	SuiteID       string                  `json:"suite_id"`
+	ServiceType   cryptosuite.ServiceType `json:"service_type"`
+	KeyID         string                  `json:"key_id"`
+	KeyVersion    uint32                  `json:"key_version"`
+	PolicyVersion uint32                  `json:"policy_version"`
+	Tag           string                  `json:"tag"` // base64
+}
+
+type authenticateResp struct {
+	Authenticator authenticatorJSON `json:"authenticator"`
+}
+
+type verifyReq struct {
+	TenantID      string            `json:"tenant_id"`
+	Message       string            `json:"message"` // base64
+	Authenticator authenticatorJSON `json:"authenticator"`
+}
+
+type verifyResp struct {
+	Valid bool `json:"valid"`
+}
+
+func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) {
+	p := middleware.PrincipalFromContext(r.Context())
+	if p == nil {
+		writeErr(w, 401, "AUTH_FAILED", "no principal")
+		return
+	}
+	if !p.HasScope("crypto:authenticate") {
+		writeErr(w, 403, "PERMISSION_DENIED", "missing scope crypto:authenticate")
+		return
+	}
+	var req authenticateReq
+	if err := middleware.DecodeJSONStrict(middleware.BodyFromContext(r.Context()), &req); err != nil {
+		writeErr(w, 400, "BAD_REQUEST", "invalid json")
+		return
+	}
+	if req.TenantID == "" {
+		req.TenantID = p.TenantID
+	}
+	if p.TenantID != "" && req.TenantID != p.TenantID {
+		writeErr(w, 403, "PERMISSION_DENIED", "tenant mismatch")
+		return
+	}
+	message, err := base64.StdEncoding.DecodeString(req.Message)
+	if err != nil {
+		writeErr(w, 400, "BAD_REQUEST", "message not base64")
+		return
+	}
+	res, err := h.svc.Authenticate(r.Context(), crypto.AuthenticateCommand{
+		TenantID: req.TenantID, KeyID: req.KeyID, Message: message, PrincipalID: p.ID,
+	})
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, 200, authenticateResp{Authenticator: authenticatorToJSON(res.Authenticator)})
+}
+
+func (h *Handler) verify(w http.ResponseWriter, r *http.Request) {
+	p := middleware.PrincipalFromContext(r.Context())
+	if p == nil {
+		writeErr(w, 401, "AUTH_FAILED", "no principal")
+		return
+	}
+	if !p.HasScope("crypto:verify") {
+		writeErr(w, 403, "PERMISSION_DENIED", "missing scope crypto:verify")
+		return
+	}
+	var req verifyReq
+	if err := middleware.DecodeJSONStrict(middleware.BodyFromContext(r.Context()), &req); err != nil {
+		writeErr(w, 400, "BAD_REQUEST", "invalid json")
+		return
+	}
+	if req.TenantID == "" {
+		req.TenantID = p.TenantID
+	}
+	if p.TenantID != "" && req.TenantID != p.TenantID {
+		writeErr(w, 403, "PERMISSION_DENIED", "tenant mismatch")
+		return
+	}
+	message, err := base64.StdEncoding.DecodeString(req.Message)
+	if err != nil {
+		writeErr(w, 400, "BAD_REQUEST", "message not base64")
+		return
+	}
+	authenticator, err := authenticatorFromJSON(req.Authenticator)
+	if err != nil {
+		writeErr(w, 400, "BAD_REQUEST", "invalid authenticator")
+		return
+	}
+	res, err := h.svc.Verify(r.Context(), crypto.VerifyCommand{
+		TenantID: req.TenantID, Message: message, Authenticator: authenticator, PrincipalID: p.ID,
+	})
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, 200, verifyResp{Valid: res.Valid})
+}
+
+func authenticatorToJSON(v crypto.Authenticator) authenticatorJSON {
+	return authenticatorJSON{
+		Version: v.Version, SuiteID: v.SuiteID, ServiceType: v.ServiceType, KeyID: v.KeyID,
+		KeyVersion: v.KeyVersion, PolicyVersion: v.PolicyVersion,
+		Tag: base64.StdEncoding.EncodeToString(v.Tag),
+	}
+}
+
+func authenticatorFromJSON(v authenticatorJSON) (crypto.Authenticator, error) {
+	tag, err := base64.StdEncoding.DecodeString(v.Tag)
+	if err != nil {
+		return crypto.Authenticator{}, err
+	}
+	return crypto.Authenticator{
+		Version: v.Version, SuiteID: v.SuiteID, ServiceType: v.ServiceType, KeyID: v.KeyID,
+		KeyVersion: v.KeyVersion, PolicyVersion: v.PolicyVersion, Tag: tag,
+	}, nil
 }
 
 type encryptReq struct {

@@ -88,3 +88,13 @@ func TestNativeProviderRejectsIncompletePolicyContext(t *testing.T) {
 	}
 	_ = p
 }
+
+func TestNativeContextPasswordFitsSHA256AuthValue(t *testing.T) {
+	password, err := nativeContextPassword(testPolicyContext())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(password) != 32 {
+		t.Fatalf("native TPM auth length = %d, want 32", len(password))
+	}
+}

@@ -60,6 +60,13 @@ func New(ac *auditchain.Service, pm *policysig.Manager, w *lifecycle.Worker, cs 
 
 // Routes registers the baseline routes.
 func (h *Handler) Routes(mux *http.ServeMux) {
+	h.ManagementRoutes(mux)
+	h.DataRoutes(mux)
+}
+
+// ManagementRoutes registers management-plane status, audit, policy, and
+// lifecycle routes.
+func (h *Handler) ManagementRoutes(mux *http.ServeMux) {
 	// System status
 	mux.HandleFunc("GET /ui/api/v1/status", h.systemStatus)
 
@@ -77,10 +84,10 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ui/api/v1/lifecycle/jobs", h.listJobs)
 	mux.HandleFunc("GET /ui/api/v1/lifecycle/outbox", h.listOutbox)
 	mux.HandleFunc("GET /ui/api/v1/lifecycle/config", h.lifecycleConfig)
+}
 
-	// Ops plane routes are registered by the dedicated ops handler.
-
-	// Batch crypto
+// DataRoutes registers data-plane batch cryptographic routes.
+func (h *Handler) DataRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /ui/api/v1/crypto/encrypt-batch", h.encryptBatch)
 	mux.HandleFunc("POST /ui/api/v1/crypto/decrypt-batch", h.decryptBatch)
 }
@@ -466,10 +473,10 @@ func (h *Handler) systemStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Server info.
 	status["server"] = map[string]any{
-		"listen_addr":     h.cfg.Server.HTTPListenAddr,
-		"tpm_provider":    h.cfg.TPM.Provider,
-		"plane_isolation": h.cfg.Server.PlaneIsolationMode,
-		"uptime_seconds":  int(time.Since(h.startTime).Seconds()),
+		"listen_addr":    h.cfg.Server.HTTPSListenAddr,
+		"active_plane":   h.cfg.Server.ActivePlane,
+		"tpm_provider":   h.cfg.TPM.Provider,
+		"uptime_seconds": int(time.Since(h.startTime).Seconds()),
 	}
 
 	// Cluster state.

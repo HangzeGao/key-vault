@@ -53,9 +53,14 @@ func main() {
 	}
 	defer app.Store.Close()
 
-	// Start lifecycle worker.
-	app.Worker.Start(ctx)
-	defer app.Worker.Stop()
+	// Lifecycle mutation is owned by the management plane. Data and Ops
+	// processes keep the dependency available for read-only diagnostics but do
+	// not run duplicate schedulers.
+	workerStarted := cfg.Server.ActivePlane == "management" || cfg.Server.ActivePlane == "all"
+	if workerStarted {
+		app.Worker.Start(ctx)
+		defer app.Worker.Stop()
+	}
 
 	adminH := admin.New(app.KeyService)
 	cryptoH := cryptoapi.New(app.CryptoService)
@@ -70,7 +75,7 @@ func main() {
 		Cfg:        cfg,
 	})
 
-	srv := server.New(server.Deps{
+	srv, err := server.New(server.Deps{
 		Cfg:                cfg,
 		AdminHandler:       adminH,
 		CryptoHandler:      cryptoH,
@@ -82,6 +87,10 @@ func main() {
 		HMACVerifier:       app.HMACVerifier,
 		StaticTokens:       app.StaticTokens,
 	})
+	if err != nil {
+		slog.Error("server initialization failed", "error", err)
+		os.Exit(1)
+	}
 
 	// Signal handling.
 	sigCh := make(chan os.Signal, 1)
@@ -95,7 +104,11 @@ func main() {
 		cancel()
 	}()
 
-	slog.Info("key-vault engineering baseline starting", "addr", cfg.Server.HTTPListenAddr)
+	listenAddr := cfg.Server.HTTPListenAddr
+	if cfg.Server.TLSCertFile != "" {
+		listenAddr = cfg.Server.HTTPSListenAddr
+	}
+	slog.Info("key-vault starting", "addr", listenAddr, "plane", cfg.Server.ActivePlane, "tls", cfg.Server.TLSCertFile != "")
 	if err := srv.Start(); err != nil {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)

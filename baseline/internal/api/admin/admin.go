@@ -12,6 +12,7 @@ import (
 	"github.com/kvlt/key-vault/internal/application/keys"
 	"github.com/kvlt/key-vault/internal/auth/principal"
 	"github.com/kvlt/key-vault/internal/errorsx"
+	"github.com/kvlt/key-vault/internal/repository/models"
 )
 
 // Handler is the management API HTTP handler.
@@ -43,14 +44,15 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 }
 
 type createKeyReq struct {
-	TenantID  string            `json:"tenant_id"`
-	KeyID     string            `json:"key_id,omitempty"`
-	Name      string            `json:"name"`
-	Purpose   string            `json:"purpose"`
-	PolicyID  string            `json:"policy_id"`
-	SuiteID   string            `json:"suite_id"`
-	Tags      map[string]string `json:"tags,omitempty"`
-	ExpiresAt string            `json:"expires_at,omitempty"`
+	TenantID   string            `json:"tenant_id"`
+	KeyID      string            `json:"key_id,omitempty"`
+	Name       string            `json:"name"`
+	Purpose    string            `json:"purpose"`
+	UsageScope string            `json:"usage_scope,omitempty"`
+	PolicyID   string            `json:"policy_id"`
+	SuiteID    string            `json:"suite_id"`
+	Tags       map[string]string `json:"tags,omitempty"`
+	ExpiresAt  string            `json:"expires_at,omitempty"`
 }
 
 // importKeyReq is the request body for POST /ui/api/v1/keys:import (EB-FR-01).
@@ -60,6 +62,7 @@ type importKeyReq struct {
 	KeyID       string            `json:"key_id,omitempty"`
 	Name        string            `json:"name"`
 	Purpose     string            `json:"purpose"`
+	UsageScope  string            `json:"usage_scope,omitempty"`
 	PolicyID    string            `json:"policy_id"`
 	SuiteID     string            `json:"suite_id"`
 	Tags        map[string]string `json:"tags,omitempty"`
@@ -123,6 +126,7 @@ func (h *Handler) createKey(w http.ResponseWriter, r *http.Request) {
 		KeyID:          req.KeyID,
 		Name:           req.Name,
 		Purpose:        req.Purpose,
+		UsageScope:     models.KeyUsageScope(req.UsageScope),
 		PolicyID:       req.PolicyID,
 		SuiteID:        req.SuiteID,
 		Tags:           req.Tags,
@@ -183,6 +187,7 @@ func (h *Handler) importKey(w http.ResponseWriter, r *http.Request) {
 		KeyID:          req.KeyID,
 		Name:           req.Name,
 		Purpose:        req.Purpose,
+		UsageScope:     models.KeyUsageScope(req.UsageScope),
 		PolicyID:       req.PolicyID,
 		SuiteID:        req.SuiteID,
 		Tags:           req.Tags,
@@ -254,7 +259,8 @@ func (h *Handler) importKeyBatch(w http.ResponseWriter, r *http.Request) {
 		}
 		dto, err := h.keys.ImportKey(r.Context(), keys.ImportKeyCommand{
 			TenantID: req.TenantID, KeyID: entry.KeyID, Name: entry.Name, Purpose: entry.Purpose,
-			PolicyID: entry.PolicyID, SuiteID: entry.SuiteID, Tags: entry.Tags, ExpiresAt: expiresAt,
+			UsageScope: models.KeyUsageScope(entry.UsageScope), PolicyID: entry.PolicyID,
+			SuiteID: entry.SuiteID, Tags: entry.Tags, ExpiresAt: expiresAt,
 			ExternalKey: keyMaterial, IdempotencyKey: idempotencyKey, PrincipalID: p.ID,
 		})
 		if err != nil {

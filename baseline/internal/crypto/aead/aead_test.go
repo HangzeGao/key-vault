@@ -3,18 +3,18 @@ package aead
 import (
 	"bytes"
 	"testing"
+
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 )
 
-func TestECBSuitesRoundTrip(t *testing.T) {
+func TestCTRSuitesRoundTrip(t *testing.T) {
 	tests := []struct {
-		name      string
-		suite     SuiteID
-		key       []byte
-		plaintext []byte
+		name  string
+		suite suite.ID
+		key   []byte
 	}{
-		{name: "aes-256-ecb", suite: SuiteAES256ECB, key: bytes.Repeat([]byte{0x11}, 32), plaintext: []byte("not aligned plaintext")},
-		{name: "sm4-ecb", suite: SuiteSM4ECB, key: bytes.Repeat([]byte{0x22}, 16), plaintext: []byte("sixteen bytes...")},
-		{name: "empty", suite: SuiteAES256ECB, key: bytes.Repeat([]byte{0x33}, 32), plaintext: nil},
+		{name: "aes-256-ctr", suite: suite.AES256CTR, key: bytes.Repeat([]byte{0x11}, 32)},
+		{name: "sm4-ctr", suite: suite.SM4CTR, key: bytes.Repeat([]byte{0x22}, 16)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -22,32 +22,28 @@ func TestECBSuitesRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New() error = %v", err)
 			}
-			ciphertext, tag := c.Encrypt(tt.plaintext, nil, []byte("ignored aad"))
+			plaintext := []byte("CTR supports unaligned payloads")
+			iv := bytes.Repeat([]byte{0x33}, c.NonceSize())
+			ciphertext, tag := c.Encrypt(plaintext, iv, nil)
 			if len(tag) != 0 {
 				t.Fatalf("tag length = %d, want 0", len(tag))
 			}
-			if got, want := len(ciphertext), tt.suite.CiphertextLen(len(tt.plaintext)); got != want {
-				t.Fatalf("ciphertext length = %d, want %d", got, want)
+			if bytes.Equal(ciphertext, plaintext) {
+				t.Fatal("ciphertext equals plaintext")
 			}
-			plaintext, err := c.Decrypt(ciphertext, tag, nil, []byte("different ignored aad"))
+			got, err := c.Decrypt(ciphertext, tag, iv, nil)
 			if err != nil {
 				t.Fatalf("Decrypt() error = %v", err)
 			}
-			if !bytes.Equal(plaintext, tt.plaintext) {
-				t.Fatalf("plaintext mismatch: got %q want %q", plaintext, tt.plaintext)
+			if !bytes.Equal(got, plaintext) {
+				t.Fatalf("plaintext mismatch: got %q want %q", got, plaintext)
 			}
 		})
 	}
 }
 
-func TestECBRejectsInvalidPadding(t *testing.T) {
-	c, err := New(SuiteAES256ECB, bytes.Repeat([]byte{0x44}, 32))
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	ciphertext, tag := c.Encrypt([]byte("payload"), nil, nil)
-	ciphertext[len(ciphertext)-1] ^= 0xff
-	if _, err := c.Decrypt(ciphertext, tag, nil, nil); err == nil {
-		t.Fatal("Decrypt() accepted invalid padding")
+func TestCMACSuiteCannotConstructCipher(t *testing.T) {
+	if _, err := New(suite.AES256CMAC, make([]byte, 32)); err == nil {
+		t.Fatal("New accepted authentication-only suite")
 	}
 }

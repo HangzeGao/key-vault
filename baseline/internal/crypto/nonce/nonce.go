@@ -1,4 +1,4 @@
-// Package nonce implements the GCM nonce lease protocol per design §8.2.
+// Package nonce implements the shared GCM nonce / CTR prefix lease protocol.
 //
 // Nonce format: domain(32 bit) || counter(64 bit) = 12 bytes total.
 // domain = truncate32(SHA256(key_version_id || cluster_epoch || node_id))
@@ -31,7 +31,7 @@ func Domain(keyVersionID string, clusterEpoch uint64, nodeID string) uint32 {
 	return binary.BigEndian.Uint32(sum[0:4])
 }
 
-// FormatNonce assembles a 12-byte nonce from domain + counter.
+// FormatNonce assembles a leased 12-byte unique value from domain + counter.
 func FormatNonce(domain uint32, counter uint64) []byte {
 	n := make([]byte, 12)
 	binary.BigEndian.PutUint32(n[0:4], domain)
@@ -49,27 +49,40 @@ func ParseNonce(nonce []byte) (domain uint32, counter uint64, err error) {
 	return domain, counter, nil
 }
 
+// CTRInitialCounter expands a leased 96-bit unique value into the 128-bit
+// initial counter required by AES-CTR and SM4-CTR. The final 32 bits are the
+// per-message block counter and start at zero. Callers must keep an individual
+// message below 2^32 blocks so it cannot carry into the leased prefix.
+func CTRInitialCounter(leasedNonce []byte) ([]byte, error) {
+	if len(leasedNonce) != 12 {
+		return nil, fmt.Errorf("nonce: CTR prefix must be 12 bytes, got %d", len(leasedNonce))
+	}
+	initialCounter := make([]byte, 16)
+	copy(initialCounter, leasedNonce)
+	return initialCounter, nil
+}
+
 // LeaseStatus enumerates lease states per design §11.2.
 type LeaseStatus string
 
 const (
-	LeaseActive  LeaseStatus = "ACTIVE"
+	LeaseActive   LeaseStatus = "ACTIVE"
 	LeaseReleased LeaseStatus = "RELEASED"
-	LeaseExpired LeaseStatus = "EXPIRED"
-	LeaseFrozen  LeaseStatus = "FROZEN"
+	LeaseExpired  LeaseStatus = "EXPIRED"
+	LeaseFrozen   LeaseStatus = "FROZEN"
 )
 
 // Lease is a counter range [Start, End) allocated to a node for a key version.
 type Lease struct {
-	LeaseID       string
-	KeyVersionID  string
-	NodeID        string
-	Domain        uint32
-	StartCounter  uint64
-	EndCounter    uint64
-	UsedCounter   uint64
-	ExpiresAt     time.Time
-	Status        LeaseStatus
+	LeaseID      string
+	KeyVersionID string
+	NodeID       string
+	Domain       uint32
+	StartCounter uint64
+	EndCounter   uint64
+	UsedCounter  uint64
+	ExpiresAt    time.Time
+	Status       LeaseStatus
 }
 
 // Remaining returns the number of unused counters in the lease.
@@ -115,9 +128,9 @@ func (l *Lease) NextNonce() ([]byte, error) {
 
 // Errors.
 var (
-	ErrExhausted   = errors.New("nonce: lease exhausted")
-	ErrFrozen      = errors.New("nonce: node frozen")
-	ErrNotReady    = errors.New("nonce: lease not active")
+	ErrExhausted = errors.New("nonce: lease exhausted")
+	ErrFrozen    = errors.New("nonce: node frozen")
+	ErrNotReady  = errors.New("nonce: lease not active")
 )
 
 // Manager allocates and tracks nonce leases. It is the in-memory
@@ -127,15 +140,15 @@ var (
 //
 // Manager is safe for concurrent use.
 type Manager struct {
-	mu            sync.Mutex
-	leases        map[string]*Lease // leaseID -> lease
-	nodeLeases    map[string]map[string]*Lease // nodeID -> kvID -> active lease
-	frozenNodes   map[string]struct{}
-	allocator     Allocator
-	leaseSize     uint64
-	prefetchMark  float64
-	throttleMark  float64
-	ttl           time.Duration
+	mu           sync.Mutex
+	leases       map[string]*Lease            // leaseID -> lease
+	nodeLeases   map[string]map[string]*Lease // nodeID -> kvID -> active lease
+	frozenNodes  map[string]struct{}
+	allocator    Allocator
+	leaseSize    uint64
+	prefetchMark float64
+	throttleMark float64
+	ttl          time.Duration
 }
 
 // Allocator is the persistence interface for lease allocation.

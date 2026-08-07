@@ -1,20 +1,41 @@
 # TODO
 
-### ECB/GCM suite isolation
+### Service-separated production policy
 
-- [x] 支持 `AES_256_ECB` 与 `SM4_ECB`。
-  - `AES_256_GCM`、`SM4_GCM`、`AES_256_ECB`、`SM4_ECB` 均为独立 suite；Key 创建、受控导入、Envelope、前端选择器与批量导入示例已覆盖。
-  - 解密时 Envelope suite 必须与 Key suite 完全一致，GCM Key 不能用于 ECB，ECB Key 不能用于 GCM。
-  - ECB Envelope 使用 PKCS#7 padding；JSON/profile 不携带 `nonce`、`tag`、`aad_hash`。ECB 忽略 caller AAD，仅用于兼容性场景，不提供 GCM 等价的完整性或 AAD 认证能力。
-- [x] 支持最小 body 加解密。
-  - Encrypt 可只传 `plaintext`；未提供 `tenant_id` 时使用 principal tenant，未提供 `key_id` 时使用/自动创建租户默认 `AES_256_ECB` Key。
+- [x] 默认与签名策略允许 CTR 仅加密、CMAC 仅认证和 GCM 加密认证的 AES/SM4 套件。
+  - Key purpose 与 suite service type 强绑定；`AUTH_ONLY`/`ENCRYPT_ONLY`/`AUTH_ENCRYPT` 分别只允许 CMAC/CTR/GCM；ECB 不能通过策略语义校验，也不再出现在前端选择器中。
+  - CMAC 使用独立 Authenticate/Verify API、分离标签和常量时间校验；CTR 明确拒绝 AAD。
+  - 解密时 Envelope suite 必须与 Key suite 和 Envelope 记录的历史策略版本完全一致。
+- [x] Encrypt 要求显式 Key。
+  - 未提供 `tenant_id` 时使用 principal tenant；未提供 `key_id` 时返回 `INVALID_ARGUMENT`，不隐式创建默认 Key。
   - Decrypt 请求体直接使用 Envelope JSON；Key、KeyVersion 和 suite 从 Envelope 中解析；不支持仅凭 raw ciphertext 推断默认 KeyVersion。
 
-更新时间：2026-07-22
+更新时间：2026-07-28
 
-当前工程基线的代码、测试、前端、SDK 和设计清理项已全部完成。本文保留完成记录与环境验收说明；“暂不做”是明确的架构决策，不计入未完成任务。
+当前工程基线已完成本轮上线前安全默认值与信任链改造。下方保留既有完成记录；真实生产发布仍以 `baseline/docs/PRODUCTION_SECURITY.md` 的阻塞项为准。
+
+## 生产发布阻塞项
+
+- [ ] 使用任务选定的 CCSDS 355.0-B-2 profile 与权威互操作向量验收 TC 保护、AOS 解保护、帧边界、截断字段及 SA rollover。
+- [ ] 增加 CCSDS Security Association 的受控管理面、双人审批、审计与应急防重放状态重置流程。
+- [ ] 将 Key Plane 作为独立部署边界，通过 mTLS RPC 向公共平面提供最小能力。
+- [ ] 实现 KeyVersion 全量原子重封装、租约失效与回滚安全的 CRK 轮换。
+- [ ] 实现按 `(node, plane)` TPM 身份的注册与 CRK Envelope 分发。
+- [ ] 在 CI/预生产完成 PostgreSQL PITR、native TPM、JWKS 轮换和三平面部署演练。
+- [ ] 在干净且联网的 CI runner 中按 `package-lock.json` 完成前端构建与测试。
 
 ## 完成状态
+
+### CCSDS 链路安全最小内核
+
+- [x] 建立不输出 Envelope 的原始保护核心，并保持 `AUTH_ONLY -> CMAC`、`ENCRYPT_ONLY -> CTR`、`AUTH_ENCRYPT -> GCM` 闭合集合。
+- [x] 将确认的 TC profile 收敛为 `主导头5B + SPI2B + IV_COUNTER4B + CTR密文 + FECF2B`，无 Tag，不保留独立 sequence/full-IV 兼容格式。
+- [x] 增加星上 C11 AES-256-CTR 接收模块，以固定内存完成帧长/FECF、SPI/SA、解密、业务校验回调和防重放状态持久化顺序。
+- [x] 地面 Go 与星上 C 共用固定 TC 联调向量；TC 只声明保密性，不声明认证、完整性或密码学抗重放。
+- [x] AOS 解保护保持独立 profile，等待任务线格式确认后再收敛。
+- [x] 协议 Key 与通用数据 Key 使用域隔离；SA 固定绑定精确 KeyVersion、PolicyVersion 与 suite。
+- [x] PostgreSQL 持久化 TC IV Counter 和 AOS 64 位滑动防重放窗口；认证失败不推进接收状态。
+- [x] 暂不引入 Protocol Registry、插件生命周期或通用帧 DSL，仅保留原始保护接口作为未来第二协议的扩展缝。
 
 ### P0 · 安全边界与生产化
 

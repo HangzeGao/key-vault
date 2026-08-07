@@ -5,6 +5,7 @@ export interface KeyDTO {
   purpose: string;
   policy_id: string;
   suite_id: string;
+  service_type: "AUTH_ONLY" | "ENCRYPT_ONLY" | "AUTH_ENCRYPT";
   current_version: number;
   status: KeyStatus;
   tags?: Record<string, string>;
@@ -33,6 +34,24 @@ export interface DecryptResponse {
   key_id: string;
   key_version: number;
   plaintext: string;
+}
+
+export interface Authenticator {
+  version: number;
+  suite_id: string;
+  service_type: "AUTH_ONLY";
+  key_id: string;
+  key_version: number;
+  policy_version: number;
+  tag: string;
+}
+
+export interface AuthenticateResponse {
+  authenticator: Authenticator;
+}
+
+export interface VerifyResponse {
+  valid: boolean;
 }
 
 export interface ApiError {
@@ -255,6 +274,7 @@ export interface PolicySuite {
   algorithm: string;
   key_bits: number;
   mode: string;
+  service_type: "AUTH_ONLY" | "ENCRYPT_ONLY" | "AUTH_ENCRYPT";
   nonce?: string;
   mac?: string;
   composition?: string;

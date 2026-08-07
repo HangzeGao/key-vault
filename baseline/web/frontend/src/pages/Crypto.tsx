@@ -7,6 +7,7 @@ import { PageContainer } from "../components";
 import { EncryptPanel } from "../components/crypto/EncryptPanel";
 import { DecryptPanel } from "../components/crypto/DecryptPanel";
 import { EnvelopeInspector } from "../components/crypto/EnvelopeInspector";
+import { AuthenticatePanel } from "../components/crypto/AuthenticatePanel";
 import type { KeyDTO, EnvelopeFormatDescription, TenantEnvelopeConfig } from "../lib/types";
 
 function envelopeFormatOptions(formats: EnvelopeFormatDescription[], config?: TenantEnvelopeConfig): string[] {
@@ -37,6 +38,8 @@ export function CryptoPage() {
     queryFn: () => api.get<{ keys: KeyDTO[] }>(apiPaths.keys),
   });
   const keys = (keysData?.keys ?? []).filter((k) => k.status === "ACTIVE");
+  const encryptionKeys = keys.filter((key) => key.service_type === "ENCRYPT_ONLY" || key.service_type === "AUTH_ENCRYPT");
+  const authenticationKeys = keys.filter((key) => key.service_type === "AUTH_ONLY");
 
   const { data: formatsData } = useQuery({
     queryKey: ["envelope-formats"],
@@ -61,13 +64,13 @@ export function CryptoPage() {
       <div className="page-header">
         <div>
           <h1 className="section-title">Crypto Sandbox</h1>
-          <p className="section-subtitle">Data-plane encrypt and decrypt workflows with server-side key boundaries and envelope inspection</p>
+          <p className="section-subtitle">AUTH_ONLY → CMAC · ENCRYPT_ONLY → CTR · AUTH_ENCRYPT → GCM</p>
         </div>
       </div>
 
       <div className="grid-2 page-section">
         <EncryptPanel
-          keys={keys}
+          keys={encryptionKeys}
           formatOptions={formatOptions}
           onSendToDecrypt={handleSendToDecrypt}
         />
@@ -78,6 +81,10 @@ export function CryptoPage() {
           seedFormat={decryptSeed.format}
           seedVersion={decryptSeed.version}
         />
+      </div>
+
+      <div className="page-section">
+        <AuthenticatePanel keys={authenticationKeys} />
       </div>
 
       <EnvelopeInspector

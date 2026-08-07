@@ -8,18 +8,23 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 )
 
 // pepper is a process-wide HMAC key used to prevent trivial rainbow-table
 // attacks on hashed identifiers. In production it should be loaded from
 // a secret; the baseline derives it from a fixed root + cluster_id for determinism
 // within a deployment.
-var pepper = []byte("kvlt-redaction-pepper-v1")
+var pepper atomic.Value
+
+func init() {
+	pepper.Store([]byte("kvlt-redaction-pepper-v1"))
+}
 
 // SetPepper overrides the default pepper. Must be called once at startup.
 func SetPepper(p []byte) {
 	if len(p) > 0 {
-		pepper = p
+		pepper.Store(append([]byte(nil), p...))
 	}
 }
 
@@ -27,14 +32,14 @@ func SetPepper(p []byte) {
 // The same input always yields the same hash within a process; different
 // deployments with different peppers yield different hashes.
 func Hash(s string) string {
-	mac := hmac.New(sha256.New, pepper)
+	mac := hmac.New(sha256.New, pepper.Load().([]byte))
 	mac.Write([]byte(s))
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // HashBytes is like Hash but for byte slices.
 func HashBytes(b []byte) string {
-	mac := hmac.New(sha256.New, pepper)
+	mac := hmac.New(sha256.New, pepper.Load().([]byte))
 	mac.Write(b)
 	return hex.EncodeToString(mac.Sum(nil))
 }

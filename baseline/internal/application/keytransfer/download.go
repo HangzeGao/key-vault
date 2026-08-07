@@ -12,6 +12,7 @@ import (
 
 	"github.com/kvlt/key-vault/internal/application/keys"
 	"github.com/kvlt/key-vault/internal/crypto/aead"
+	"github.com/kvlt/key-vault/internal/crypto/suite"
 	"github.com/kvlt/key-vault/internal/errorsx"
 	"github.com/kvlt/key-vault/internal/repository"
 	"github.com/kvlt/key-vault/internal/repository/models"
@@ -165,7 +166,7 @@ func (s *Service) ImportDownload(ctx context.Context, cmd ImportDownloadCommand)
 		return nil, errorsx.New(errorsx.CodeInvalidArgument, "download authentication failed", false)
 	}
 	defer zeroize(dataPlain)
-	if len(dataPlain) != aead.SuiteSM4GCM.KeyBytes() {
+	if len(dataPlain) != suite.SM4GCM.KeyBytes() {
 		return nil, errorsx.New(errorsx.CodeInvalidArgument, "downloaded key length does not match SM4_GCM", false)
 	}
 

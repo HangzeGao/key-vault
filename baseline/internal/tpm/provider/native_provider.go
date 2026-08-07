@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,14 +35,42 @@ type nativeSealedBundle struct {
 	PCRs    []int  `json:"pcrs"`
 }
 
-var nativeSRKTemplate = legacy.Public{
-	Type: legacy.AlgRSA, NameAlg: legacy.AlgSHA256,
-	Attributes: legacy.FlagFixedTPM | legacy.FlagFixedParent | legacy.FlagSensitiveDataOrigin |
-		legacy.FlagUserWithAuth | legacy.FlagRestricted | legacy.FlagDecrypt | legacy.FlagNoDA,
-	RSAParameters: &legacy.RSAParams{
-		Symmetric: &legacy.SymScheme{Alg: legacy.AlgAES, KeyBits: 128, Mode: legacy.AlgCFB},
-		KeyBits:   2048, ModulusRaw: make([]byte, 256),
-	},
+const nativeSRKPersistentHandle tpmutil.Handle = 0x81000001
+
+func newNativeSRKTemplate() legacy.Public {
+	return legacy.Public{
+		Type: legacy.AlgRSA, NameAlg: legacy.AlgSHA256,
+		Attributes: legacy.FlagFixedTPM | legacy.FlagFixedParent | legacy.FlagSensitiveDataOrigin |
+			legacy.FlagUserWithAuth | legacy.FlagRestricted | legacy.FlagDecrypt | legacy.FlagNoDA,
+		RSAParameters: &legacy.RSAParams{
+			Symmetric: &legacy.SymScheme{Alg: legacy.AlgAES, KeyBits: 128, Mode: legacy.AlgCFB},
+			KeyBits:   2048, ModulusRaw: make([]byte, 256),
+		},
+	}
+}
+
+func (p *NativeProvider) ensureStorageRootKey() (tpmutil.Handle, error) {
+	template := newNativeSRKTemplate()
+	public, _, _, err := legacy.ReadPublic(p.rw, nativeSRKPersistentHandle)
+	if err == nil {
+		if !public.MatchesTemplate(template) {
+			return 0, errors.New("provider: persistent SRK handle contains an incompatible object")
+		}
+		return nativeSRKPersistentHandle, nil
+	}
+	var handleErr legacy.HandleError
+	if !errors.As(err, &handleErr) || handleErr.Code != legacy.RCHandle {
+		return 0, fmt.Errorf("provider: inspect persistent SRK: %w", err)
+	}
+	transient, _, err := legacy.CreatePrimary(p.rw, legacy.HandleOwner, legacy.PCRSelection{}, "", "", template)
+	if err != nil {
+		return 0, fmt.Errorf("provider: create native storage primary: %w", err)
+	}
+	defer legacy.FlushContext(p.rw, transient)
+	if err := legacy.EvictControl(p.rw, "", legacy.HandleOwner, transient, nativeSRKPersistentHandle); err != nil {
+		return 0, fmt.Errorf("provider: persist native storage primary: %w", err)
+	}
+	return nativeSRKPersistentHandle, nil
 }
 
 func NewNativeProvider(opts NativeOptions) (*NativeProvider, error) {
@@ -89,11 +116,10 @@ func (p *NativeProvider) SealCRK(ctx context.Context, nrwk *TPMObjectRef, crk []
 	if err := validateNativeInputs(ctx, nrwk, contextAAD); err != nil {
 		return nil, err
 	}
-	primary, _, err := legacy.CreatePrimary(p.rw, legacy.HandleOwner, legacy.PCRSelection{}, "", "", nativeSRKTemplate)
+	primary, err := p.ensureStorageRootKey()
 	if err != nil {
-		return nil, fmt.Errorf("provider: create native storage primary: %w", err)
+		return nil, err
 	}
-	defer legacy.FlushContext(p.rw, primary)
 	password, err := nativeContextPassword(contextAAD)
 	if err != nil {
 		return nil, err
@@ -140,11 +166,10 @@ func (p *NativeProvider) UnsealCRK(ctx context.Context, nrwk *TPMObjectRef, env 
 	if !equalInts(bundle.PCRs, p.pcrs) {
 		return nil, errors.New("provider: TPM policy PCR set mismatch")
 	}
-	primary, _, err := legacy.CreatePrimary(p.rw, legacy.HandleOwner, legacy.PCRSelection{}, "", "", nativeSRKTemplate)
+	primary, err := p.ensureStorageRootKey()
 	if err != nil {
-		return nil, fmt.Errorf("provider: create native storage primary: %w", err)
+		return nil, err
 	}
-	defer legacy.FlushContext(p.rw, primary)
 	object, _, err := legacy.Load(p.rw, primary, "", bundle.Public, bundle.Private)
 	if err != nil {
 		return nil, fmt.Errorf("provider: load native sealed object: %w", err)
@@ -196,7 +221,9 @@ func nativeContextPassword(a aad.CRKAAD) (string, error) {
 		return "", fmt.Errorf("provider: canonical context: %w", err)
 	}
 	sum := sha256.Sum256(append([]byte("kvlt-tpm-policy-context-v1\x00"), b...))
-	return hex.EncodeToString(sum[:]), nil
+	// TPM2B_AUTH for an object using SHA-256 NameAlg is limited to the
+	// algorithm digest size. Keep the full 256 bits without hex expansion.
+	return string(sum[:]), nil
 }
 
 func validateNativeInputs(ctx context.Context, nrwk *TPMObjectRef, a aad.CRKAAD) error {

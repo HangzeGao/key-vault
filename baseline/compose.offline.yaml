@@ -15,7 +15,7 @@ services:
       TPM2TOOLS_TCTI: "device:/dev/tpmrm0"
       KVLT_LOG_LEVEL: "INFO"
       KVLT_STATIC_TOKENS: >-
-        [{"token":"admin-token-baseline","tenant_id":"t-default","scopes":["keys:manage","tenant:read","tenant:manage"],"roles":["admin"],"plane":"management"},{"token":"data-token-baseline","tenant_id":"t-default","scopes":["crypto:encrypt","crypto:decrypt"],"roles":["data"],"plane":"data"},{"token":"ops-token-baseline","tenant_id":"t-default","scopes":["ops:read","ops:repair"],"roles":["ops"],"plane":"ops"}]
+        [{"token":"admin-token-baseline","tenant_id":"t-default","scopes":["keys:manage","tenant:read","tenant:manage"],"roles":["admin"],"plane":"management"},{"token":"data-token-baseline","tenant_id":"t-default","scopes":["crypto:encrypt","crypto:decrypt","crypto:authenticate","crypto:verify"],"roles":["data"],"plane":"data"},{"token":"ops-token-baseline","tenant_id":"t-default","scopes":["ops:read","ops:repair"],"roles":["ops"],"plane":"ops"}]
     devices:
       - "/dev/tpmrm0:/dev/tpmrm0"
     volumes:
