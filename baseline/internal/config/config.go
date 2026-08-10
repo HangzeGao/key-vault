@@ -13,19 +13,18 @@ import (
 
 // Config is the runtime configuration for the key-vault service.
 type Config struct {
-	Environment string          `yaml:"environment"`
-	Server      ServerConfig    `yaml:"server"`
-	Database    DatabaseConfig  `yaml:"database"`
-	TPM         TPMConfig       `yaml:"tpm"`
-	Auth        AuthConfig      `yaml:"auth"`
-	Policy      PolicyConfig    `yaml:"policy"`
-	Audit       AuditConfig     `yaml:"audit"`
-	Nonce       NonceConfig     `yaml:"nonce"`
-	Lifecycle   LifecycleConfig `yaml:"lifecycle"`
-	Recovery    RecoveryConfig  `yaml:"recovery"`
-	Baseline    BaselineConfig  `yaml:"baseline"`
-	CCSDS       CCSDSConfig     `yaml:"ccsds"`
-	LogLevel    string          `yaml:"log_level"`
+	Environment  string             `yaml:"environment"`
+	Server       ServerConfig       `yaml:"server"`
+	Database     DatabaseConfig     `yaml:"database"`
+	TPM          TPMConfig          `yaml:"tpm"`
+	Auth         AuthConfig         `yaml:"auth"`
+	Policy       PolicyConfig       `yaml:"policy"`
+	Audit        AuditConfig        `yaml:"audit"`
+	TrafficGuard TrafficGuardConfig `yaml:"traffic_guard"`
+	Recovery     RecoveryConfig     `yaml:"recovery"`
+	Baseline     BaselineConfig     `yaml:"baseline"`
+	CCSDS        CCSDSConfig        `yaml:"ccsds"`
+	LogLevel     string             `yaml:"log_level"`
 }
 
 type ServerConfig struct {
@@ -48,8 +47,7 @@ type ServerConfig struct {
 }
 
 type DatabaseConfig struct {
-	Driver string `yaml:"driver"`
-	DSN    string `yaml:"dsn"`
+	Path string `yaml:"path"`
 }
 
 type TPMConfig struct {
@@ -79,37 +77,18 @@ type PolicyConfig struct {
 }
 
 type AuditConfig struct {
-	WALDir              string `yaml:"wal_dir"`
-	WALMaxSizeBytes     int64  `yaml:"wal_max_size_bytes"`
-	WALEnabled          bool   `yaml:"wal_enabled"`
-	BufferSize          int    `yaml:"buffer_size"`
 	RedactionPepperFile string `yaml:"redaction_pepper_file"`
 }
 
-type NonceConfig struct {
-	LeaseSize          uint64        `yaml:"lease_size"`
-	PrefetchWatermark  float64       `yaml:"prefetch_watermark"`
-	ThrottleWatermark  float64       `yaml:"throttle_watermark"`
-	LeaseTTL           time.Duration `yaml:"lease_ttl"`
+type TrafficGuardConfig struct {
 	RateWindow         time.Duration `yaml:"rate_window"`
 	RateSigmaThreshold float64       `yaml:"rate_sigma_threshold"`
-	UnusedRatioAlert   float64       `yaml:"unused_ratio_alert"`
 }
 
-type LifecycleConfig struct {
-	OwnerID             string        `yaml:"owner_id"`
-	LeaseTTL            time.Duration `yaml:"lease_ttl"`
-	MaxAttempts         int           `yaml:"max_attempts"`
-	PollInterval        time.Duration `yaml:"poll_interval"`
-	ExpiryScanInterval  time.Duration `yaml:"expiry_scan_interval"`
-	ExpiryWarningWindow time.Duration `yaml:"expiry_warning_window"`
-}
-
-// RecoveryConfig records externally enforced recovery controls. The service
-// cannot perform PostgreSQL WAL archiving itself, but production startup
-// refuses configurations that do not declare PITR and current drill evidence.
+// RecoveryConfig records externally enforced recovery controls. Restoring an
+// old runtime counter snapshot is forbidden; the drill must recover by moving
+// to a new operational root/SPI through Recovery GCM.
 type RecoveryConfig struct {
-	PITREnabled              bool   `yaml:"pitr_enabled"`
 	RestoreDrillEvidenceFile string `yaml:"restore_drill_evidence_file"`
 }
 
@@ -125,8 +104,9 @@ type BaselineConfig struct {
 // CCSDSConfig defines mission-fixed frame boundaries. Per-association wire
 // parameters remain in the CCSDS Security Association store.
 type CCSDSConfig struct {
-	AOSPrimaryHeaderLength int `yaml:"aos_primary_header_length"`
-	MaxFrameLength         int `yaml:"max_frame_length"`
+	AOSPrimaryHeaderLength int    `yaml:"aos_primary_header_length"`
+	MaxFrameLength         int    `yaml:"max_frame_length"`
+	TCSpacecraftID         uint16 `yaml:"tc_spacecraft_id"`
 }
 
 // Diagnostic is a non-secret, user-facing configuration assessment emitted at
@@ -145,9 +125,6 @@ func (c *Config) Diagnostics() []Diagnostic {
 		findings = append(findings, Diagnostic{"info", "production_hardening", "production hardening is active"})
 	} else {
 		findings = append(findings, Diagnostic{"warn", "non_production", "development/test safeguards are active; this profile must not hold production data"})
-	}
-	if c.Database.Driver == "memory" {
-		findings = append(findings, Diagnostic{"warn", "volatile_storage", "memory storage is volatile; use PostgreSQL for durable keys and audit evidence"})
 	}
 	if c.TPM.Provider == "software" || c.TPM.Provider == "swtpm" || c.TPM.Provider == "tpm2-tools" || c.TPM.Provider == "hardware" {
 		findings = append(findings, Diagnostic{"warn", "tpm_fallback", "a non-native TPM provider is active; use native TSS/ESAPI for production"})
@@ -175,7 +152,7 @@ func Default() *Config {
 			ActivePlane:        "all",
 			NodeID:             "node-development",
 		},
-		Database: DatabaseConfig{Driver: "memory"},
+		Database: DatabaseConfig{Path: filepath.Join(tmpDir, "key-vault", "security-state.db")},
 		TPM:      TPMConfig{Provider: "swtpm", StateDir: filepath.Join(tmpDir, "kvlt-tpm"), PolicyPCRs: []int{7}},
 		Auth: AuthConfig{
 			JWTAlgWhite:     []string{"RS256", "ES256"},
@@ -184,28 +161,9 @@ func Default() *Config {
 			HMACEnabled:     true,
 			HMACMaxSkew:     5 * time.Minute,
 		},
-		Nonce: NonceConfig{
-			LeaseSize:          1024,
-			PrefetchWatermark:  0.70,
-			ThrottleWatermark:  0.90,
-			LeaseTTL:           10 * time.Minute,
+		TrafficGuard: TrafficGuardConfig{
 			RateWindow:         time.Minute,
 			RateSigmaThreshold: 3.0,
-			UnusedRatioAlert:   0.50,
-		},
-		Audit: AuditConfig{
-			WALDir:          filepath.Join(tmpDir, "kvlt-wal"),
-			WALMaxSizeBytes: 64 * 1024 * 1024,
-			WALEnabled:      true,
-			BufferSize:      1024,
-		},
-		Lifecycle: LifecycleConfig{
-			OwnerID:             "lifecycle-worker-1",
-			LeaseTTL:            30 * time.Second,
-			MaxAttempts:         5,
-			PollInterval:        5 * time.Second,
-			ExpiryScanInterval:  time.Minute,
-			ExpiryWarningWindow: 7 * 24 * time.Hour,
 		},
 		Baseline: BaselineConfig{
 			Version:        "engineering-baseline-v1",
@@ -218,6 +176,7 @@ func Default() *Config {
 		CCSDS: CCSDSConfig{
 			AOSPrimaryHeaderLength: 6,
 			MaxFrameLength:         65536,
+			TCSpacecraftID:         0,
 		},
 		LogLevel: "INFO",
 	}
@@ -231,7 +190,9 @@ func Load(path string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read config: %w", err)
 		}
-		if err := yaml.Unmarshal(b, c); err != nil {
+		decoder := yaml.NewDecoder(strings.NewReader(string(b)))
+		decoder.KnownFields(true)
+		if err := decoder.Decode(c); err != nil {
 			return nil, fmt.Errorf("parse config: %w", err)
 		}
 	}
@@ -270,11 +231,8 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("KVLT_ALLOWED_ORIGINS"); v != "" {
 		c.Server.AllowedOrigins = splitCSV(v)
 	}
-	if v := os.Getenv("KVLT_DB_DRIVER"); v != "" {
-		c.Database.Driver = v
-	}
-	if v := os.Getenv("KVLT_DB_DSN"); v != "" {
-		c.Database.DSN = v
+	if v := os.Getenv("KVLT_STATE_DB"); v != "" {
+		c.Database.Path = v
 	}
 	if v := os.Getenv("KVLT_TPM_PROVIDER"); v != "" {
 		c.TPM.Provider = v
@@ -311,40 +269,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("KVLT_REDACTION_PEPPER_FILE"); v != "" {
 		c.Audit.RedactionPepperFile = v
 	}
-	if v := os.Getenv("KVLT_PITR_ENABLED"); strings.EqualFold(v, "true") {
-		c.Recovery.PITREnabled = true
-	}
 	if v := os.Getenv("KVLT_RESTORE_DRILL_EVIDENCE_FILE"); v != "" {
 		c.Recovery.RestoreDrillEvidenceFile = v
 	}
 	if v := os.Getenv("KVLT_LOG_LEVEL"); v != "" {
 		c.LogLevel = strings.ToUpper(v)
-	}
-	if v := os.Getenv("KVLT_WAL_DIR"); v != "" {
-		c.Audit.WALDir = v
-	}
-	if v := os.Getenv("KVLT_LIFECYCLE_OWNER_ID"); v != "" {
-		c.Lifecycle.OwnerID = v
-	}
-	if v := os.Getenv("KVLT_LIFECYCLE_LEASE_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			c.Lifecycle.LeaseTTL = d
-		}
-	}
-	if v := os.Getenv("KVLT_LIFECYCLE_POLL_INTERVAL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			c.Lifecycle.PollInterval = d
-		}
-	}
-	if v := os.Getenv("KVLT_LIFECYCLE_EXPIRY_SCAN_INTERVAL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			c.Lifecycle.ExpiryScanInterval = d
-		}
-	}
-	if v := os.Getenv("KVLT_LIFECYCLE_EXPIRY_WARNING_WINDOW"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			c.Lifecycle.ExpiryWarningWindow = d
-		}
 	}
 }
 
@@ -399,21 +328,23 @@ func (c *Config) Validate() error {
 	if c.Auth.JWKCacheTTL <= 0 {
 		c.Auth.JWKCacheTTL = 5 * time.Minute
 	}
+	if strings.TrimSpace(c.Database.Path) == "" {
+		return fmt.Errorf("config: database.path is required")
+	}
 	// Production-fingerprint guard: if the config looks like a production
-	// deployment (postgres + native TPM + physical isolation) but environment
+	// deployment (native TPM + physical isolation) but environment
 	// is not explicitly set to production, refuse to start. This prevents
 	// accidentally running with insecure development defaults in production.
 	if c.Environment != "production" {
-		postgres := c.Database.Driver == "postgres"
 		nativeTPM := c.TPM.Provider == "native" || c.TPM.Provider == "tss" || c.TPM.Provider == "esapi"
 		physical := c.Server.PlaneIsolationMode == "physical"
-		if postgres && nativeTPM && physical {
-			return fmt.Errorf("config: production-like configuration detected (postgres + native TPM + physical isolation) but environment is %q; set environment: production explicitly to enable production hardening", c.Environment)
+		if nativeTPM && physical {
+			return fmt.Errorf("config: production-like configuration detected (native TPM + physical isolation) but environment is %q; set environment: production explicitly to enable production hardening", c.Environment)
 		}
 	}
 	if c.Environment == "production" {
-		if c.Database.Driver != "postgres" || strings.TrimSpace(c.Database.DSN) == "" {
-			return fmt.Errorf("config: production requires PostgreSQL with a non-empty DSN")
+		if !filepath.IsAbs(c.Database.Path) {
+			return fmt.Errorf("config: production database.path must be absolute")
 		}
 		switch c.TPM.Provider {
 		case "software", "swtpm", "tpm2", "hardware", "tpm2-tools":
@@ -469,39 +400,15 @@ func (c *Config) Validate() error {
 				return err
 			}
 		}
-		if !c.Audit.WALEnabled || strings.TrimSpace(c.Audit.WALDir) == "" {
-			return fmt.Errorf("config: production requires audit WAL")
-		}
-		if !c.Recovery.PITREnabled {
-			return fmt.Errorf("config: production requires declared PostgreSQL PITR")
-		}
-	}
-	if c.Nonce.PrefetchWatermark <= 0 || c.Nonce.PrefetchWatermark >= 1 {
-		c.Nonce.PrefetchWatermark = 0.70
-	}
-	if c.Nonce.ThrottleWatermark <= c.Nonce.PrefetchWatermark || c.Nonce.ThrottleWatermark > 1 {
-		c.Nonce.ThrottleWatermark = 0.90
 	}
 	if c.Server.PlaneIsolationMode != "logical" && c.Server.PlaneIsolationMode != "physical" {
 		c.Server.PlaneIsolationMode = "logical"
 	}
-	if c.Lifecycle.OwnerID == "" {
-		c.Lifecycle.OwnerID = "lifecycle-worker-1"
+	if c.TrafficGuard.RateWindow <= 0 {
+		c.TrafficGuard.RateWindow = time.Minute
 	}
-	if c.Lifecycle.LeaseTTL <= 0 {
-		c.Lifecycle.LeaseTTL = 30 * time.Second
-	}
-	if c.Lifecycle.MaxAttempts <= 0 {
-		c.Lifecycle.MaxAttempts = 5
-	}
-	if c.Lifecycle.PollInterval <= 0 {
-		c.Lifecycle.PollInterval = 5 * time.Second
-	}
-	if c.Lifecycle.ExpiryScanInterval <= 0 {
-		c.Lifecycle.ExpiryScanInterval = time.Minute
-	}
-	if c.Lifecycle.ExpiryWarningWindow <= 0 {
-		c.Lifecycle.ExpiryWarningWindow = 7 * 24 * time.Hour
+	if c.TrafficGuard.RateSigmaThreshold <= 0 {
+		c.TrafficGuard.RateSigmaThreshold = 3.0
 	}
 	if c.CCSDS.AOSPrimaryHeaderLength <= 0 || c.CCSDS.AOSPrimaryHeaderLength > 64 {
 		return fmt.Errorf("config: ccsds.aos_primary_header_length must be 1..64")
@@ -511,6 +418,9 @@ func (c *Config) Validate() error {
 	}
 	if c.CCSDS.MaxFrameLength <= c.CCSDS.AOSPrimaryHeaderLength {
 		return fmt.Errorf("config: ccsds.max_frame_length must exceed the AOS primary header length")
+	}
+	if c.CCSDS.TCSpacecraftID > 0x03ff {
+		return fmt.Errorf("config: ccsds.tc_spacecraft_id must fit the 10-bit TC spacecraft ID")
 	}
 	return nil
 }

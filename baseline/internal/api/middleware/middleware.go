@@ -114,7 +114,7 @@ func Auth(cfg AuthConfig) func(http.Handler) http.Handler {
 					AuthMethod: "hmac",
 					NodeID:     nodeID,
 					Plane:      principal.PlaneData,
-					Scopes:     []string{"crypto:encrypt", "crypto:decrypt", "crypto:authenticate", "crypto:verify"},
+					Scopes:     []string{"ccsds:tc:protect", "ccsds:aos:unprotect"},
 					Roles:      []string{"data"},
 				}
 			}
@@ -205,132 +205,22 @@ func accessRuleFor(method, path string) (accessRule, bool) {
 	management := []principal.Plane{principal.PlaneManagement}
 	data := []principal.Plane{principal.PlaneData}
 	ops := []principal.Plane{principal.PlaneOps}
-	managementOrData := []principal.Plane{principal.PlaneManagement, principal.PlaneData}
-
-	if method == http.MethodGet && path == "/ui/api/v1/status" {
-		return accessRule{planes: management, scopes: []string{"tenant:read", "tenant:manage"}}, true
-	}
-
-	if path == "/ui/api/v1/keys" {
-		switch method {
-		case http.MethodGet:
-			return accessRule{planes: management, scopes: []string{"keys:read", "keys:manage", "tenant:read", "tenant:manage"}}, true
-		case http.MethodPost:
-			return accessRule{planes: management, scopes: []string{"keys:create", "keys:manage"}}, true
-		}
-	}
-	if path == "/ui/api/v1/keys:import" && method == http.MethodPost {
-		return accessRule{planes: management, scopes: []string{"keys:create", "keys:manage"}}, true
-	}
-	if path == "/ui/api/v1/keys:import-batch" && method == http.MethodPost {
-		return accessRule{planes: management, scopes: []string{"keys:create", "keys:manage"}}, true
-	}
-	if strings.HasPrefix(path, "/ui/api/v1/keys/") {
-		switch method {
-		case http.MethodGet:
-			return accessRule{planes: management, scopes: []string{"keys:read", "keys:manage", "tenant:read", "tenant:manage"}}, true
-		case http.MethodPatch:
-			return accessRule{planes: management, scopes: []string{"keys:manage"}}, true
-		case http.MethodDelete:
-			return accessRule{planes: management, scopes: []string{"keys:destroy", "keys:manage"}}, true
-		case http.MethodPost:
-			if strings.HasSuffix(path, "/archive") {
-				return accessRule{planes: management, scopes: []string{"keys:destroy", "keys:manage"}}, true
-			}
-			if strings.HasSuffix(path, "/schedule-destroy") {
-				return accessRule{planes: management, scopes: []string{"keys:destroy", "keys:manage"}}, true
-			}
-			return accessRule{planes: management, scopes: []string{"keys:manage"}}, true
-		}
-	}
-
-	if path == "/ui/api/v1/key-uploads" && method == http.MethodPost {
-		return accessRule{planes: management, scopes: []string{"key-upload:manage", "keys:manage"}}, true
-	}
-	if strings.HasPrefix(path, "/ui/api/v1/key-uploads/") {
-		switch method {
-		case http.MethodGet:
-			return accessRule{planes: management, scopes: []string{"key-upload:read", "key-upload:manage", "keys:manage"}}, true
-		case http.MethodPost:
-			if strings.HasSuffix(path, "/confirm") {
-				return accessRule{planes: management, scopes: []string{"key-upload:confirm", "key-upload:manage", "keys:manage"}}, true
-			}
-		}
-	}
-	if path == "/ui/api/v1/key-downloads" && method == http.MethodPost {
-		return accessRule{planes: management, scopes: []string{"key-download:manage", "keys:manage"}}, true
-	}
-	if strings.HasPrefix(path, "/ui/api/v1/key-downloads/") && method == http.MethodGet {
-		return accessRule{planes: management, scopes: []string{"key-download:read", "key-download:manage", "keys:manage"}}, true
-	}
-
-	if strings.HasPrefix(path, "/ui/api/v1/crypto/") && method == http.MethodPost {
+	if method == http.MethodPost {
 		switch path {
-		case "/ui/api/v1/crypto/encrypt", "/ui/api/v1/crypto/encrypt-batch":
-			return accessRule{planes: data, scopes: []string{"crypto:encrypt"}}, true
-		case "/ui/api/v1/crypto/decrypt", "/ui/api/v1/crypto/decrypt-batch", "/ui/api/v1/crypto/envelopes:inspect", "/ui/api/v1/crypto/envelopes:convert":
-			return accessRule{planes: data, scopes: []string{"crypto:decrypt"}}, true
-		case "/ui/api/v1/crypto/authenticate":
-			return accessRule{planes: data, scopes: []string{"crypto:authenticate"}}, true
-		case "/ui/api/v1/crypto/verify":
-			return accessRule{planes: data, scopes: []string{"crypto:verify"}}, true
+		case "/ui/api/v1/ccsds/tc:protect":
+			return accessRule{planes: data, scopes: []string{"ccsds:tc:protect"}}, true
+		case "/ui/api/v1/ccsds/aos:unprotect":
+			return accessRule{planes: data, scopes: []string{"ccsds:aos:unprotect"}}, true
 		}
 	}
 
-	if method == http.MethodGet && path == "/ui/api/v1/envelope/formats" {
-		return accessRule{planes: managementOrData, scopes: nil}, true
+	if strings.HasPrefix(path, "/ui/api/v1/audit/") && method == http.MethodGet {
+		return accessRule{planes: management, scopes: []string{"audit:read"}}, true
 	}
-	if strings.HasPrefix(path, "/ui/api/v1/tenants/") && strings.HasSuffix(path, "/envelope-config") {
-		switch method {
-		case http.MethodGet:
-			return accessRule{planes: management, scopes: []string{"tenant:read", "tenant:manage"}}, true
-		case http.MethodPut:
-			return accessRule{planes: management, scopes: []string{"tenant:manage"}}, true
-		}
-	}
-
-	if strings.HasPrefix(path, "/ui/api/v1/audit/") {
-		if method == http.MethodDelete && path == "/ui/api/v1/audit/events" {
-			return accessRule{planes: management, scopes: []string{"audit:manage", "tenant:manage"}}, true
-		}
-		if method == http.MethodGet {
-			return accessRule{planes: management, scopes: []string{"audit:read", "audit:manage", "tenant:read", "tenant:manage"}}, true
-		}
-	}
-
-	if path == "/ui/api/v1/policies:reload" && method == http.MethodPost {
-		return accessRule{planes: management, scopes: []string{"policy:manage", "tenant:manage"}}, true
-	}
-	if path == "/ui/api/v1/policies/signed" && method == http.MethodGet {
-		return accessRule{planes: management, scopes: []string{"policy:read", "policy:manage", "tenant:read", "tenant:manage"}}, true
-	}
-
-	if strings.HasPrefix(path, "/ui/api/v1/lifecycle/") && method == http.MethodGet {
-		return accessRule{planes: management, scopes: []string{"tenant:read", "tenant:manage"}}, true
-	}
-
-	if strings.HasPrefix(path, "/ui/api/v1/ops/") {
-		switch {
-		case strings.HasPrefix(path, "/ui/api/v1/ops/breakglass/") && method == http.MethodPost:
-			// Break-glass routes are deliberately isolated from ordinary repair.
-			return accessRule{planes: ops, scopes: []string{"ops:breakglass"}}, true
-		case path == "/ui/api/v1/ops/health" && method == http.MethodGet:
-			return accessRule{planes: ops, scopes: []string{"ops:read", "ops:repair", "ops:breakglass"}}, true
-		case path == "/ui/api/v1/ops/db/status" && method == http.MethodGet:
-			return accessRule{planes: ops, scopes: []string{"ops:read", "ops:repair", "ops:breakglass"}}, true
-		case strings.HasPrefix(path, "/ui/api/v1/ops/crk/"):
-			if method == http.MethodGet {
-				return accessRule{planes: ops, scopes: []string{"ops:read", "ops:repair", "ops:breakglass"}}, true
-			}
-			if method == http.MethodPost {
-				return accessRule{planes: ops, scopes: []string{"ops:repair"}}, true
-			}
-		case path == "/ui/api/v1/ops/resolver:refresh" && method == http.MethodPost:
-			return accessRule{planes: ops, scopes: []string{"ops:repair"}}, true
-		case strings.HasPrefix(path, "/ui/api/v1/ops/lifecycle/jobs/") && strings.HasSuffix(path, "/retry") && method == http.MethodPost:
-			return accessRule{planes: ops, scopes: []string{"ops:repair"}}, true
-		case strings.HasPrefix(path, "/ui/api/v1/ops/outbox/") && strings.HasSuffix(path, "/replay") && method == http.MethodPost:
-			return accessRule{planes: ops, scopes: []string{"ops:repair"}}, true
+	if method == http.MethodGet {
+		switch path {
+		case "/ui/api/v1/ops/ccsds/status", "/ui/api/v1/ops/health", "/ui/api/v1/ops/db/status":
+			return accessRule{planes: ops, scopes: []string{"ops:read"}}, true
 		}
 	}
 

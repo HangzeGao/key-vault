@@ -45,8 +45,8 @@ A direction-specific CCSDS binding from an SPI to an exact protocol-scoped Key V
 _Avoid_: Protocol key, crypto channel
 
 **Security Association State**:
-The shared ground/flight rotation lifecycle `PREINSTALLED -> ACTIVE -> GRACE -> DISABLED`. Only ACTIVE transmits TC; ACTIVE and GRACE may receive during a bounded rollover overlap.
-_Avoid_: RX-only compatibility state, key status
+The TC lifecycle is `CURRENT / NEXT` with one active Recovery GCM association. Ground promotes NEXT locally; flight promotes it only after the first valid next-SPI plaintext passes the mission validator. Old SPI is rejected immediately. There is no Previous or Grace state.
+_Avoid_: compatibility states, UTC-dependent rollover, caller-selected SPI/IV/mode
 
 **Managed Parameters**:
 A direction-specific set of mission-configured CCSDS wire parameters that are not inferred from a transfer frame. Ordinary TC fixes a six-byte SA Nonce Prefix, four-byte IV Counter, and no tag; Recovery TC adds a fixed full-length GCM tag; AOS retains its independently managed sequence, IV, tag, and replay parameters.
@@ -97,9 +97,9 @@ An independent protected root secret used only to derive the Recovery TC working
 _Avoid_: Backup traffic key, emergency DEK
 
 **Working Key Slot**:
-One of three volatile or tightly controlled locations holding the current Ordinary TC key, the next-or-grace Ordinary TC key, or the Recovery TC key.
+One of three volatile or tightly controlled locations holding the Current Ordinary TC key, the strictly adjacent Next Ordinary TC key, or the Recovery TC key.
 _Avoid_: Root slot, key archive
 
-**Root Recovery Transaction**:
-The single authenticated, encrypted, one-way operation that atomically installs a new Operational Root into the inactive root slot and schedules its activation without exposing any key from flight to ground.
+**Root Prepare Transaction**:
+The single authenticated, encrypted, one-way operation that durably installs a Pending Operational Root for the exact Next SPI. The first valid Next-SPI ordinary frame performs activation.
 _Avoid_: Generic key upload, key download, remote recovery shell

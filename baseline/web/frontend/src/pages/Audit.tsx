@@ -1,15 +1,12 @@
 import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ScrollText, AlertTriangle, RefreshCw, ShieldCheck, ShieldAlert, Link2, Trash2 } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { ScrollText, AlertTriangle, RefreshCw, ShieldCheck, ShieldAlert, Link2 } from "lucide-react";
 import { api } from "../lib/api";
 import { apiPaths } from "../lib/apiPaths";
 import { PageContainer, Panel, EmptyState, ErrorState, HashValue, Loading, showToast } from "../components";
 import type { AuditEvent, AuditChainHead, AuditVerifyResult } from "../lib/types";
 
-const HIGH_RISK_ACTIONS = [
-  "CREATE_CRK", "DESTROY_CRK", "ROTATE_CRK", "SCHEDULE_DESTROY",
-   "ALLOCATE_NONCE_RANGE",  "policy.reload",
-];
+const HIGH_RISK_ACTION = /recovery|root|prepare|promote|rotate|tpm|crk/i;
 
 const RESULT_COLOR: Record<string, string> = {
   success: "var(--success)",
@@ -60,35 +57,16 @@ export function AuditPage() {
     showToast("audit refreshed", "info");
   };
 
-  const deleteMut = useMutation({
-    mutationFn: () => api.delete<{ deleted: number }>(apiPaths.audit.events({ chain: chainFilter || undefined })),
-    onSuccess: (r) => {
-      refresh();
-      showToast(`deleted ${r.deleted} audit events`, "success");
-    },
-    onError: (e: Error) => showToast(e.message, "error"),
-  });
-
-  const deleteCurrent = () => {
-    const scope = chainFilter ? `chain ${chainFilter}` : "all chains";
-    if (confirm(`Delete audit events for ${scope}? This resets affected chain heads.`)) {
-      deleteMut.mutate();
-    }
-  };
-
   return (
     <PageContainer>
       <div className="page-header">
         <div>
-          <h1 className="section-title">Audit Log</h1>
-          <p className="section-subtitle">Hash-chained audit events with tamper detection and per-tenant chains</p>
+          <h1 className="section-title">Security Audit</h1>
+          <p className="section-subtitle">Read-only hash-chain evidence for TC, AOS, Recovery, and TPM operations. No delete or reset action is exposed.</p>
         </div>
         <div className="page-header-actions">
           <button className="btn btn-ghost btn-sm" onClick={refresh}>
             <RefreshCw size={12} /> Refresh
-          </button>
-          <button className="btn btn-secondary btn-sm" disabled={deleteMut.isPending} onClick={deleteCurrent}>
-            <Trash2 size={12} /> Delete
           </button>
         </div>
       </div>
@@ -211,7 +189,7 @@ export function AuditPage() {
         ) : eventsLoading ? (
           <Loading label="loading events..." />
         ) : events.length === 0 ? (
-          <EmptyState icon={<ScrollText />} message="no audit events; perform encrypt, key lifecycle, or policy operations to populate" />
+          <EmptyState icon={<ScrollText />} message="no CCSDS security events have been recorded" />
         ) : (
           <div className="table-scroll">
             <table className="data-table">
@@ -230,7 +208,7 @@ export function AuditPage() {
               </thead>
               <tbody>
                 {events.map((e, i) => {
-                  const highRisk = HIGH_RISK_ACTIONS.includes(e.Action);
+                  const highRisk = HIGH_RISK_ACTION.test(e.Action);
                   return (
                     <tr key={i} style={{ cursor: "default" }}>
                       <td>

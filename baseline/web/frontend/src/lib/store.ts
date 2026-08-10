@@ -51,20 +51,3 @@ export const useTheme = create<ThemeState>()(
     }
   )
 );
-
-export type NavigationMode = "simple" | "advanced";
-
-interface UIState {
-  navigationMode: NavigationMode;
-  setNavigationMode: (mode: NavigationMode) => void;
-}
-
-export const useUI = create<UIState>()(
-  persist(
-    (set) => ({
-      navigationMode: "simple",
-      setNavigationMode: (navigationMode) => set({ navigationMode }),
-    }),
-    { name: "kvlt-ui" },
-  ),
-);

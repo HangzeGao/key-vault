@@ -15,7 +15,7 @@ import (
 // It returns raw protection fields and owns key leases. The protocol module
 // supplies its canonical nonce/counter bytes explicitly.
 type ProtectionCore interface {
-	Protect(ctx context.Context, req protection.ProtectRequest) (*protection.ProtectResult, error)
+	ProtectDerived(ctx context.Context, req protection.ProtectRequest, derivation protection.Derivation) (*protection.ProtectResult, error)
 	Unprotect(ctx context.Context, req protection.UnprotectRequest) (*protection.UnprotectResult, error)
 }
 
@@ -37,36 +37,39 @@ func New(core ProtectionCore, store Store, options Options) (*FrameSecurity, err
 	return &FrameSecurity{core: core, store: store, options: options}, nil
 }
 
-// ProtectTC protects one complete clear TC transfer frame. The input and output
-// both include FECF. The fixed mission profile inserts SPI||IV_COUNTER after the
-// five-byte primary header and encrypts only the original frame data field.
-func (s *FrameSecurity) ProtectTC(ctx context.Context, tenantID, associationID string, frame []byte) (*ProtectedTCFrame, error) {
-	if err := validateTCFrame(frame); err != nil {
+// AdvanceTCTransmitEpoch is a ground-local state change. It emits no management
+// frame: the next ProtectTCData call uses the unique NEXT association, and the
+// flight receiver converges when that first valid next-SPI frame arrives.
+func (s *FrameSecurity) AdvanceTCTransmitEpoch(ctx context.Context, tenantID string) error {
+	return s.store.PromoteNextTC(ctx, tenantID)
+}
+
+// ProtectTCData protects only the caller-owned TC data field. It selects the
+// tenant's unique CURRENT association and owns SPI, IV, KDF, and ciphertext.
+// The transport caller prepends its primary header and appends FECF.
+func (s *FrameSecurity) ProtectTCData(ctx context.Context, tenantID string, data []byte) (*ProtectedTCData, error) {
+	if len(data) == 0 || TCPrimaryHeaderLength+TCSecurityHeaderLength+len(data)+TCFECFLength > TCMaxFrameLength ||
+		TCPrimaryHeaderLength+TCSecurityHeaderLength+len(data)+TCFECFLength > s.options.MaxFrameLength {
 		return nil, ErrFrameInvalid
 	}
-	if len(frame)+TCSecurityHeaderLength > TCMaxFrameLength || len(frame)+TCSecurityHeaderLength > s.options.MaxFrameLength {
-		return nil, ErrFrameInvalid
-	}
-	sa, err := s.store.GetAssociation(ctx, tenantID, associationID)
+	sa, err := s.store.GetTransmitAssociation(ctx, tenantID, DirectionTCTx)
 	if err != nil {
 		return nil, err
 	}
 	if err := sa.Validate(); err != nil {
 		return nil, err
 	}
-	if sa.Direction != DirectionTCTx || sa.State != AssociationActive {
+	if sa.Direction != DirectionTCTx || sa.State != AssociationCurrent {
 		return nil, ErrAssociationState
 	}
 	counter, err := s.store.NextTransmitCounter(ctx, sa.ID)
 	if err != nil {
 		return nil, err
 	}
-	primaryHeader := append([]byte(nil), frame[:TCPrimaryHeaderLength]...)
-	data := append([]byte(nil), frame[TCPrimaryHeaderLength:len(frame)-TCFECFLength]...)
 	suiteID, _ := suite.Parse(sa.SuiteID)
 	securityHeader := encodeTCSecurityHeader(sa.SPI, counter)
 	initialCounter := tcInitialCounter(sa.Parameters.NoncePrefix, sa.SPI, counter)
-	result, err := s.core.Protect(ctx, protection.ProtectRequest{
+	result, err := s.core.ProtectDerived(ctx, protection.ProtectRequest{
 		TenantID:      tenantID,
 		KeyID:         sa.KeyID,
 		UsageScope:    models.KeyUsageProtocol,
@@ -75,7 +78,8 @@ func (s *FrameSecurity) ProtectTC(ctx context.Context, tenantID, associationID s
 		Data:          data,
 		Nonce:         initialCounter,
 		NodeID:        s.options.NodeID,
-	})
+	}, protection.Derivation{Label: ordinaryKDFLabel,
+		Context: ordinaryKDFContext(s.options.TCSpacecraftID, suiteID, sa.SPI, sa.SecurityEpoch, sa.KeyVersion)})
 	if err != nil {
 		return nil, err
 	}
@@ -83,27 +87,39 @@ func (s *FrameSecurity) ProtectTC(ctx context.Context, tenantID, associationID s
 		len(result.Tag) != 0 || !equalBytes(result.Nonce, initialCounter) {
 		return nil, fmt.Errorf("%w: protection result does not match association binding", ErrFrameInvalid)
 	}
-	setTCFrameLength(primaryHeader, len(frame)+TCSecurityHeaderLength)
-	out := appendTCFECF(join(primaryHeader, securityHeader, result.Data))
-	return &ProtectedTCFrame{Frame: out, Metadata: metadata(*sa, uint64(counter), result.ServiceType)}, nil
+	return &ProtectedTCData{Data: join(securityHeader, result.Data),
+		Metadata: metadata(*sa, uint64(counter), result.ServiceType)}, nil
 }
 
-// ProtectRootRecovery constructs the one authenticated TC transaction allowed
-// to replace an operational root. Callers supply only the five-byte primary
-// header and the typed transaction; this module owns all security fields.
-func (s *FrameSecurity) ProtectRootRecovery(ctx context.Context, tenantID, associationID string, primaryHeader []byte, command RootRecoveryCommand) (*ProtectedTCFrame, error) {
-	if len(primaryHeader) != TCPrimaryHeaderLength {
-		return nil, ErrFrameInvalid
-	}
+// ProtectRootPrepareData constructs the one authenticated transaction allowed
+// to install the operational root for the next ordinary SPI. It returns only
+// SPI||IV||ciphertext||tag and authenticates the six-byte security header.
+func (s *FrameSecurity) ProtectRootPrepareData(ctx context.Context, tenantID string, command RootPrepareCommand) (*ProtectedTCData, error) {
 	plaintext, err := command.MarshalBinary()
 	if err != nil {
 		return nil, err
+	}
+	defer zeroizeBytes(plaintext)
+	current, err := s.store.GetTransmitAssociation(ctx, tenantID, DirectionTCTx)
+	if err != nil {
+		return nil, err
+	}
+	next, err := s.store.GetAssociationBySPI(ctx, tenantID, DirectionTCTx, command.NextSPI)
+	if err != nil {
+		return nil, err
+	}
+	if current.State != AssociationCurrent || next.State != AssociationNext ||
+		command.ExpectedCurrentRootVersion != current.KeyVersion || command.NewRootVersion != next.KeyVersion ||
+		command.NextSecurityEpoch != next.SecurityEpoch || command.NextSPI != NextSPI(current.SPI) ||
+		command.OrdinarySuiteID.String() != next.SuiteID ||
+		!equalBytes(current.Parameters.NoncePrefix, next.Parameters.NoncePrefix) {
+		return nil, ErrAssociationState
 	}
 	frameLength := TCPrimaryHeaderLength + TCSecurityHeaderLength + len(plaintext) + TCRecoveryTagLength + TCFECFLength
 	if frameLength > TCMaxFrameLength || frameLength > s.options.MaxFrameLength {
 		return nil, ErrFrameInvalid
 	}
-	sa, err := s.store.GetAssociation(ctx, tenantID, associationID)
+	sa, err := s.store.GetTransmitAssociation(ctx, tenantID, DirectionTCRecoveryTx)
 	if err != nil {
 		return nil, err
 	}
@@ -117,17 +133,16 @@ func (s *FrameSecurity) ProtectRootRecovery(ctx context.Context, tenantID, assoc
 	if err != nil {
 		return nil, err
 	}
-	header := append([]byte(nil), primaryHeader...)
-	setTCFrameLength(header, frameLength)
 	securityHeader := encodeTCSecurityHeader(sa.SPI, counter)
 	nonce := tcRecoveryNonce(sa.Parameters.NoncePrefix, sa.SPI, counter)
-	aad := join(header, securityHeader)
+	aad := append([]byte(nil), securityHeader...)
 	suiteID, _ := suite.Parse(sa.SuiteID)
-	result, err := s.core.Protect(ctx, protection.ProtectRequest{
+	result, err := s.core.ProtectDerived(ctx, protection.ProtectRequest{
 		TenantID: tenantID, KeyID: sa.KeyID, UsageScope: models.KeyUsageProtocol,
 		KeyVersion: sa.KeyVersion, PolicyVersion: sa.PolicyVersion,
 		Data: plaintext, Nonce: nonce, AAD: aad, NodeID: s.options.NodeID,
-	})
+	}, protection.Derivation{Label: recoveryKDFLabel,
+		Context: recoveryKDFContext(s.options.TCSpacecraftID, suiteID, sa.SPI, sa.KeyVersion)})
 	if err != nil {
 		return nil, err
 	}
@@ -136,8 +151,8 @@ func (s *FrameSecurity) ProtectRootRecovery(ctx context.Context, tenantID, assoc
 		len(result.Tag) != TCRecoveryTagLength || !equalBytes(result.Nonce, nonce) || len(result.Data) != len(plaintext) {
 		return nil, fmt.Errorf("%w: recovery protection result does not match association binding", ErrFrameInvalid)
 	}
-	out := appendTCFECF(join(header, securityHeader, result.Data, result.Tag))
-	return &ProtectedTCFrame{Frame: out, Metadata: metadata(*sa, uint64(counter), result.ServiceType)}, nil
+	return &ProtectedTCData{Data: join(securityHeader, result.Data, result.Tag),
+		Metadata: metadata(*sa, uint64(counter), result.ServiceType)}, nil
 }
 
 // UnprotectAOS verifies replay and authentication before releasing plaintext.
@@ -155,7 +170,7 @@ func (s *FrameSecurity) UnprotectAOS(ctx context.Context, tenantID string, frame
 	if err := sa.Validate(); err != nil {
 		return nil, err
 	}
-	if sa.State != AssociationActive && sa.State != AssociationGrace {
+	if sa.State != AssociationActive {
 		return nil, ErrAssociationState
 	}
 	securityHeaderLen := 2 + sa.Parameters.SequenceNumberLength + sa.Parameters.TransmittedIVLength
@@ -251,6 +266,12 @@ func equalBytes(left, right []byte) bool {
 		}
 	}
 	return true
+}
+
+func zeroizeBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }
 
 func join(parts ...[]byte) []byte {

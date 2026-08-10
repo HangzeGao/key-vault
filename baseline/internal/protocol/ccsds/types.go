@@ -18,13 +18,20 @@ const (
 	DirectionAOSRx        Direction = "AOS_RX"
 )
 
+// NextSPI returns the successor in the complete 16-bit SPI space. SPI is an
+// association selector, not a monotonic replay counter; the security epoch is
+// what remains monotonic across the 0xFFFF -> 0x0000 boundary.
+func NextSPI(spi uint16) uint16 {
+	return spi + 1
+}
+
 type AssociationState string
 
 const (
-	AssociationPreinstalled AssociationState = "PREINSTALLED"
-	AssociationActive       AssociationState = "ACTIVE"
-	AssociationGrace        AssociationState = "GRACE"
-	AssociationDisabled     AssociationState = "DISABLED"
+	AssociationCurrent  AssociationState = "CURRENT"
+	AssociationNext     AssociationState = "NEXT"
+	AssociationActive   AssociationState = "ACTIVE"
+	AssociationDisabled AssociationState = "DISABLED"
 )
 
 var (
@@ -44,7 +51,7 @@ const (
 	TCIVCounterLength      = 4
 	TCNoncePrefixLength    = 6
 	TCRecoveryTagLength    = 16
-	TCRecoveryAADLength    = TCPrimaryHeaderLength + TCSecurityHeaderLength
+	TCRecoveryAADLength    = TCSecurityHeaderLength
 )
 
 // ManagedParameters are direction-specific mission wire parameters. TC uses a
@@ -68,6 +75,7 @@ type SecurityAssociation struct {
 	Direction     Direction
 	KeyID         string
 	KeyVersion    uint32
+	SecurityEpoch uint32
 	PolicyVersion uint32
 	SuiteID       string
 	State         AssociationState
@@ -81,9 +89,18 @@ func (sa SecurityAssociation) Validate() error {
 	if sa.Direction != DirectionTCTx && sa.Direction != DirectionTCRecoveryTx && sa.Direction != DirectionAOSRx {
 		return fmt.Errorf("%w: unsupported direction %q", ErrFrameInvalid, sa.Direction)
 	}
-	if sa.State != AssociationPreinstalled && sa.State != AssociationActive &&
-		sa.State != AssociationGrace && sa.State != AssociationDisabled {
-		return fmt.Errorf("%w: unsupported association state %q", ErrFrameInvalid, sa.State)
+	if sa.Direction == DirectionTCTx {
+		if sa.SecurityEpoch == 0 {
+			return fmt.Errorf("%w: TC security epoch is required", ErrFrameInvalid)
+		}
+		if sa.State != AssociationCurrent && sa.State != AssociationNext && sa.State != AssociationDisabled {
+			return fmt.Errorf("%w: TC association state must be CURRENT, NEXT, or DISABLED", ErrFrameInvalid)
+		}
+	} else if sa.State != AssociationActive && sa.State != AssociationDisabled {
+		return fmt.Errorf("%w: recovery and AOS association state must be ACTIVE or DISABLED", ErrFrameInvalid)
+	}
+	if sa.Direction != DirectionTCTx && sa.SecurityEpoch != 0 {
+		return fmt.Errorf("%w: security epoch is only valid for ordinary TC", ErrFrameInvalid)
 	}
 	suiteID, err := suite.Parse(sa.SuiteID)
 	if err != nil {
@@ -140,8 +157,8 @@ type OperationMetadata struct {
 	ServiceType   suite.ServiceType
 }
 
-type ProtectedTCFrame struct {
-	Frame    []byte
+type ProtectedTCData struct {
+	Data     []byte
 	Metadata OperationMetadata
 }
 
@@ -154,6 +171,7 @@ type Options struct {
 	AOSPrimaryHeaderLength int
 	MaxFrameLength         int
 	NodeID                 string
+	TCSpacecraftID         uint16
 }
 
 func (o Options) validate() error {

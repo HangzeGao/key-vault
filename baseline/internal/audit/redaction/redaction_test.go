@@ -55,7 +55,7 @@ func TestSensitiveKeyNonSensitive(t *testing.T) {
 		"envelope_format", "envelope_version", "envelope_adapter",
 		"ciphertext_suite", "ciphertext_algorithm",
 		"key_id", "key_version", "key_state",
-		"secret_name", // wait — "secret_name" ends with "_name", not "_secret"
+		"secret_name",   // wait — "secret_name" ends with "_name", not "_secret"
 		"password_hash", // ends with "_hash"
 	}
 	for _, key := range safe {
@@ -68,11 +68,11 @@ func TestSensitiveKeyNonSensitive(t *testing.T) {
 func TestSensitiveKeyNormalization(t *testing.T) {
 	// Hyphens and spaces should be normalized to underscores.
 	cases := map[string]bool{
-		"access-token":     true,
-		"Access Token":     true,
-		"private-key":      true,
-		"Private Key":      true,
-		"envelope-format":  false, // prefix use, not sensitive
+		"access-token":    true,
+		"Access Token":    true,
+		"private-key":     true,
+		"Private Key":     true,
+		"envelope-format": false, // prefix use, not sensitive
 	}
 	for key, want := range cases {
 		if got := sensitiveKey(key); got != want {

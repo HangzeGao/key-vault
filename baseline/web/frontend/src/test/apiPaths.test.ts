@@ -1,18 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { apiPaths } from "../lib/apiPaths";
 
-describe("BFF route contract", () => {
-  it("encodes resource IDs and uses implementation route names", () => {
-    expect(apiPaths.key("a/b")).toBe("/ui/api/v1/keys/a%2Fb");
-    expect(apiPaths.keyAction("a/b", "archive")).toBe("/ui/api/v1/keys/a%2Fb/archive");
-    expect(apiPaths.ops.retryJob("job/1")).toBe("/ui/api/v1/ops/lifecycle/jobs/job%2F1/retry");
-    expect(apiPaths.ops.replayOutbox("event 1")).toBe("/ui/api/v1/ops/outbox/event%201/replay");
-    expect(apiPaths.keyUpload("upload/a")).toBe("/ui/api/v1/key-uploads/upload%2Fa");
-    expect(apiPaths.confirmKeyUpload("upload/a")).toBe("/ui/api/v1/key-uploads/upload%2Fa/confirm");
-    expect(apiPaths.keyDownload("download/a")).toBe("/ui/api/v1/key-downloads/download%2Fa");
+describe("current mission BFF contract", () => {
+  it("exposes only the two CCSDS data-plane operations", () => {
+    expect(apiPaths.ccsds.protectTC).toBe("/ui/api/v1/ccsds/tc:protect");
+	expect(apiPaths.ops.ccsdsStatus).toBe("/ui/api/v1/ops/ccsds/status");
+    expect(apiPaths.ccsds.unprotectAOS).toBe("/ui/api/v1/ccsds/aos:unprotect");
   });
-  it("builds query strings without manual concatenation", () => {
-    expect(apiPaths.audit.events({ limit: 50, action: "key rotate", target: undefined })).toBe("/ui/api/v1/audit/events?limit=50&action=key+rotate");
-    expect(apiPaths.keysList({ include_archived: true })).toBe("/ui/api/v1/keys?include_archived=true");
+
+  it("builds audit query strings without empty values", () => {
+    expect(apiPaths.audit.events({ limit: 50, action: "root prepare", target: undefined })).toBe("/ui/api/v1/audit/events?limit=50&action=root+prepare");
   });
 });

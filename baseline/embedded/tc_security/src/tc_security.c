@@ -3,6 +3,7 @@
 #include "aes256.h"
 #include "gcm.h"
 #include "sm4.h"
+#include "tc_security_kdf.h"
 
 #include <string.h>
 
@@ -28,10 +29,9 @@ static uint16_t crc16_ccitt(const uint8_t *data, size_t length) {
     for (index = 0u; index < length; ++index) {
         uint8_t bit;
         crc ^= (uint16_t)data[index] << 8;
-        for (bit = 0u; bit < 8u; ++bit) {
+        for (bit = 0u; bit < 8u; ++bit)
             crc = (crc & 0x8000u) != 0u ? (uint16_t)((crc << 1) ^ 0x1021u)
                                          : (uint16_t)(crc << 1);
-        }
     }
     return crc;
 }
@@ -40,22 +40,6 @@ static void zeroize(void *memory, size_t length) {
     volatile uint8_t *cursor = (volatile uint8_t *)memory;
     if (memory == NULL) return;
     while (length-- != 0u) *cursor++ = 0u;
-}
-
-static tcsec_key_config_t *find_key(tcsec_context_t *context, uint8_t slot) {
-    size_t index;
-    for (index = 0u; index < context->key_count; ++index) {
-        if (context->keys[index].slot == slot) return &context->keys[index];
-    }
-    return NULL;
-}
-
-static tcsec_sa_config_t *find_association(tcsec_context_t *context, uint16_t spi) {
-    size_t index;
-    for (index = 0u; index < context->association_count; ++index) {
-        if (context->associations[index].spi == spi) return &context->associations[index];
-    }
-    return NULL;
 }
 
 static int suite_is_ctr(tcsec_suite_t suite) {
@@ -71,46 +55,49 @@ static size_t suite_key_length(tcsec_suite_t suite) {
                ? TCSEC_SM4_KEY_LENGTH : TCSEC_MAX_KEY_LENGTH;
 }
 
-static int key_configuration_valid(const tcsec_key_config_t *key) {
-    size_t index;
-    if (!suite_is_ctr(key->suite) && !suite_is_gcm(key->suite)) return 0;
-    for (index = suite_key_length(key->suite); index < TCSEC_MAX_KEY_LENGTH; ++index) {
-        if (key->key[index] != 0u) return 0;
-    }
-    return 1;
+static int replay_state_valid(const tcsec_replay_state_t *state) {
+    return state != NULL && state->seen <= 1u &&
+           ((state->seen == 0u && state->highest_iv == 0u && state->bitmap == 0u) ||
+            (state->seen == 1u && (state->bitmap & 1u) != 0u));
 }
 
-static int replay_check(const tcsec_sa_config_t *association, uint32_t iv_counter) {
+/* 0=acceptable, -1=replay/stale, -2=forward jump. max_forward=0 disables the cap. */
+static int replay_check(const tcsec_replay_state_t *state, uint32_t iv_counter,
+                        uint32_t max_forward) {
     uint32_t delta;
-    if (association->replay_seen == 0u || iv_counter > association->highest_iv) return 0;
-    delta = association->highest_iv - iv_counter;
-    if (delta >= TCSEC_REPLAY_WINDOW_BITS) return -1;
-    return (association->replay_bitmap & ((uint64_t)1u << delta)) != 0u ? -1 : 0;
-}
-
-static void replay_next(const tcsec_sa_config_t *association, uint32_t iv_counter,
-                        uint32_t *highest_iv, uint64_t *bitmap, uint8_t *seen) {
-    *highest_iv = association->highest_iv;
-    *bitmap = association->replay_bitmap;
-    *seen = association->replay_seen;
-    if (*seen == 0u) {
-        *highest_iv = iv_counter;
-        *bitmap = 1u;
-        *seen = 1u;
-    } else if (iv_counter > *highest_iv) {
-        uint32_t shift = iv_counter - *highest_iv;
-        *bitmap = shift >= TCSEC_REPLAY_WINDOW_BITS ? 1u : (*bitmap << shift) | 1u;
-        *highest_iv = iv_counter;
-    } else {
-        *bitmap |= (uint64_t)1u << (*highest_iv - iv_counter);
+    if (state->seen == 0u) return max_forward != 0u && iv_counter > max_forward ? -2 : 0;
+    if (iv_counter > state->highest_iv) {
+        delta = iv_counter - state->highest_iv;
+        return max_forward != 0u && delta > max_forward ? -2 : 0;
     }
+    delta = state->highest_iv - iv_counter;
+    if (delta >= TCSEC_REPLAY_WINDOW_BITS) return -1;
+    return (state->bitmap & ((uint64_t)1u << delta)) != 0u ? -1 : 0;
 }
 
-static void build_ctr_counter(const tcsec_sa_config_t *association, uint32_t iv_counter,
+static tcsec_replay_state_t replay_next(const tcsec_replay_state_t *state,
+                                        uint32_t iv_counter) {
+    tcsec_replay_state_t next = *state;
+    if (next.seen == 0u) {
+        next.highest_iv = iv_counter;
+        next.bitmap = 1u;
+        next.seen = 1u;
+    } else if (iv_counter > next.highest_iv) {
+        uint32_t shift = iv_counter - next.highest_iv;
+        next.bitmap = shift >= TCSEC_REPLAY_WINDOW_BITS ? 1u : (next.bitmap << shift) | 1u;
+        next.highest_iv = iv_counter;
+    } else {
+        next.bitmap |= (uint64_t)1u << (next.highest_iv - iv_counter);
+    }
+    return next;
+}
+
+static void build_ctr_counter(const uint8_t prefix[TCSEC_NONCE_PREFIX_LENGTH],
+                              uint16_t spi, uint32_t iv_counter,
                               uint8_t initial_counter[16]) {
-    memcpy(initial_counter, association->nonce_prefix, TCSEC_NONCE_PREFIX_LENGTH);
-    initial_counter[6] = (uint8_t)(association->spi >> 8);
-    initial_counter[7] = (uint8_t)association->spi;
+    memcpy(initial_counter, prefix, TCSEC_NONCE_PREFIX_LENGTH);
+    initial_counter[6] = (uint8_t)(spi >> 8);
+    initial_counter[7] = (uint8_t)spi;
     initial_counter[8] = (uint8_t)(iv_counter >> 24);
     initial_counter[9] = (uint8_t)(iv_counter >> 16);
     initial_counter[10] = (uint8_t)(iv_counter >> 8);
@@ -118,197 +105,373 @@ static void build_ctr_counter(const tcsec_sa_config_t *association, uint32_t iv_
     memset(&initial_counter[12], 0, 4u);
 }
 
-static void build_gcm_nonce(const tcsec_sa_config_t *association, uint32_t iv_counter,
+static void build_gcm_nonce(const uint8_t prefix[TCSEC_NONCE_PREFIX_LENGTH],
+                            uint16_t spi, uint32_t iv_counter,
                             uint8_t nonce[TCSEC_GCM_NONCE_LENGTH]) {
-    memcpy(nonce, association->nonce_prefix, TCSEC_NONCE_PREFIX_LENGTH);
-    nonce[6] = (uint8_t)(association->spi >> 8);
-    nonce[7] = (uint8_t)association->spi;
+    memcpy(nonce, prefix, TCSEC_NONCE_PREFIX_LENGTH);
+    nonce[6] = (uint8_t)(spi >> 8);
+    nonce[7] = (uint8_t)spi;
     nonce[8] = (uint8_t)(iv_counter >> 24);
     nonce[9] = (uint8_t)(iv_counter >> 16);
     nonce[10] = (uint8_t)(iv_counter >> 8);
     nonce[11] = (uint8_t)iv_counter;
 }
 
-static int decrypt_ctr(const tcsec_key_config_t *key, const uint8_t counter[16],
-                       const uint8_t *ciphertext, uint8_t *plaintext, size_t length) {
-    if (key->suite == TCSEC_SUITE_AES_256_CTR)
-        return tcsec_aes256_ctr_xor(key->key, counter, ciphertext, plaintext, length);
-    if (key->suite == TCSEC_SUITE_SM4_CTR)
-        return tcsec_sm4_ctr_xor(key->key, counter, ciphertext, plaintext, length);
+static int decrypt_ctr(tcsec_suite_t suite, const uint8_t *key,
+                       const uint8_t counter[16], const uint8_t *ciphertext,
+                       uint8_t *plaintext, size_t length) {
+    if (suite == TCSEC_SUITE_AES_256_CTR)
+        return tcsec_aes256_ctr_xor(key, counter, ciphertext, plaintext, length);
+    if (suite == TCSEC_SUITE_SM4_CTR)
+        return tcsec_sm4_ctr_xor(key, counter, ciphertext, plaintext, length);
     return -1;
 }
 
-static int parse_recovery(const uint8_t *plaintext, size_t length,
-                          tcsec_root_recovery_t *transaction) {
+static int parse_root_prepare(const uint8_t *plaintext, size_t length,
+                              tcsec_root_prepare_t *transaction) {
     size_t root_length;
-    if (length != TCSEC_RECOVERY_SM4_LENGTH && length != TCSEC_RECOVERY_AES_LENGTH) return 0;
-    if (plaintext[0] != TCSEC_RECOVERY_FORMAT_VERSION) return 0;
+    if (length != TCSEC_ROOT_PREPARE_SM4_LENGTH && length != TCSEC_ROOT_PREPARE_AES_LENGTH) return 0;
+    if (plaintext[0] != TCSEC_ROOT_PREPARE_FORMAT_VERSION) return 0;
     memset(transaction, 0, sizeof(*transaction));
     transaction->transaction_id = read_u64_be(&plaintext[1]);
     transaction->expected_current_root_version = read_u32_be(&plaintext[9]);
     transaction->new_root_version = read_u32_be(&plaintext[13]);
-    transaction->activation_epoch = read_u32_be(&plaintext[17]);
-    transaction->ordinary_suite = (tcsec_suite_t)read_u16_be(&plaintext[21]);
-    root_length = length - TCSEC_RECOVERY_FIXED_LENGTH;
+    transaction->next_security_epoch = read_u32_be(&plaintext[17]);
+    transaction->next_spi = read_u16_be(&plaintext[21]);
+    transaction->ordinary_suite = (tcsec_suite_t)read_u16_be(&plaintext[23]);
+    root_length = length - TCSEC_ROOT_PREPARE_FIXED_LENGTH;
     if (transaction->transaction_id == 0u || transaction->expected_current_root_version == 0u ||
         transaction->new_root_version <= transaction->expected_current_root_version ||
-        transaction->activation_epoch == 0u || !suite_is_ctr(transaction->ordinary_suite) ||
+        transaction->next_security_epoch == 0u || !suite_is_ctr(transaction->ordinary_suite) ||
         root_length != suite_key_length(transaction->ordinary_suite)) return 0;
-    memcpy(transaction->new_operational_root, &plaintext[TCSEC_RECOVERY_FIXED_LENGTH], root_length);
+    memcpy(transaction->new_operational_root, &plaintext[TCSEC_ROOT_PREPARE_FIXED_LENGTH], root_length);
     transaction->new_operational_root_length = root_length;
     return 1;
 }
 
-tcsec_status_t tcsec_init(tcsec_context_t *context, const tcsec_key_config_t *keys,
-                          size_t key_count, const tcsec_sa_config_t *associations,
-                          size_t association_count, tcsec_plaintext_validator_fn validate_plaintext,
-                          tcsec_replay_persist_fn persist_replay,
-                          tcsec_recovery_commit_fn commit_recovery, void *callback_user) {
-    size_t index;
-    size_t compare;
-    int ordinary_present = 0;
-    int recovery_present = 0;
-    if (context == NULL || keys == NULL || associations == NULL || key_count == 0u ||
-        key_count > TCSEC_MAX_KEY_SLOTS || association_count == 0u ||
-        association_count > TCSEC_MAX_ASSOCIATIONS) return TCSEC_INVALID_ARGUMENT;
-    memset(context, 0, sizeof(*context));
-    for (index = 0u; index < key_count; ++index) {
-        if (keys[index].slot >= TCSEC_MAX_KEY_SLOTS || !key_configuration_valid(&keys[index])) goto invalid;
-        for (compare = 0u; compare < index; ++compare)
-            if (keys[compare].slot == keys[index].slot) goto invalid;
-        context->keys[index] = keys[index];
-    }
-    context->key_count = key_count;
-    for (index = 0u; index < association_count; ++index) {
-        tcsec_key_config_t *key = find_key(context, associations[index].key_slot);
-        if ((associations[index].state != TCSEC_SA_PREINSTALLED && associations[index].state != TCSEC_SA_ACTIVE &&
-             associations[index].state != TCSEC_SA_GRACE && associations[index].state != TCSEC_SA_DISABLED) ||
-            (associations[index].replay_seen == 0u && (associations[index].highest_iv != 0u || associations[index].replay_bitmap != 0u)) ||
-            (associations[index].replay_seen == 1u && (associations[index].replay_bitmap & 1u) == 0u) ||
-            associations[index].replay_seen > 1u || key == NULL) goto invalid;
-        if (associations[index].profile == TCSEC_PROFILE_ORDINARY && suite_is_ctr(key->suite)) ordinary_present = 1;
-        else if (associations[index].profile == TCSEC_PROFILE_ROOT_RECOVERY && suite_is_gcm(key->suite) &&
-                 associations[index].state != TCSEC_SA_GRACE) recovery_present = 1;
-        else goto invalid;
-        for (compare = 0u; compare < index; ++compare)
-            if (associations[compare].spi == associations[index].spi ||
-                associations[compare].key_slot == associations[index].key_slot) goto invalid;
-        context->associations[index] = associations[index];
-    }
-    if ((ordinary_present && (validate_plaintext == NULL || persist_replay == NULL)) ||
-        (recovery_present && commit_recovery == NULL)) goto invalid;
-    context->association_count = association_count;
-    context->validate_plaintext = validate_plaintext;
-    context->persist_replay = persist_replay;
-    context->commit_recovery = commit_recovery;
-    context->callback_user = callback_user;
-    context->initialized = 1u;
-    return TCSEC_OK;
-invalid:
-    zeroize(context, sizeof(*context));
+static tcsec_status_t commit_status(tcsec_commit_result_t result) {
+    if (result == TCSEC_COMMIT_PERSISTENCE_FAILED) return TCSEC_PERSISTENCE_FAILED;
+    if (result == TCSEC_COMMIT_REJECTED) return TCSEC_ROOT_PREPARE_REJECTED;
     return TCSEC_INVALID_CONFIGURATION;
 }
 
-tcsec_status_t tcsec_receive(tcsec_context_t *context, const uint8_t *frame, size_t frame_length,
-                             uint8_t *plaintext, size_t plaintext_capacity, tcsec_result_t *result) {
-    size_t protected_length;
+static int pending_config_valid(const tcsec_ordinary_config_t *ordinary) {
+    if (ordinary->pending_root_present == 0u)
+        return ordinary->pending_suite == (tcsec_suite_t)0 &&
+               ordinary->pending_operational_root_length == 0u &&
+               ordinary->pending_root_version == 0u && ordinary->pending_transaction_id == 0u;
+    return ordinary->pending_root_present == 1u && suite_is_ctr(ordinary->pending_suite) &&
+           ordinary->pending_operational_root_length == suite_key_length(ordinary->pending_suite) &&
+           ordinary->pending_root_version > ordinary->root_version &&
+           ordinary->pending_transaction_id != 0u;
+}
+
+static uint16_t next_spi(uint16_t spi) {
+    return (uint16_t)(spi + 1u);
+}
+
+tcsec_status_t tcsec_init(tcsec_context_t *context, const tcsec_config_t *config,
+                          tcsec_plaintext_validator_fn validate_plaintext,
+                          tcsec_state_commit_fn commit_state, void *user_context) {
+    const tcsec_ordinary_config_t *ordinary;
+    const tcsec_recovery_config_t *recovery;
+    if (context == NULL || config == NULL || validate_plaintext == NULL || commit_state == NULL)
+        return TCSEC_INVALID_ARGUMENT;
+    ordinary = &config->ordinary;
+    recovery = &config->recovery;
+    if (!suite_is_ctr(ordinary->suite) || !suite_is_gcm(recovery->suite) ||
+        ordinary->operational_root_length != suite_key_length(ordinary->suite) ||
+        recovery->recovery_root_length != suite_key_length(recovery->suite) ||
+        ordinary->root_version == 0u || ordinary->current_epoch == 0u ||
+        ordinary->current_epoch == UINT32_MAX ||
+        recovery->root_version == 0u || next_spi(ordinary->current_spi) == recovery->spi ||
+        ordinary->current_spi == recovery->spi || !replay_state_valid(&ordinary->replay) ||
+        !replay_state_valid(&recovery->replay) || !pending_config_valid(ordinary))
+        return TCSEC_INVALID_CONFIGURATION;
+    memset(context, 0, sizeof(*context));
+    context->spacecraft_id = ordinary->spacecraft_id;
+    context->current_suite = ordinary->suite;
+    context->next_suite = ordinary->pending_root_present != 0u
+                              ? ordinary->pending_suite : ordinary->suite;
+    context->recovery_suite = recovery->suite;
+    memcpy(context->current_root, ordinary->operational_root, ordinary->operational_root_length);
+    context->current_root_length = ordinary->operational_root_length;
+    context->current_root_version = ordinary->root_version;
+    context->current_epoch = ordinary->current_epoch;
+    context->current_spi = ordinary->current_spi;
+    memcpy(context->ordinary_nonce_prefix, ordinary->nonce_prefix, TCSEC_NONCE_PREFIX_LENGTH);
+    context->current_replay = ordinary->replay;
+    if (ordinary->pending_root_present != 0u) {
+        memcpy(context->pending_root, ordinary->pending_operational_root,
+               ordinary->pending_operational_root_length);
+        context->pending_root_length = ordinary->pending_operational_root_length;
+        context->pending_root_version = ordinary->pending_root_version;
+        context->pending_transaction_id = ordinary->pending_transaction_id;
+        context->pending_root_present = 1u;
+    }
+    context->recovery_spi = recovery->spi;
+    memcpy(context->recovery_nonce_prefix, recovery->nonce_prefix, TCSEC_NONCE_PREFIX_LENGTH);
+    context->recovery_replay = recovery->replay;
+    context->validate_plaintext = validate_plaintext;
+    context->commit_state = commit_state;
+    context->user_context = user_context;
+    if (tcsec_derive_ordinary_key(context->current_root, context->current_root_length,
+                                  context->spacecraft_id, context->current_suite,
+                                  context->current_spi, context->current_epoch,
+                                  context->current_root_version, context->current_key,
+                                  sizeof(context->current_key)) != 0 ||
+        tcsec_derive_ordinary_key(context->pending_root_present != 0u
+                                      ? context->pending_root : context->current_root,
+                                  context->pending_root_present != 0u
+                                      ? context->pending_root_length : context->current_root_length,
+                                  context->spacecraft_id, context->next_suite,
+                                  next_spi(context->current_spi), context->current_epoch + 1u,
+                                  context->pending_root_present != 0u
+                                      ? context->pending_root_version : context->current_root_version,
+                                  context->next_key,
+                                  sizeof(context->next_key)) != 0 ||
+        tcsec_derive_recovery_key(recovery->recovery_root, recovery->recovery_root_length,
+                                  context->spacecraft_id, context->recovery_suite,
+                                  context->recovery_spi, recovery->root_version,
+                                  context->recovery_key, sizeof(context->recovery_key)) != 0) {
+        zeroize(context, sizeof(*context));
+        return TCSEC_INVALID_CONFIGURATION;
+    }
+    context->initialized = 1u;
+    return TCSEC_OK;
+}
+
+static tcsec_status_t receive_ordinary(tcsec_context_t *context, const uint8_t *frame,
+                                       size_t frame_length, uint16_t spi, uint32_t iv_counter,
+                                       uint8_t candidate_next, uint8_t *plaintext,
+                                       size_t plaintext_capacity, tcsec_result_t *result) {
+    const uint8_t *key = candidate_next != 0u ? context->next_key : context->current_key;
+    tcsec_suite_t suite = candidate_next != 0u ? context->next_suite : context->current_suite;
+    tcsec_replay_state_t *state = candidate_next != 0u ? &context->next_replay : &context->current_replay;
+    tcsec_replay_state_t next_replay;
+    tcsec_commit_t commit;
+    tcsec_commit_result_t commit_result;
+    uint8_t counter[16];
+    size_t protected_length = frame_length - TCSEC_PRIMARY_HEADER_LENGTH -
+                              TCSEC_SECURITY_HEADER_LENGTH - TCSEC_FECF_LENGTH;
+    int replay_result = replay_check(state, iv_counter, TCSEC_MAX_FORWARD_JUMP);
+    if (replay_result == -1) return TCSEC_REPLAY_REJECTED;
+    if (replay_result == -2) return TCSEC_IV_FORWARD_JUMP_REJECTED;
+    if (plaintext == NULL) return TCSEC_INVALID_ARGUMENT;
+    if (protected_length > plaintext_capacity) return TCSEC_OUTPUT_TOO_SMALL;
+    build_ctr_counter(context->ordinary_nonce_prefix, spi, iv_counter, counter);
+    if (decrypt_ctr(suite, key, counter,
+                    &frame[TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH],
+                    plaintext, protected_length) != 0) {
+        zeroize(counter, sizeof(counter));
+        zeroize(plaintext, protected_length);
+        return TCSEC_INVALID_CONFIGURATION;
+    }
+    zeroize(counter, sizeof(counter));
+    if (!context->validate_plaintext(context->user_context, frame, plaintext, protected_length)) {
+        zeroize(plaintext, protected_length);
+        return TCSEC_PLAINTEXT_REJECTED;
+    }
+    next_replay = replay_next(state, iv_counter);
+    memset(&commit, 0, sizeof(commit));
+    commit.kind = candidate_next != 0u ? TCSEC_COMMIT_EPOCH_PROMOTION : TCSEC_COMMIT_ORDINARY_REPLAY;
+    commit.spi = spi;
+    commit.replay = next_replay;
+    commit.current_epoch = context->current_epoch + (candidate_next != 0u ? 1u : 0u);
+    commit.root_version = candidate_next != 0u && context->pending_root_present != 0u
+                              ? context->pending_root_version : context->current_root_version;
+    commit.suite = suite;
+    if (candidate_next != 0u) {
+        const uint8_t *future_root = context->pending_root_present != 0u
+                                         ? context->pending_root : context->current_root;
+        size_t future_root_length = context->pending_root_present != 0u
+                                        ? context->pending_root_length : context->current_root_length;
+        uint32_t future_root_version = commit.root_version;
+        uint8_t future_key[TCSEC_MAX_KEY_LENGTH];
+        if (context->current_epoch >= UINT32_MAX - 1u ||
+            tcsec_derive_ordinary_key(future_root, future_root_length, context->spacecraft_id,
+                                      suite, next_spi(next_spi(context->current_spi)),
+                                      context->current_epoch + 2u, future_root_version,
+                                      future_key, sizeof(future_key)) != 0) {
+            zeroize(plaintext, protected_length);
+            return TCSEC_INVALID_CONFIGURATION;
+        }
+        commit_result = context->commit_state(context->user_context, &commit);
+        if (commit_result != TCSEC_COMMIT_NEW && commit_result != TCSEC_COMMIT_ALREADY_APPLIED) {
+            zeroize(future_key, sizeof(future_key));
+            zeroize(plaintext, protected_length);
+            return commit_result == TCSEC_COMMIT_PERSISTENCE_FAILED
+                       ? TCSEC_PERSISTENCE_FAILED : TCSEC_INVALID_CONFIGURATION;
+        }
+        if (context->pending_root_present != 0u) {
+            zeroize(context->current_root, sizeof(context->current_root));
+            memcpy(context->current_root, context->pending_root, context->pending_root_length);
+            context->current_root_length = context->pending_root_length;
+            context->current_root_version = context->pending_root_version;
+        }
+        memcpy(context->current_key, context->next_key, sizeof(context->current_key));
+        memcpy(context->next_key, future_key, sizeof(context->next_key));
+        zeroize(future_key, sizeof(future_key));
+        context->current_suite = suite;
+        context->next_suite = suite;
+        context->current_epoch++;
+        context->current_spi = next_spi(context->current_spi);
+        context->current_replay = next_replay;
+        memset(&context->next_replay, 0, sizeof(context->next_replay));
+        zeroize(context->pending_root, sizeof(context->pending_root));
+        context->pending_root_length = 0u;
+        context->pending_root_version = 0u;
+        context->pending_transaction_id = 0u;
+        context->pending_root_present = 0u;
+        result->security_epoch = context->current_epoch;
+        result->profile = TCSEC_PROFILE_ORDINARY_NEXT;
+        result->plaintext_length = protected_length;
+        return TCSEC_EPOCH_PROMOTED;
+    }
+    commit_result = context->commit_state(context->user_context, &commit);
+    if (commit_result != TCSEC_COMMIT_NEW) {
+        zeroize(plaintext, protected_length);
+        return commit_result == TCSEC_COMMIT_PERSISTENCE_FAILED
+                   ? TCSEC_PERSISTENCE_FAILED : TCSEC_INVALID_CONFIGURATION;
+    }
+    context->current_replay = next_replay;
+    result->security_epoch = context->current_epoch;
+    result->profile = TCSEC_PROFILE_ORDINARY_CURRENT;
+    result->plaintext_length = protected_length;
+    return TCSEC_OK;
+}
+
+static tcsec_status_t receive_root_prepare(tcsec_context_t *context, const uint8_t *frame,
+                                           size_t frame_length, uint32_t iv_counter,
+                                           tcsec_result_t *result) {
+    size_t protected_length = frame_length - TCSEC_PRIMARY_HEADER_LENGTH -
+                              TCSEC_SECURITY_HEADER_LENGTH - TCSEC_FECF_LENGTH;
+    size_t ciphertext_length;
+    const uint8_t *ciphertext;
+    uint8_t plaintext[TCSEC_ROOT_PREPARE_AES_LENGTH];
+    uint8_t nonce[TCSEC_GCM_NONCE_LENGTH];
+    uint8_t candidate_key[TCSEC_MAX_KEY_LENGTH];
+    tcsec_root_prepare_t transaction;
+    tcsec_replay_state_t next_replay;
+    tcsec_commit_t commit;
+    tcsec_commit_result_t commit_result;
+    int replay_result = replay_check(&context->recovery_replay, iv_counter, 0u);
+    if (replay_result != 0) return TCSEC_REPLAY_REJECTED;
+    if (protected_length < TCSEC_GCM_TAG_LENGTH) return TCSEC_FRAME_LENGTH_INVALID;
+    ciphertext_length = protected_length - TCSEC_GCM_TAG_LENGTH;
+    if (ciphertext_length != TCSEC_ROOT_PREPARE_SM4_LENGTH &&
+        ciphertext_length != TCSEC_ROOT_PREPARE_AES_LENGTH) return TCSEC_FRAME_LENGTH_INVALID;
+    ciphertext = &frame[TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH];
+    build_gcm_nonce(context->recovery_nonce_prefix, context->recovery_spi, iv_counter, nonce);
+    if (tcsec_gcm_open(context->recovery_suite, context->recovery_key, nonce,
+                       &frame[TCSEC_PRIMARY_HEADER_LENGTH], TCSEC_SECURITY_HEADER_LENGTH,
+                       ciphertext, ciphertext_length, &ciphertext[ciphertext_length], plaintext) != 0) {
+        zeroize(nonce, sizeof(nonce));
+        zeroize(plaintext, sizeof(plaintext));
+        return TCSEC_AUTHENTICATION_FAILED;
+    }
+    zeroize(nonce, sizeof(nonce));
+    if (!parse_root_prepare(plaintext, ciphertext_length, &transaction) ||
+        transaction.expected_current_root_version != context->current_root_version ||
+        transaction.next_security_epoch != context->current_epoch + 1u ||
+        transaction.next_spi != next_spi(context->current_spi)) {
+        zeroize(plaintext, sizeof(plaintext));
+        zeroize(&transaction, sizeof(transaction));
+        return TCSEC_ROOT_PREPARE_REJECTED;
+    }
+    if (context->pending_root_present != 0u &&
+        (context->pending_transaction_id != transaction.transaction_id ||
+         context->pending_root_version != transaction.new_root_version ||
+         context->next_suite != transaction.ordinary_suite ||
+         context->pending_root_length != transaction.new_operational_root_length ||
+         memcmp(context->pending_root, transaction.new_operational_root,
+                transaction.new_operational_root_length) != 0)) {
+        zeroize(plaintext, sizeof(plaintext));
+        zeroize(&transaction, sizeof(transaction));
+        return TCSEC_ROOT_PREPARE_REJECTED;
+    }
+    if (tcsec_derive_ordinary_key(transaction.new_operational_root,
+                                  transaction.new_operational_root_length,
+                                  context->spacecraft_id, transaction.ordinary_suite,
+                                  transaction.next_spi, transaction.next_security_epoch,
+                                  transaction.new_root_version, candidate_key,
+                                  sizeof(candidate_key)) != 0) {
+        zeroize(plaintext, sizeof(plaintext));
+        zeroize(&transaction, sizeof(transaction));
+        return TCSEC_ROOT_PREPARE_REJECTED;
+    }
+    next_replay = replay_next(&context->recovery_replay, iv_counter);
+    memset(&commit, 0, sizeof(commit));
+    commit.kind = TCSEC_COMMIT_ROOT_PREPARE;
+    commit.spi = context->recovery_spi;
+    commit.replay = next_replay;
+    commit.current_epoch = context->current_epoch;
+    commit.root_version = context->current_root_version;
+    commit.suite = context->recovery_suite;
+    commit.root_prepare = &transaction;
+    commit_result = context->commit_state(context->user_context, &commit);
+    if (commit_result != TCSEC_COMMIT_NEW && commit_result != TCSEC_COMMIT_ALREADY_APPLIED) {
+        zeroize(candidate_key, sizeof(candidate_key));
+        zeroize(plaintext, sizeof(plaintext));
+        zeroize(&transaction, sizeof(transaction));
+        return commit_status(commit_result);
+    }
+    memcpy(context->pending_root, transaction.new_operational_root,
+           transaction.new_operational_root_length);
+    context->pending_root_length = transaction.new_operational_root_length;
+    context->pending_root_version = transaction.new_root_version;
+    context->pending_transaction_id = transaction.transaction_id;
+    context->pending_root_present = 1u;
+    context->next_suite = transaction.ordinary_suite;
+    memcpy(context->next_key, candidate_key, sizeof(context->next_key));
+    context->recovery_replay = next_replay;
+    zeroize(candidate_key, sizeof(candidate_key));
+    zeroize(plaintext, sizeof(plaintext));
+    zeroize(&transaction, sizeof(transaction));
+    result->profile = TCSEC_PROFILE_ROOT_PREPARE;
+    result->security_epoch = context->current_epoch;
+    result->plaintext_length = 0u;
+    return commit_result == TCSEC_COMMIT_NEW ? TCSEC_ROOT_PREPARED : TCSEC_ROOT_ALREADY_PREPARED;
+}
+
+tcsec_status_t tcsec_receive(tcsec_context_t *context, const uint8_t *frame,
+                             size_t frame_length, uint8_t *plaintext,
+                             size_t plaintext_capacity, tcsec_result_t *result) {
     uint16_t spi;
     uint32_t iv_counter;
-    uint32_t next_highest;
-    uint64_t next_bitmap;
-    uint8_t next_seen;
-    tcsec_sa_config_t *association;
-    tcsec_key_config_t *key;
-    if (context == NULL || !context->initialized || frame == NULL || result == NULL) return TCSEC_INVALID_ARGUMENT;
+    tcsec_status_t status;
+    if (context == NULL || context->initialized == 0u || frame == NULL || result == NULL)
+        return TCSEC_INVALID_ARGUMENT;
     memset(result, 0, sizeof(*result));
-    if (frame_length < TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH + 1u + TCSEC_FECF_LENGTH ||
-        frame_length > TCSEC_MAX_FRAME_LENGTH) return TCSEC_FRAME_LENGTH_INVALID;
+    if (frame_length < TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH + 1u +
+                           TCSEC_FECF_LENGTH || frame_length > TCSEC_MAX_FRAME_LENGTH)
+        return TCSEC_FRAME_LENGTH_INVALID;
     if ((size_t)(((uint16_t)(frame[2] & 0x03u) << 8) | frame[3]) + 1u != frame_length)
         return TCSEC_FRAME_LENGTH_INVALID;
     if (read_u16_be(&frame[frame_length - TCSEC_FECF_LENGTH]) !=
         crc16_ccitt(frame, frame_length - TCSEC_FECF_LENGTH)) return TCSEC_FECF_INVALID;
     spi = read_u16_be(&frame[TCSEC_PRIMARY_HEADER_LENGTH]);
     iv_counter = read_u32_be(&frame[TCSEC_PRIMARY_HEADER_LENGTH + 2u]);
-    association = find_association(context, spi);
-    if (association == NULL) return TCSEC_ASSOCIATION_NOT_FOUND;
-    if ((association->profile == TCSEC_PROFILE_ROOT_RECOVERY && association->state != TCSEC_SA_ACTIVE) ||
-        (association->profile == TCSEC_PROFILE_ORDINARY && association->state != TCSEC_SA_ACTIVE && association->state != TCSEC_SA_GRACE))
-        return TCSEC_ASSOCIATION_DISABLED;
-    if (replay_check(association, iv_counter) != 0) return TCSEC_REPLAY_REJECTED;
-    key = find_key(context, association->key_slot);
-    if (key == NULL) return TCSEC_INVALID_CONFIGURATION;
-    replay_next(association, iv_counter, &next_highest, &next_bitmap, &next_seen);
-    protected_length = frame_length - TCSEC_PRIMARY_HEADER_LENGTH - TCSEC_SECURITY_HEADER_LENGTH - TCSEC_FECF_LENGTH;
-    if (association->profile == TCSEC_PROFILE_ORDINARY) {
-        uint8_t counter[16];
-        if (plaintext == NULL) return TCSEC_INVALID_ARGUMENT;
-        if (protected_length > plaintext_capacity) return TCSEC_OUTPUT_TOO_SMALL;
-        build_ctr_counter(association, iv_counter, counter);
-        if (decrypt_ctr(key, counter, &frame[TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH], plaintext, protected_length) != 0) {
-            zeroize(counter, sizeof(counter));
-            zeroize(plaintext, protected_length);
-            return TCSEC_INVALID_CONFIGURATION;
-        }
-        zeroize(counter, sizeof(counter));
-        if (!context->validate_plaintext(context->callback_user, plaintext, protected_length)) {
-            zeroize(plaintext, protected_length);
-            return TCSEC_PLAINTEXT_REJECTED;
-        }
-        if (!context->persist_replay(context->callback_user, spi, next_highest, next_bitmap, next_seen)) {
-            zeroize(plaintext, protected_length);
-            return TCSEC_PERSISTENCE_FAILED;
-        }
-        result->plaintext_length = protected_length;
+    if (spi == context->current_spi) {
+        status = receive_ordinary(context, frame, frame_length, spi, iv_counter, 0u,
+                                  plaintext, plaintext_capacity, result);
+    } else if (spi == next_spi(context->current_spi)) {
+        status = receive_ordinary(context, frame, frame_length, spi, iv_counter, 1u,
+                                  plaintext, plaintext_capacity, result);
+    } else if (spi == context->recovery_spi) {
+        status = receive_root_prepare(context, frame, frame_length, iv_counter, result);
     } else {
-        uint8_t recovery_plaintext[TCSEC_RECOVERY_AES_LENGTH];
-        uint8_t nonce[TCSEC_GCM_NONCE_LENGTH];
-        tcsec_root_recovery_t transaction;
-        tcsec_recovery_commit_result_t commit_result;
-        const uint8_t *ciphertext = &frame[TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH];
-        size_t ciphertext_length;
-        if (protected_length < TCSEC_GCM_TAG_LENGTH) return TCSEC_FRAME_LENGTH_INVALID;
-        ciphertext_length = protected_length - TCSEC_GCM_TAG_LENGTH;
-        if (ciphertext_length != TCSEC_RECOVERY_SM4_LENGTH && ciphertext_length != TCSEC_RECOVERY_AES_LENGTH)
-            return TCSEC_FRAME_LENGTH_INVALID;
-        build_gcm_nonce(association, iv_counter, nonce);
-        if (tcsec_gcm_open(key->suite, key->key, nonce, frame,
-                           TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH,
-                           ciphertext, ciphertext_length, &ciphertext[ciphertext_length], recovery_plaintext) != 0) {
-            zeroize(nonce, sizeof(nonce));
-            zeroize(recovery_plaintext, sizeof(recovery_plaintext));
-            return TCSEC_AUTHENTICATION_FAILED;
-        }
-        zeroize(nonce, sizeof(nonce));
-        if (!parse_recovery(recovery_plaintext, ciphertext_length, &transaction)) {
-            zeroize(recovery_plaintext, sizeof(recovery_plaintext));
-            return TCSEC_RECOVERY_REJECTED;
-        }
-        commit_result = context->commit_recovery(context->callback_user, spi, &transaction,
-                                                  next_highest, next_bitmap, next_seen);
-        zeroize(&transaction, sizeof(transaction));
-        zeroize(recovery_plaintext, sizeof(recovery_plaintext));
-        if (commit_result == TCSEC_RECOVERY_COMMIT_REJECTED) return TCSEC_RECOVERY_REJECTED;
-        if (commit_result == TCSEC_RECOVERY_COMMIT_PERSISTENCE_FAILED) return TCSEC_PERSISTENCE_FAILED;
-        if (commit_result != TCSEC_RECOVERY_COMMIT_NEW &&
-            commit_result != TCSEC_RECOVERY_COMMIT_ALREADY_APPLIED) return TCSEC_INVALID_CONFIGURATION;
-        result->plaintext_length = 0u;
-        association->highest_iv = next_highest;
-        association->replay_bitmap = next_bitmap;
-        association->replay_seen = next_seen;
+        return TCSEC_ASSOCIATION_NOT_FOUND;
+    }
+    if (status == TCSEC_OK || status == TCSEC_EPOCH_PROMOTED ||
+        status == TCSEC_ROOT_PREPARED || status == TCSEC_ROOT_ALREADY_PREPARED) {
         result->spi = spi;
         result->iv_counter = iv_counter;
-        result->profile = association->profile;
-        result->suite = key->suite;
-        return commit_result == TCSEC_RECOVERY_COMMIT_NEW ? TCSEC_RECOVERY_COMMITTED : TCSEC_RECOVERY_ALREADY_APPLIED;
+        if (result->profile == TCSEC_PROFILE_ROOT_PREPARE) result->suite = context->recovery_suite;
+        else if (result->profile == TCSEC_PROFILE_ORDINARY_NEXT) result->suite = context->current_suite;
+        else result->suite = context->current_suite;
     }
-    association->highest_iv = next_highest;
-    association->replay_bitmap = next_bitmap;
-    association->replay_seen = next_seen;
-    result->spi = spi;
-    result->iv_counter = iv_counter;
-    result->profile = association->profile;
-    result->suite = key->suite;
-    return TCSEC_OK;
+    return status;
 }
 
 void tcsec_clear(tcsec_context_t *context) {
@@ -318,9 +481,10 @@ void tcsec_clear(tcsec_context_t *context) {
 const char *tcsec_status_string(tcsec_status_t status) {
     static const char *const names[] = {
         "OK", "INVALID_ARGUMENT", "INVALID_CONFIGURATION", "FRAME_LENGTH_INVALID",
-        "FECF_INVALID", "ASSOCIATION_NOT_FOUND", "ASSOCIATION_DISABLED", "REPLAY_REJECTED",
-        "AUTHENTICATION_FAILED", "OUTPUT_TOO_SMALL", "PLAINTEXT_REJECTED", "RECOVERY_REJECTED",
-        "PERSISTENCE_FAILED", "RECOVERY_COMMITTED", "RECOVERY_ALREADY_APPLIED"
+        "FECF_INVALID", "ASSOCIATION_NOT_FOUND", "REPLAY_REJECTED",
+        "IV_FORWARD_JUMP_REJECTED", "AUTHENTICATION_FAILED", "OUTPUT_TOO_SMALL",
+        "PLAINTEXT_REJECTED", "ROOT_PREPARE_REJECTED", "PERSISTENCE_FAILED",
+        "EPOCH_PROMOTED", "ROOT_PREPARED", "ROOT_ALREADY_PREPARED"
     };
-    return (int)status >= 0 && status <= TCSEC_RECOVERY_ALREADY_APPLIED ? names[status] : "UNKNOWN";
+    return (int)status >= 0 && status <= TCSEC_ROOT_ALREADY_PREPARED ? names[status] : "UNKNOWN";
 }

@@ -10,19 +10,18 @@ services:
       - "8081:8080"
     environment:
       KVLT_HTTP_ADDR: ":8080"
+      KVLT_STATE_DB: "/var/lib/key-vault/security-state.db"
       KVLT_TPM_PROVIDER: "tpm2"
-      KVLT_TPM_STATE_DIR: "/tmp/kvlt-tpm"
+      KVLT_TPM_STATE_DIR: "/var/lib/key-vault/tpm"
       TPM2TOOLS_TCTI: "device:/dev/tpmrm0"
       KVLT_LOG_LEVEL: "INFO"
       KVLT_STATIC_TOKENS: >-
-        [{"token":"admin-token-baseline","tenant_id":"t-default","scopes":["keys:manage","tenant:read","tenant:manage"],"roles":["admin"],"plane":"management"},{"token":"data-token-baseline","tenant_id":"t-default","scopes":["crypto:encrypt","crypto:decrypt","crypto:authenticate","crypto:verify"],"roles":["data"],"plane":"data"},{"token":"ops-token-baseline","tenant_id":"t-default","scopes":["ops:read","ops:repair"],"roles":["ops"],"plane":"ops"}]
+        [{"token":"mission-data-token-baseline","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:aos:unprotect"],"roles":["data"],"plane":"data"},{"token":"mission-console-token-baseline","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:aos:unprotect","audit:read","ops:read"],"roles":["admin","data","ops"],"planes":["management","data","ops"]}]
     devices:
       - "/dev/tpmrm0:/dev/tpmrm0"
     volumes:
-      - kvlt_tpm_state:/tmp/kvlt-tpm
-      - kvlt_audit_wal:/tmp/kvlt-wal
+      - kvlt_state:/var/lib/key-vault
     restart: unless-stopped
 
 volumes:
-  kvlt_tpm_state:
-  kvlt_audit_wal:
+  kvlt_state:

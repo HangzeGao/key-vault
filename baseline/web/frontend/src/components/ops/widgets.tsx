@@ -1,13 +1,5 @@
 import type React from "react";
 
-export function formatUptime(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  return `${h}h ${m}m`;
-}
-
 /** format a count, showing "-" for negative sentinels (unavailable). */
 export function formatCount(n: number | undefined | null): string {
   if (n === undefined || n === null || n < 0) return "-";
@@ -79,28 +71,6 @@ export function StatCard({ icon, label, value, sub }: {
           ))}
         </div>
       )}
-    </div>
-  );
-}
-
-export function KeyStat({ label, value, color }: { label: string; value: string | number; color: string }) {
-  return (
-    <div className="key-stat">
-      <div style={{ fontSize: 24, fontFamily: '"JetBrains Mono", monospace', color, fontWeight: 600 }}>{value}</div>
-      <div style={{ fontSize: 11, color: "var(--text-tertiary)", marginTop: 4 }}>{label}</div>
-    </div>
-  );
-}
-
-export function MetricStrip({ items }: { items: Array<{ label: string; value: string | number; tone?: "success" | "warning" | "danger" | "info" | "neutral" }> }) {
-  return (
-    <div className="metric-strip">
-      {items.map((item) => (
-        <div key={item.label} className={`metric-strip-item metric-${item.tone ?? "neutral"}`}>
-          <div className="metric-strip-value">{item.value}</div>
-          <div className="metric-strip-label">{item.label}</div>
-        </div>
-      ))}
     </div>
   );
 }

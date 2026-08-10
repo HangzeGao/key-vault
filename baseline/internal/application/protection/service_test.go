@@ -93,10 +93,43 @@ func TestProtectionRoundTripAllServiceTypes(t *testing.T) {
 }
 
 func TestUsageScopeMatchingFailsClosed(t *testing.T) {
-	if usageScopeMatches("", models.KeyUsageGeneric) || usageScopeMatches(models.KeyUsageGeneric, "") {
+	if usageScopeMatches("", models.KeyUsageProtocol) || usageScopeMatches(models.KeyUsageProtocol, "") {
 		t.Fatal("empty usage scope must not be inferred")
 	}
 	if !usageScopeMatches(models.KeyUsageProtocol, models.KeyUsageProtocol) {
 		t.Fatal("identical explicit usage scopes should match")
+	}
+}
+
+func TestProtectDerivedUsesAnEpochBoundWorkingKey(t *testing.T) {
+	policies := policy.NewEngine()
+	if err := policies.Load(policy.DefaultPolicy()); err != nil {
+		t.Fatal(err)
+	}
+	store := &testStore{
+		key: &models.Key{ID: "root", TenantID: "tenant-1", Purpose: "encrypt_decrypt",
+			UsageScope: models.KeyUsageProtocol, PolicyID: "default-v1", SuiteID: suite.AES256CTR.String(), Status: "ACTIVE"},
+		kv: &models.KeyVersion{ID: "root-v1", KeyID: "root", VersionNo: 1,
+			SuiteID: suite.AES256CTR.String(), Status: "ACTIVE"},
+	}
+	core := New(store, testLeaser{key: bytes.Repeat([]byte{0x42}, 32)}, policies, 4096)
+	request := ProtectRequest{TenantID: "tenant-1", KeyID: "root", UsageScope: models.KeyUsageProtocol,
+		KeyVersion: 1, PolicyVersion: 1, Data: []byte("command"), Nonce: bytes.Repeat([]byte{0x11}, 16), NodeID: "node-1"}
+	first, err := core.ProtectDerived(context.Background(), request,
+		Derivation{Label: []byte("TC-TRAFFIC"), Context: []byte("epoch-1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := core.ProtectDerived(context.Background(), request,
+		Derivation{Label: []byte("TC-TRAFFIC"), Context: []byte("epoch-2")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct, err := core.Protect(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(first.Data, second.Data) || bytes.Equal(first.Data, direct.Data) {
+		t.Fatal("epoch context did not domain-separate the derived working key")
 	}
 }

@@ -3,6 +3,7 @@ package ccsds
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -11,6 +12,9 @@ import (
 type Store interface {
 	GetAssociation(ctx context.Context, tenantID, associationID string) (*SecurityAssociation, error)
 	GetAssociationBySPI(ctx context.Context, tenantID string, direction Direction, spi uint16) (*SecurityAssociation, error)
+	GetTransmitAssociation(ctx context.Context, tenantID string, direction Direction) (*SecurityAssociation, error)
+	ReadOperationsState(ctx context.Context, tenantID string) ([]AssociationRuntimeState, error)
+	PromoteNextTC(ctx context.Context, tenantID string) error
 	NextTransmitCounter(ctx context.Context, associationID string) (uint32, error)
 	CheckReplay(ctx context.Context, associationID string, sequence uint64, window uint8) error
 	CommitReplay(ctx context.Context, associationID string, sequence uint64, window uint8) error
@@ -89,6 +93,105 @@ func (s *MemoryStore) GetAssociationBySPI(_ context.Context, tenantID string, di
 	return &sa, nil
 }
 
+func (s *MemoryStore) GetTransmitAssociation(_ context.Context, tenantID string, direction Direction) (*SecurityAssociation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	wanted := AssociationCurrent
+	if direction == DirectionTCRecoveryTx {
+		wanted = AssociationActive
+	} else if direction != DirectionTCTx {
+		return nil, ErrAssociationState
+	}
+	var found *SecurityAssociation
+	for _, association := range s.byID {
+		if association.TenantID == tenantID && association.Direction == direction && association.State == wanted {
+			if found != nil {
+				return nil, ErrAssociationState
+			}
+			copy := cloneAssociation(association)
+			found = &copy
+		}
+	}
+	if found == nil {
+		return nil, ErrAssociationNotFound
+	}
+	return found, nil
+}
+
+func (s *MemoryStore) ReadOperationsState(_ context.Context, tenantID string) ([]AssociationRuntimeState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	states := make([]AssociationRuntimeState, 0)
+	for _, association := range s.byID {
+		if association.TenantID != tenantID || association.State == AssociationDisabled {
+			continue
+		}
+		state := AssociationRuntimeState{
+			ID: association.ID, SPI: association.SPI, Direction: association.Direction, State: association.State,
+			SuiteID: association.SuiteID, SecurityEpoch: association.SecurityEpoch,
+			KeyVersion: association.KeyVersion, PolicyVersion: association.PolicyVersion,
+			SequenceNumberLength: association.Parameters.SequenceNumberLength,
+			TransmittedIVLength:  association.Parameters.TransmittedIVLength,
+			TagLength:            association.Parameters.TagLength, ReplayWindow: association.Parameters.ReplayWindow,
+		}
+		if association.Direction == DirectionTCTx || association.Direction == DirectionTCRecoveryTx {
+			counter := s.txNext[association.ID]
+			state.NextIVCounter = &counter
+		}
+		if association.Direction == DirectionAOSRx {
+			replay := s.rx[association.ID]
+			state.ReplaySeen = replay.Seen
+			if replay.Seen {
+				highest := replay.Highest
+				state.ReplayHighest = &highest
+			}
+		}
+		states = append(states, state)
+	}
+	sort.Slice(states, func(i, j int) bool {
+		if states[i].Direction != states[j].Direction {
+			return states[i].Direction < states[j].Direction
+		}
+		return states[i].SPI < states[j].SPI
+	})
+	return states, nil
+}
+
+func (s *MemoryStore) PromoteNextTC(_ context.Context, tenantID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var currentID, nextID string
+	for id, association := range s.byID {
+		if association.TenantID != tenantID || association.Direction != DirectionTCTx {
+			continue
+		}
+		switch association.State {
+		case AssociationCurrent:
+			if currentID != "" {
+				return ErrAssociationState
+			}
+			currentID = id
+		case AssociationNext:
+			if nextID != "" {
+				return ErrAssociationState
+			}
+			nextID = id
+		}
+	}
+	current := s.byID[currentID]
+	next := s.byID[nextID]
+	if currentID == "" || nextID == "" ||
+		next.SecurityEpoch != current.SecurityEpoch+1 || next.SPI != NextSPI(current.SPI) ||
+		!equalBytes(next.Parameters.NoncePrefix, current.Parameters.NoncePrefix) {
+		return ErrAssociationState
+	}
+	current.State = AssociationDisabled
+	next.State = AssociationCurrent
+	s.byID[currentID] = current
+	s.byID[nextID] = next
+	return nil
+}
+
 func (s *MemoryStore) NextTransmitCounter(_ context.Context, associationID string) (uint32, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -96,7 +199,9 @@ func (s *MemoryStore) NextTransmitCounter(_ context.Context, associationID strin
 	if !ok {
 		return 0, ErrAssociationNotFound
 	}
-	if (sa.Direction != DirectionTCTx && sa.Direction != DirectionTCRecoveryTx) || sa.State != AssociationActive {
+	if (sa.Direction == DirectionTCTx && sa.State != AssociationCurrent) ||
+		(sa.Direction == DirectionTCRecoveryTx && sa.State != AssociationActive) ||
+		(sa.Direction != DirectionTCTx && sa.Direction != DirectionTCRecoveryTx) {
 		return 0, ErrAssociationState
 	}
 	next := s.txNext[associationID]
@@ -114,7 +219,7 @@ func (s *MemoryStore) CheckReplay(_ context.Context, associationID string, seque
 	if !ok {
 		return ErrAssociationNotFound
 	}
-	if sa.Direction != DirectionAOSRx || (sa.State != AssociationActive && sa.State != AssociationGrace) {
+	if sa.Direction != DirectionAOSRx || sa.State != AssociationActive {
 		return ErrAssociationState
 	}
 	return s.rx[associationID].Check(sequence, window)

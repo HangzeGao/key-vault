@@ -7,15 +7,23 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define VECTOR_BUFFER_SIZE 2048u
+#define VECTOR_BUFFER_SIZE 4096u
 
 typedef struct {
     tcsec_suite_t suite;
-    uint8_t key[TCSEC_MAX_KEY_LENGTH];
-    size_t key_length;
-    uint8_t prefix[6];
+    uint8_t root[TCSEC_MAX_KEY_LENGTH];
+    size_t root_length;
+    uint8_t ordinary_root[TCSEC_MAX_KEY_LENGTH];
+    size_t ordinary_root_length;
+    tcsec_suite_t ordinary_suite;
+    uint8_t prefix[TCSEC_NONCE_PREFIX_LENGTH];
     uint16_t spi;
     uint32_t iv_counter;
+    uint16_t spacecraft_id;
+    uint32_t root_version;
+    uint32_t current_root_version;
+    uint32_t security_epoch;
+    uint16_t current_spi;
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
     size_t plaintext_length;
     uint8_t protected_frame[TCSEC_MAX_FRAME_LENGTH];
@@ -23,13 +31,12 @@ typedef struct {
 } vector_t;
 
 typedef struct {
-    uint32_t persist_calls;
-    uint32_t persisted_highest;
     int accept_plaintext;
-    int persist_success;
-    uint32_t recovery_calls;
+    tcsec_commit_result_t result;
+    uint32_t calls;
+    tcsec_commit_kind_t last_kind;
+    uint16_t last_spi;
     uint64_t transaction_id;
-    tcsec_recovery_commit_result_t recovery_result;
 } callbacks_t;
 
 static int from_hex(char value) {
@@ -53,10 +60,18 @@ static int decode_hex(const char *text, uint8_t *output, size_t capacity, size_t
     return 1;
 }
 
+static tcsec_suite_t parse_suite(const char *value) {
+    if (strcmp(value, "AES_256_CTR") == 0) return TCSEC_SUITE_AES_256_CTR;
+    if (strcmp(value, "SM4_CTR") == 0) return TCSEC_SUITE_SM4_CTR;
+    if (strcmp(value, "AES_256_GCM") == 0) return TCSEC_SUITE_AES_256_GCM;
+    if (strcmp(value, "SM4_GCM") == 0) return TCSEC_SUITE_SM4_GCM;
+    return (tcsec_suite_t)0xffffu;
+}
+
 static int load_vector(const char *path, vector_t *vector) {
     FILE *file = fopen(path, "rb");
     char line[VECTOR_BUFFER_SIZE];
-    unsigned fields = 0u;
+    unsigned required = 0u;
     if (file == NULL) return 0;
     memset(vector, 0, sizeof(*vector));
     while (fgets(line, sizeof(line), file) != NULL) {
@@ -66,78 +81,64 @@ static int load_vector(const char *path, vector_t *vector) {
         line[strcspn(line, "\r\n")] = '\0';
         if (line[0] == '\0' || line[0] == '#') continue;
         equals = strchr(line, '=');
-        if (equals == NULL) { fclose(file); return 0; }
-        *equals = '\0';
-        value = equals + 1;
+        if (equals == NULL) goto fail;
+        *equals = '\0'; value = equals + 1;
         if (strcmp(line, "suite_id") == 0) {
-            if (strcmp(value, "AES_256_CTR") == 0) {
-                vector->suite = TCSEC_SUITE_AES_256_CTR;
-            } else if (strcmp(value, "SM4_CTR") == 0) {
-                vector->suite = TCSEC_SUITE_SM4_CTR;
-            } else if (strcmp(value, "AES_256_GCM") == 0) {
-                vector->suite = TCSEC_SUITE_AES_256_GCM;
-            } else if (strcmp(value, "SM4_GCM") == 0) {
-                vector->suite = TCSEC_SUITE_SM4_GCM;
-            } else {
-                goto fail;
-            }
-            fields |= 1u;
-        } else if (strcmp(line, "key") == 0) {
-            if (!decode_hex(value, vector->key, sizeof(vector->key), &vector->key_length)) goto fail;
-            fields |= 2u;
+            vector->suite = parse_suite(value); required |= 1u;
+        } else if (strcmp(line, "root") == 0) {
+            if (!decode_hex(value, vector->root, sizeof(vector->root), &vector->root_length)) goto fail;
+            required |= 2u;
+        } else if (strcmp(line, "ordinary_root") == 0) {
+            if (!decode_hex(value, vector->ordinary_root, sizeof(vector->ordinary_root), &vector->ordinary_root_length)) goto fail;
+        } else if (strcmp(line, "ordinary_suite") == 0) {
+            vector->ordinary_suite = parse_suite(value);
         } else if (strcmp(line, "nonce_prefix") == 0) {
-            if (!decode_hex(value, vector->prefix, sizeof(vector->prefix), &length) || length != 6u) goto fail;
-            fields |= 4u;
+            if (!decode_hex(value, vector->prefix, sizeof(vector->prefix), &length) || length != sizeof(vector->prefix)) goto fail;
+            required |= 4u;
         } else if (strcmp(line, "spi") == 0) {
-            vector->spi = (uint16_t)strtoul(value, NULL, 16); fields |= 8u;
+            vector->spi = (uint16_t)strtoul(value, NULL, 16); required |= 8u;
         } else if (strcmp(line, "iv_counter") == 0) {
-            vector->iv_counter = (uint32_t)strtoul(value, NULL, 16); fields |= 16u;
+            vector->iv_counter = (uint32_t)strtoul(value, NULL, 16); required |= 16u;
+        } else if (strcmp(line, "spacecraft_id") == 0) {
+            vector->spacecraft_id = (uint16_t)strtoul(value, NULL, 16); required |= 32u;
+        } else if (strcmp(line, "root_version") == 0) {
+            vector->root_version = (uint32_t)strtoul(value, NULL, 10); required |= 64u;
+        } else if (strcmp(line, "current_root_version") == 0) {
+            vector->current_root_version = (uint32_t)strtoul(value, NULL, 10);
+        } else if (strcmp(line, "security_epoch") == 0) {
+            vector->security_epoch = (uint32_t)strtoul(value, NULL, 10); required |= 128u;
+        } else if (strcmp(line, "current_spi") == 0) {
+            vector->current_spi = (uint16_t)strtoul(value, NULL, 16);
         } else if (strcmp(line, "plaintext") == 0) {
             if (!decode_hex(value, vector->plaintext, sizeof(vector->plaintext), &vector->plaintext_length)) goto fail;
-            fields |= 32u;
+            required |= 256u;
         } else if (strcmp(line, "protected_frame") == 0) {
             if (!decode_hex(value, vector->protected_frame, sizeof(vector->protected_frame), &vector->protected_frame_length)) goto fail;
-            fields |= 64u;
-        } else {
-            goto fail;
-        }
+            required |= 512u;
+        } else goto fail;
     }
     fclose(file);
-    return fields == 127u &&
-           (((vector->suite == TCSEC_SUITE_AES_256_CTR || vector->suite == TCSEC_SUITE_AES_256_GCM) && vector->key_length == 32u) ||
-            ((vector->suite == TCSEC_SUITE_SM4_CTR || vector->suite == TCSEC_SUITE_SM4_GCM) && vector->key_length == 16u));
+    return required == 1023u;
 fail:
     fclose(file);
     return 0;
 }
 
-static int validate_plaintext(void *user, const uint8_t *plaintext, size_t length) {
+static int validate_plaintext(void *user,
+                              const uint8_t primary_header[TCSEC_PRIMARY_HEADER_LENGTH],
+                              const uint8_t *plaintext, size_t length) {
     callbacks_t *callbacks = (callbacks_t *)user;
-    return callbacks->accept_plaintext && length >= 2u && plaintext[0] == 0xcau && plaintext[1] == 0xfeu;
+    return callbacks->accept_plaintext && primary_header[0] == 0x20u &&
+           length >= 2u && plaintext[0] == 0xcau && plaintext[1] == 0xfeu;
 }
 
-static int persist_replay(void *user, uint16_t spi, uint32_t highest_iv,
-                          uint64_t bitmap, uint8_t seen) {
+static tcsec_commit_result_t commit_state(void *user, const tcsec_commit_t *commit) {
     callbacks_t *callbacks = (callbacks_t *)user;
-    (void)spi;
-    (void)bitmap;
-    (void)seen;
-    callbacks->persist_calls++;
-    callbacks->persisted_highest = highest_iv;
-    return callbacks->persist_success;
-}
-
-static tcsec_recovery_commit_result_t commit_recovery(
-    void *user, uint16_t spi, const tcsec_root_recovery_t *transaction,
-    uint32_t highest_iv, uint64_t bitmap, uint8_t seen) {
-    callbacks_t *callbacks = (callbacks_t *)user;
-    (void)spi;
-    (void)bitmap;
-    (void)seen;
-    callbacks->recovery_calls++;
-    callbacks->transaction_id = transaction->transaction_id;
-    callbacks->persisted_highest = highest_iv;
-    return callbacks->recovery_result;
+    callbacks->calls++;
+    callbacks->last_kind = commit->kind;
+    callbacks->last_spi = commit->spi;
+    if (commit->root_prepare != NULL) callbacks->transaction_id = commit->root_prepare->transaction_id;
+    return callbacks->result;
 }
 
 static uint16_t frame_crc(const uint8_t *data, size_t length) {
@@ -150,6 +151,107 @@ static uint16_t frame_crc(const uint8_t *data, size_t length) {
             crc = (crc & 0x8000u) != 0u ? (uint16_t)((crc << 1) ^ 0x1021u) : (uint16_t)(crc << 1);
     }
     return crc;
+}
+
+static void set_frame_length(uint8_t header[TCSEC_PRIMARY_HEADER_LENGTH], size_t length) {
+    uint16_t encoded = (uint16_t)(length - 1u);
+    header[2] = (uint8_t)((header[2] & 0xfcu) | ((encoded >> 8) & 0x03u));
+    header[3] = (uint8_t)encoded;
+}
+
+static int build_ordinary_frame(tcsec_suite_t suite, const uint8_t *key,
+                                const uint8_t prefix[TCSEC_NONCE_PREFIX_LENGTH],
+                                uint16_t spi, uint32_t iv, const uint8_t *plaintext,
+                                size_t plaintext_length, uint8_t *frame, size_t *frame_length) {
+    uint8_t counter[16] = {0};
+    uint16_t crc;
+    size_t total = TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH +
+                   plaintext_length + TCSEC_FECF_LENGTH;
+    if (total > TCSEC_MAX_FRAME_LENGTH) return 0;
+    memset(frame, 0, total);
+    frame[0] = 0x20u; frame[1] = 0x01u; frame[4] = 0x07u;
+    set_frame_length(frame, total);
+    frame[5] = (uint8_t)(spi >> 8); frame[6] = (uint8_t)spi;
+    frame[7] = (uint8_t)(iv >> 24); frame[8] = (uint8_t)(iv >> 16);
+    frame[9] = (uint8_t)(iv >> 8); frame[10] = (uint8_t)iv;
+    memcpy(counter, prefix, TCSEC_NONCE_PREFIX_LENGTH);
+    counter[6] = (uint8_t)(spi >> 8); counter[7] = (uint8_t)spi;
+    counter[8] = (uint8_t)(iv >> 24); counter[9] = (uint8_t)(iv >> 16);
+    counter[10] = (uint8_t)(iv >> 8); counter[11] = (uint8_t)iv;
+    if ((suite == TCSEC_SUITE_AES_256_CTR &&
+         tcsec_aes256_ctr_xor(key, counter, plaintext, &frame[11], plaintext_length) != 0) ||
+        (suite == TCSEC_SUITE_SM4_CTR &&
+         tcsec_sm4_ctr_xor(key, counter, plaintext, &frame[11], plaintext_length) != 0)) return 0;
+    crc = frame_crc(frame, total - 2u);
+    frame[total - 2u] = (uint8_t)(crc >> 8); frame[total - 1u] = (uint8_t)crc;
+    *frame_length = total;
+    return 1;
+}
+
+static void ordinary_config(tcsec_config_t *config, const vector_t *vector) {
+    static const uint8_t recovery_root[16] = {
+        0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,0xfe,0xdc,0xba,0x98,0x76,0x54,0x32,0x10
+    };
+    memset(config, 0, sizeof(*config));
+    config->ordinary.spacecraft_id = vector->spacecraft_id;
+    config->ordinary.suite = vector->suite;
+    memcpy(config->ordinary.operational_root, vector->root, vector->root_length);
+    config->ordinary.operational_root_length = vector->root_length;
+    config->ordinary.root_version = vector->root_version;
+    config->ordinary.current_epoch = vector->security_epoch;
+    config->ordinary.current_spi = vector->spi;
+    memcpy(config->ordinary.nonce_prefix, vector->prefix, sizeof(config->ordinary.nonce_prefix));
+    config->recovery.suite = TCSEC_SUITE_SM4_GCM;
+    memcpy(config->recovery.recovery_root, recovery_root, sizeof(recovery_root));
+    config->recovery.recovery_root_length = sizeof(recovery_root);
+    config->recovery.root_version = 3u;
+    config->recovery.spi = 0x7002u;
+    memcpy(config->recovery.nonce_prefix, "RECOVR", 6u);
+}
+
+static int init_ordinary(tcsec_context_t *context, const vector_t *vector, callbacks_t *callbacks) {
+    tcsec_config_t config;
+    ordinary_config(&config, vector);
+    return tcsec_init(context, &config, validate_plaintext, commit_state, callbacks) == TCSEC_OK;
+}
+
+static void recovery_config(tcsec_config_t *config, const vector_t *vector) {
+    memset(config, 0, sizeof(*config));
+    config->ordinary.spacecraft_id = vector->spacecraft_id;
+    config->ordinary.suite = vector->ordinary_suite;
+    memcpy(config->ordinary.operational_root, vector->ordinary_root, vector->ordinary_root_length);
+    config->ordinary.operational_root_length = vector->ordinary_root_length;
+    config->ordinary.root_version = vector->current_root_version;
+    config->ordinary.current_epoch = vector->security_epoch;
+    config->ordinary.current_spi = vector->current_spi;
+    memcpy(config->ordinary.nonce_prefix, "ORDNRY", 6u);
+    config->recovery.suite = vector->suite;
+    memcpy(config->recovery.recovery_root, vector->root, vector->root_length);
+    config->recovery.recovery_root_length = vector->root_length;
+    config->recovery.root_version = vector->root_version;
+    config->recovery.spi = vector->spi;
+    memcpy(config->recovery.nonce_prefix, vector->prefix, sizeof(config->recovery.nonce_prefix));
+}
+
+static int init_recovery(tcsec_context_t *context, const vector_t *vector, callbacks_t *callbacks) {
+    tcsec_config_t config;
+    recovery_config(&config, vector);
+    return tcsec_init(context, &config, validate_plaintext, commit_state, callbacks) == TCSEC_OK;
+}
+
+static int init_recovery_restored(tcsec_context_t *context, const vector_t *vector,
+                                  const tcsec_context_t *prepared, callbacks_t *callbacks) {
+    tcsec_config_t config;
+    recovery_config(&config, vector);
+    config.ordinary.pending_root_present = prepared->pending_root_present;
+    config.ordinary.pending_suite = prepared->next_suite;
+    memcpy(config.ordinary.pending_operational_root, prepared->pending_root,
+           prepared->pending_root_length);
+    config.ordinary.pending_operational_root_length = prepared->pending_root_length;
+    config.ordinary.pending_root_version = prepared->pending_root_version;
+    config.ordinary.pending_transaction_id = prepared->pending_transaction_id;
+    config.recovery.replay = prepared->recovery_replay;
+    return tcsec_init(context, &config, validate_plaintext, commit_state, callbacks) == TCSEC_OK;
 }
 
 static int test_nist_aes256_ctr(void) {
@@ -217,171 +319,179 @@ static int test_shared_kdf_vectors(void) {
            memcmp(output, sm4_expected, sizeof(sm4_expected)) == 0;
 }
 
-static int init_context(tcsec_context_t *context, const vector_t *vector, callbacks_t *callbacks) {
-    tcsec_key_config_t key;
-    tcsec_sa_config_t association;
-    memset(&key, 0, sizeof(key));
-    memset(&association, 0, sizeof(association));
-    key.slot = 0u;
-    key.suite = vector->suite;
-    memcpy(key.key, vector->key, vector->key_length);
-    association.spi = vector->spi;
-    association.key_slot = 0u;
-    association.profile = vector->suite == TCSEC_SUITE_AES_256_GCM || vector->suite == TCSEC_SUITE_SM4_GCM
-                              ? TCSEC_PROFILE_ROOT_RECOVERY : TCSEC_PROFILE_ORDINARY;
-    memcpy(association.nonce_prefix, vector->prefix, sizeof(association.nonce_prefix));
-    association.state = TCSEC_SA_ACTIVE;
-    return tcsec_init(context, &key, 1u, &association, 1u,
-                      validate_plaintext, persist_replay, commit_recovery, callbacks) == TCSEC_OK;
-}
-
-static int test_strict_key_configuration(void) {
-    tcsec_context_t context;
-    tcsec_key_config_t key;
-    tcsec_sa_config_t association;
-    callbacks_t callbacks = {0};
-    callbacks.accept_plaintext = 1;
-    callbacks.persist_success = 1;
-    memset(&key, 0, sizeof(key));
-    memset(&association, 0, sizeof(association));
-    key.slot = 0u;
-    association.spi = 1u;
-    association.key_slot = 0u;
-    association.profile = TCSEC_PROFILE_ORDINARY;
-    association.state = TCSEC_SA_ACTIVE;
-    if (tcsec_init(&context, &key, 1u, &association, 1u,
-                   validate_plaintext, persist_replay, NULL, &callbacks) != TCSEC_INVALID_CONFIGURATION) {
-        return 0;
-    }
-    key.suite = TCSEC_SUITE_SM4_CTR;
-    key.key[TCSEC_SM4_KEY_LENGTH] = 1u;
-    return tcsec_init(&context, &key, 1u, &association, 1u,
-                      validate_plaintext, persist_replay, NULL, &callbacks) == TCSEC_INVALID_CONFIGURATION;
-}
-
-static int test_interoperability_vector(const char *path) {
+static int test_strict_configuration(const char *path) {
     vector_t vector;
+    tcsec_config_t config;
+    tcsec_context_t context;
+    callbacks_t callbacks = {1, TCSEC_COMMIT_NEW, 0u, 0, 0u, 0u};
+    if (!load_vector(path, &vector)) return 0;
+    ordinary_config(&config, &vector);
+    config.ordinary.pending_root_present = 1u;
+    if (tcsec_init(&context, &config, validate_plaintext, commit_state, &callbacks) !=
+        TCSEC_INVALID_CONFIGURATION) return 0;
+    ordinary_config(&config, &vector);
+    config.ordinary.pending_root_version = 1u;
+    if (tcsec_init(&context, &config, validate_plaintext, commit_state, &callbacks) !=
+        TCSEC_INVALID_CONFIGURATION) return 0;
+    ordinary_config(&config, &vector);
+    config.ordinary.current_epoch = UINT32_MAX;
+    if (tcsec_init(&context, &config, validate_plaintext, commit_state, &callbacks) !=
+        TCSEC_INVALID_CONFIGURATION) return 0;
+    ordinary_config(&config, &vector);
+    config.recovery.spi = (uint16_t)(config.ordinary.current_spi + 1u);
+    return tcsec_init(&context, &config, validate_plaintext, commit_state, &callbacks) ==
+           TCSEC_INVALID_CONFIGURATION;
+}
+
+static int test_ordinary_vector(const char *path) {
+    vector_t vector;
+    callbacks_t callbacks = {1, TCSEC_COMMIT_NEW, 0u, 0, 0u, 0u};
     tcsec_context_t context;
     tcsec_result_t result;
-    callbacks_t callbacks = {0};
-    callbacks.accept_plaintext = 1;
-    callbacks.persist_success = 1;
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
+    uint8_t next_frame[TCSEC_MAX_FRAME_LENGTH];
     uint8_t corrupted[TCSEC_MAX_FRAME_LENGTH];
+    uint8_t far_frame[TCSEC_MAX_FRAME_LENGTH];
+    uint8_t next_key[TCSEC_MAX_KEY_LENGTH];
+    size_t next_length, far_length;
     tcsec_status_t status;
+    if (!load_vector(path, &vector) || !init_ordinary(&context, &vector, &callbacks)) return 0;
+    status = tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                           plaintext, sizeof(plaintext), &result);
+    if (status != TCSEC_OK || result.spi != vector.spi ||
+        callbacks.last_kind != TCSEC_COMMIT_ORDINARY_REPLAY ||
+        memcmp(plaintext, vector.plaintext, vector.plaintext_length) != 0) return 0;
+    if (tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      plaintext, sizeof(plaintext), &result) != TCSEC_REPLAY_REJECTED) return 0;
+    if (tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
+                                  vector.suite, (uint16_t)(vector.spi + 1u),
+                                  vector.security_epoch + 1u, vector.root_version,
+                                  next_key, sizeof(next_key)) != 0 ||
+        !build_ordinary_frame(vector.suite, next_key, vector.prefix,
+                              (uint16_t)(vector.spi + 1u), 1u, vector.plaintext,
+                              vector.plaintext_length, next_frame, &next_length)) return 0;
+    status = tcsec_receive(&context, next_frame, next_length, plaintext, sizeof(plaintext), &result);
+    if (status != TCSEC_EPOCH_PROMOTED || result.security_epoch != vector.security_epoch + 1u ||
+        callbacks.last_kind != TCSEC_COMMIT_EPOCH_PROMOTION || context.current_spi != vector.spi + 1u)
+        return 0;
+    if (tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      plaintext, sizeof(plaintext), &result) != TCSEC_ASSOCIATION_NOT_FOUND) return 0;
 
-    if (!load_vector(path, &vector)) {
-        fprintf(stderr, "failed to load interoperability vector: %s\n", path);
-        return 1;
-    }
-    if (!init_context(&context, &vector, &callbacks)) {
-        fprintf(stderr, "context initialization failed\n");
-        return 1;
-    }
-    status = tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
-                           plaintext, sizeof(plaintext), &result);
-    if (status != TCSEC_OK || result.spi != vector.spi || result.iv_counter != vector.iv_counter ||
-        result.suite != vector.suite || result.profile != TCSEC_PROFILE_ORDINARY ||
-        result.plaintext_length != vector.plaintext_length ||
-        memcmp(plaintext, vector.plaintext, vector.plaintext_length) != 0 ||
-        callbacks.persist_calls != 1u || callbacks.persisted_highest != vector.iv_counter) {
-        fprintf(stderr, "ground-to-flight vector failed: %s\n", tcsec_status_string(status));
-        return 1;
-    }
-    status = tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
-                           plaintext, sizeof(plaintext), &result);
-    if (status != TCSEC_REPLAY_REJECTED || callbacks.persist_calls != 1u) {
-        fprintf(stderr, "replay was not rejected\n");
-        return 1;
-    }
     memcpy(corrupted, vector.protected_frame, vector.protected_frame_length);
     corrupted[vector.protected_frame_length - 1u] ^= 1u;
-    if (!init_context(&context, &vector, &callbacks)) return 1;
-    status = tcsec_receive(&context, corrupted, vector.protected_frame_length,
-                           plaintext, sizeof(plaintext), &result);
-    if (status != TCSEC_FECF_INVALID) {
-        fprintf(stderr, "invalid FECF accepted\n");
-        return 1;
-    }
+    if (!init_ordinary(&context, &vector, &callbacks) ||
+        tcsec_receive(&context, corrupted, vector.protected_frame_length,
+                      plaintext, sizeof(plaintext), &result) != TCSEC_FECF_INVALID) return 0;
+
     callbacks.accept_plaintext = 0;
-    callbacks.persist_calls = 0u;
-    if (!init_context(&context, &vector, &callbacks)) return 1;
-    status = tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
-                           plaintext, sizeof(plaintext), &result);
-    if (status != TCSEC_PLAINTEXT_REJECTED || callbacks.persist_calls != 0u) {
-        fprintf(stderr, "rejected plaintext advanced replay state\n");
-        return 1;
-    }
+    callbacks.calls = 0u;
+    if (!init_ordinary(&context, &vector, &callbacks) ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      plaintext, sizeof(plaintext), &result) != TCSEC_PLAINTEXT_REJECTED ||
+        callbacks.calls != 0u) return 0;
+
     callbacks.accept_plaintext = 1;
-    callbacks.persist_success = 0;
-    callbacks.persist_calls = 0u;
+    callbacks.result = TCSEC_COMMIT_PERSISTENCE_FAILED;
+    callbacks.calls = 0u;
     memset(plaintext, 0xa5, sizeof(plaintext));
-    if (!init_context(&context, &vector, &callbacks)) return 1;
-    status = tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
-                           plaintext, sizeof(plaintext), &result);
-    if (status != TCSEC_PERSISTENCE_FAILED || callbacks.persist_calls != 1u || plaintext[0] != 0u) {
-        fprintf(stderr, "persistence failure released plaintext or state\n");
-        return 1;
-    }
+    if (!init_ordinary(&context, &vector, &callbacks) ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      plaintext, sizeof(plaintext), &result) != TCSEC_PERSISTENCE_FAILED ||
+        callbacks.calls != 1u || context.current_replay.seen != 0u || plaintext[0] != 0u) return 0;
+
+    callbacks.result = TCSEC_COMMIT_NEW;
+    if (tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
+                                  vector.suite, vector.spi, vector.security_epoch,
+                                  vector.root_version, next_key, sizeof(next_key)) != 0 ||
+        !build_ordinary_frame(vector.suite, next_key, vector.prefix, vector.spi,
+                              TCSEC_MAX_FORWARD_JUMP + 1u, vector.plaintext,
+                              vector.plaintext_length, far_frame, &far_length) ||
+        !init_ordinary(&context, &vector, &callbacks) ||
+        tcsec_receive(&context, far_frame, far_length, plaintext, sizeof(plaintext), &result) !=
+            TCSEC_IV_FORWARD_JUMP_REJECTED) return 0;
     tcsec_clear(&context);
-    return 0;
+    return 1;
+}
+
+static int test_spi_wrap(const char *path) {
+    vector_t vector;
+    tcsec_config_t config;
+    tcsec_context_t context;
+    tcsec_result_t result;
+    callbacks_t callbacks = {1, TCSEC_COMMIT_NEW, 0u, 0, 0u, 0u};
+    uint8_t next_key[TCSEC_MAX_KEY_LENGTH];
+    uint8_t frame[TCSEC_MAX_FRAME_LENGTH];
+    uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
+    size_t frame_length;
+    if (!load_vector(path, &vector)) return 0;
+    ordinary_config(&config, &vector);
+    config.ordinary.current_spi = UINT16_MAX;
+    if (tcsec_init(&context, &config, validate_plaintext, commit_state, &callbacks) != TCSEC_OK ||
+        tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
+                                  vector.suite, 0u, vector.security_epoch + 1u,
+                                  vector.root_version, next_key, sizeof(next_key)) != 0 ||
+        !build_ordinary_frame(vector.suite, next_key, vector.prefix, 0u, 1u,
+                              vector.plaintext, vector.plaintext_length,
+                              frame, &frame_length)) return 0;
+    if (tcsec_receive(&context, frame, frame_length, plaintext, sizeof(plaintext), &result) !=
+            TCSEC_EPOCH_PROMOTED || context.current_spi != 0u || result.spi != 0u ||
+        memcmp(plaintext, vector.plaintext, vector.plaintext_length) != 0) return 0;
+    tcsec_clear(&context);
+    return 1;
 }
 
 static int test_recovery_vector(const char *path) {
     vector_t vector;
+    callbacks_t callbacks = {1, TCSEC_COMMIT_NEW, 0u, 0, 0u, 0u};
     tcsec_context_t context;
     tcsec_result_t result;
-    callbacks_t callbacks = {0};
-    uint8_t ordinary_output[8];
+    uint8_t output[TCSEC_MAX_FRAME_LENGTH];
     uint8_t corrupted[TCSEC_MAX_FRAME_LENGTH];
+    uint8_t next_frame[TCSEC_MAX_FRAME_LENGTH];
+    uint8_t next_key[TCSEC_MAX_KEY_LENGTH];
+    static const uint8_t command[] = {0xca, 0xfe, 0x01, 0x02};
+    tcsec_context_t restored;
+    size_t next_length;
     uint16_t crc;
     tcsec_status_t status;
-    callbacks.accept_plaintext = 1;
-    callbacks.persist_success = 1;
-    callbacks.recovery_result = TCSEC_RECOVERY_COMMIT_NEW;
-    if (!load_vector(path, &vector) || !init_context(&context, &vector, &callbacks)) {
-        fprintf(stderr, "failed to initialize recovery vector: %s\n", path);
-        return 1;
-    }
-    memset(ordinary_output, 0xa5, sizeof(ordinary_output));
+    if (!load_vector(path, &vector) || !init_recovery(&context, &vector, &callbacks)) return 0;
     status = tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
-                           ordinary_output, sizeof(ordinary_output), &result);
-    if (status != TCSEC_RECOVERY_COMMITTED || result.profile != TCSEC_PROFILE_ROOT_RECOVERY ||
-        result.suite != vector.suite || result.plaintext_length != 0u ||
-        callbacks.recovery_calls != 1u || callbacks.transaction_id != 0x0102030405060708ULL ||
-        callbacks.persisted_highest != vector.iv_counter || ordinary_output[0] != 0xa5u) {
-        fprintf(stderr, "recovery vector failed: %s\n", tcsec_status_string(status));
-        return 1;
-    }
-    status = tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
-                           ordinary_output, sizeof(ordinary_output), &result);
-    if (status != TCSEC_REPLAY_REJECTED || callbacks.recovery_calls != 1u) {
-        fprintf(stderr, "recovery replay was not rejected\n");
-        return 1;
-    }
+                           output, sizeof(output), &result);
+    if (status != TCSEC_ROOT_PREPARED || callbacks.last_kind != TCSEC_COMMIT_ROOT_PREPARE ||
+        callbacks.transaction_id != 0x0102030405060708ULL || context.pending_root_present == 0u)
+        return 0;
+    if (tcsec_derive_ordinary_key(&vector.plaintext[TCSEC_ROOT_PREPARE_FIXED_LENGTH],
+                                  vector.plaintext_length - TCSEC_ROOT_PREPARE_FIXED_LENGTH,
+                                  vector.spacecraft_id, context.next_suite,
+                                  (uint16_t)(vector.current_spi + 1u), vector.security_epoch + 1u,
+                                  context.pending_root_version, next_key, sizeof(next_key)) != 0 ||
+        !build_ordinary_frame(context.next_suite, next_key, (const uint8_t *)"ORDNRY",
+                              (uint16_t)(vector.current_spi + 1u), 1u, command, sizeof(command),
+                              next_frame, &next_length) ||
+        !init_recovery_restored(&restored, &vector, &context, &callbacks)) return 0;
+    status = tcsec_receive(&restored, next_frame, next_length, output, sizeof(output), &result);
+    if (status != TCSEC_EPOCH_PROMOTED || restored.pending_root_present != 0u ||
+        restored.current_root_version != context.pending_root_version ||
+        memcmp(output, command, sizeof(command)) != 0) return 0;
+    tcsec_clear(&restored);
     memcpy(corrupted, vector.protected_frame, vector.protected_frame_length);
     corrupted[TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH] ^= 1u;
     crc = frame_crc(corrupted, vector.protected_frame_length - TCSEC_FECF_LENGTH);
     corrupted[vector.protected_frame_length - 2u] = (uint8_t)(crc >> 8);
     corrupted[vector.protected_frame_length - 1u] = (uint8_t)crc;
-    callbacks.recovery_calls = 0u;
-    if (!init_context(&context, &vector, &callbacks)) return 1;
+    callbacks.calls = 0u;
+    if (!init_recovery(&context, &vector, &callbacks)) return 0;
     status = tcsec_receive(&context, corrupted, vector.protected_frame_length,
-                           ordinary_output, sizeof(ordinary_output), &result);
-    if (status != TCSEC_AUTHENTICATION_FAILED || callbacks.recovery_calls != 0u) {
-        fprintf(stderr, "modified authenticated recovery was accepted: %s\n", tcsec_status_string(status));
-        return 1;
-    }
-    callbacks.recovery_result = TCSEC_RECOVERY_COMMIT_PERSISTENCE_FAILED;
-    if (!init_context(&context, &vector, &callbacks)) return 1;
+                           output, sizeof(output), &result);
+    if (status != TCSEC_AUTHENTICATION_FAILED || callbacks.calls != 0u) return 0;
+    callbacks.result = TCSEC_COMMIT_PERSISTENCE_FAILED;
+    if (!init_recovery(&context, &vector, &callbacks)) return 0;
     status = tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
-                           ordinary_output, sizeof(ordinary_output), &result);
-    if (status != TCSEC_PERSISTENCE_FAILED || context.associations[0].replay_seen != 0u) {
-        fprintf(stderr, "recovery persistence failure advanced volatile replay state\n");
-        return 1;
-    }
+                           output, sizeof(output), &result);
+    if (status != TCSEC_PERSISTENCE_FAILED || context.recovery_replay.seen != 0u ||
+        context.pending_root_present != 0u) return 0;
     tcsec_clear(&context);
-    return 0;
+    return 1;
 }
 
 int main(int argc, char **argv) {
@@ -402,18 +512,26 @@ int main(int argc, char **argv) {
         fprintf(stderr, "CMAC counter KDF shared vector failed\n");
         return 1;
     }
-    if (!test_strict_key_configuration()) {
-        fprintf(stderr, "invalid key configuration was accepted\n");
+    if (!test_strict_configuration(argv[1])) {
+        fprintf(stderr, "invalid TC configuration was accepted\n");
+        return 1;
+    }
+    if (!test_spi_wrap(argv[1])) {
+        fprintf(stderr, "full 16-bit SPI wrap test failed\n");
         return 1;
     }
     for (index = 1; index < 3; ++index) {
-        if (test_interoperability_vector(argv[index]) != 0) {
+        if (!test_ordinary_vector(argv[index])) {
+            fprintf(stderr, "ordinary automatic epoch vector failed: %s\n", argv[index]);
             return 1;
         }
     }
     for (index = 3; index < argc; ++index) {
-        if (test_recovery_vector(argv[index]) != 0) return 1;
+        if (!test_recovery_vector(argv[index])) {
+            fprintf(stderr, "authenticated root prepare vector failed: %s\n", argv[index]);
+            return 1;
+        }
     }
-    printf("ordinary CTR and authenticated recovery GCM interoperability tests passed\n");
+    printf("TC Current/Next auto-promotion and Recovery GCM tests passed\n");
     return 0;
 }

@@ -9,214 +9,48 @@ import (
 	"github.com/kvlt/key-vault/internal/auth/principal"
 )
 
-func TestAPIAccessPlaneAndScopeMatrix(t *testing.T) {
+func TestAPIAccessStrictCCSDSMatrix(t *testing.T) {
 	tests := []struct {
-		name       string
-		method     string
-		path       string
-		principal  *principal.Principal
-		wantStatus int
+		name, method, path string
+		principal          *principal.Principal
+		want               int
 	}{
-		{
-			name:   "data plane can encrypt with crypto scope",
-			method: http.MethodPost,
-			path:   "/ui/api/v1/crypto/encrypt",
-			principal: &principal.Principal{
-				Plane:  principal.PlaneData,
-				Scopes: []string{"crypto:encrypt"},
-			},
-			wantStatus: http.StatusNoContent,
-		},
-		{
-			name:   "management plane cannot encrypt even with crypto scope",
-			method: http.MethodPost,
-			path:   "/ui/api/v1/crypto/encrypt",
-			principal: &principal.Principal{
-				Plane:  principal.PlaneManagement,
-				Scopes: []string{"crypto:encrypt"},
-			},
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:   "explicit multi-plane test principal can encrypt",
-			method: http.MethodPost,
-			path:   "/ui/api/v1/crypto/encrypt",
-			principal: &principal.Principal{
-				Plane:  principal.PlaneManagement,
-				Planes: []principal.Plane{principal.PlaneManagement, principal.PlaneData, principal.PlaneOps},
-				Scopes: []string{"crypto:encrypt"},
-			},
-			wantStatus: http.StatusNoContent,
-		},
-		{
-			name:   "data plane missing decrypt scope is denied",
-			method: http.MethodPost,
-			path:   "/ui/api/v1/crypto/decrypt",
-			principal: &principal.Principal{
-				Plane:  principal.PlaneData,
-				Scopes: []string{"crypto:encrypt"},
-			},
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:       "data plane can inspect and convert with decrypt scope",
-			method:     http.MethodPost,
-			path:       "/ui/api/v1/crypto/envelopes:inspect",
-			principal:  &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"crypto:decrypt"}},
-			wantStatus: http.StatusNoContent,
-		},
-		{
-			name:       "data plane can convert with decrypt scope",
-			method:     http.MethodPost,
-			path:       "/ui/api/v1/crypto/envelopes:convert",
-			principal:  &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"crypto:decrypt"}},
-			wantStatus: http.StatusNoContent,
-		},
-		{
-			name:       "data plane can authenticate with dedicated scope",
-			method:     http.MethodPost,
-			path:       "/ui/api/v1/crypto/authenticate",
-			principal:  &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"crypto:authenticate"}},
-			wantStatus: http.StatusNoContent,
-		},
-		{
-			name:       "authenticate scope cannot verify",
-			method:     http.MethodPost,
-			path:       "/ui/api/v1/crypto/verify",
-			principal:  &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"crypto:authenticate"}},
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:   "data plane cannot list keys",
-			method: http.MethodGet,
-			path:   "/ui/api/v1/keys",
-			principal: &principal.Principal{
-				Plane:  principal.PlaneData,
-				Scopes: []string{"keys:read"},
-			},
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:   "management plane can list keys with key read scope",
-			method: http.MethodGet,
-			path:   "/ui/api/v1/keys",
-			principal: &principal.Principal{
-				Plane:  principal.PlaneManagement,
-				Scopes: []string{"keys:read"},
-			},
-			wantStatus: http.StatusNoContent,
-		},
-		{
-			name:       "management plane can archive destroyed key with destroy scope",
-			method:     http.MethodPost,
-			path:       "/ui/api/v1/keys/key-1/archive",
-			principal:  &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"keys:destroy"}},
-			wantStatus: http.StatusNoContent,
-		},
-		{
-			name:       "management plane cannot archive destroyed key with read scope",
-			method:     http.MethodPost,
-			path:       "/ui/api/v1/keys/key-1/archive",
-			principal:  &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"keys:read"}},
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:   "ops plane can read crk envelope with ops scope",
-			method: http.MethodGet,
-			path:   "/ui/api/v1/ops/crk/envelope",
-			principal: &principal.Principal{
-				Plane:  principal.PlaneOps,
-				Scopes: []string{"ops:read"},
-			},
-			wantStatus: http.StatusNoContent,
-		},
-		{
-			name:   "test super admin can read crk envelope with ops plane grant",
-			method: http.MethodGet,
-			path:   "/ui/api/v1/ops/crk/envelope",
-			principal: &principal.Principal{
-				Plane:  principal.PlaneManagement,
-				Planes: []principal.Plane{principal.PlaneManagement, principal.PlaneData, principal.PlaneOps},
-				Scopes: []string{"ops:read"},
-			},
-			wantStatus: http.StatusNoContent,
-		},
-		{
-			name:   "management plane cannot repair crk envelope",
-			method: http.MethodPost,
-			path:   "/ui/api/v1/ops/crk/envelope:repair-aad-digest",
-			principal: &principal.Principal{
-				Plane:  principal.PlaneManagement,
-				Scopes: []string{"ops:repair", "keys:manage"},
-			},
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:   "ops plane missing repair scope is denied",
-			method: http.MethodPost,
-			path:   "/ui/api/v1/ops/crk/envelope:repair-aad-digest",
-			principal: &principal.Principal{
-				Plane:  principal.PlaneOps,
-				Scopes: []string{"ops:read"},
-			},
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:       "ordinary repair scope cannot use breakglass route",
-			method:     http.MethodPost,
-			path:       "/ui/api/v1/ops/breakglass/lifecycle/jobs/job-1/retry",
-			principal:  &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ops:repair"}},
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:       "management plane cannot use breakglass even with scope",
-			method:     http.MethodPost,
-			path:       "/ui/api/v1/ops/breakglass/lifecycle/jobs/job-1/retry",
-			principal:  &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"ops:breakglass"}},
-			wantStatus: http.StatusForbidden,
-		},
-		{
-			name:       "ops breakglass principal reaches whitelisted route",
-			method:     http.MethodPost,
-			path:       "/ui/api/v1/ops/breakglass/lifecycle/jobs/job-1/retry",
-			principal:  &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ops:breakglass"}},
-			wantStatus: http.StatusNoContent,
-		},
+		{"TC protect", http.MethodPost, "/ui/api/v1/ccsds/tc:protect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:tc:protect"}}, 204},
+		{"AOS unprotect", http.MethodPost, "/ui/api/v1/ccsds/aos:unprotect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:aos:unprotect"}}, 204},
+		{"wrong data scope", http.MethodPost, "/ui/api/v1/ccsds/tc:protect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:aos:unprotect"}}, 403},
+		{"wrong plane", http.MethodPost, "/ui/api/v1/ccsds/tc:protect", &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"ccsds:tc:protect"}}, 403},
+		{"audit read", http.MethodGet, "/ui/api/v1/audit/events", &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"audit:read"}}, 204},
+		{"audit delete removed", http.MethodDelete, "/ui/api/v1/audit/events", &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"audit:read"}}, 403},
+		{"ops health", http.MethodGet, "/ui/api/v1/ops/health", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ops:read"}}, 204},
+		{"ops database", http.MethodGet, "/ui/api/v1/ops/db/status", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ops:read"}}, 204},
+		{"ops CCSDS", http.MethodGet, "/ui/api/v1/ops/ccsds/status", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ops:read"}}, 204},
+		{"old crypto removed", http.MethodPost, "/ui/api/v1/crypto/encrypt", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"crypto:encrypt"}}, 403},
+		{"old keys removed", http.MethodGet, "/ui/api/v1/keys", &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"keys:read"}}, 403},
+		{"old repair removed", http.MethodPost, "/ui/api/v1/ops/crk/envelope:repair-aad-digest", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ops:repair"}}, 403},
 	}
 
-	next := APIAccess(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	}))
+	next := APIAccess(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }))
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(tt.method, tt.path, nil)
-			ctx := context.WithValue(req.Context(), ctxKeyPrincipal, tt.principal)
+			req = req.WithContext(context.WithValue(req.Context(), ctxKeyPrincipal, tt.principal))
 			rec := httptest.NewRecorder()
-
-			next.ServeHTTP(rec, req.WithContext(ctx))
-
-			if rec.Code != tt.wantStatus {
-				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			next.ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tt.want, rec.Body.String())
 			}
 		})
 	}
 }
 
 func TestAPIAccessRejectsUnassignedAPIRoute(t *testing.T) {
-	next := APIAccess(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatal("next handler should not be called")
-	}))
+	next := APIAccess(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("next called") }))
 	req := httptest.NewRequest(http.MethodGet, "/ui/api/v1/unassigned", nil)
-	ctx := context.WithValue(req.Context(), ctxKeyPrincipal, &principal.Principal{
-		Plane:  principal.PlaneManagement,
-		Scopes: []string{"tenant:manage"},
-	})
+	req = req.WithContext(context.WithValue(req.Context(), ctxKeyPrincipal, &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"audit:read"}}))
 	rec := httptest.NewRecorder()
-
-	next.ServeHTTP(rec, req.WithContext(ctx))
-
+	next.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+		t.Fatalf("status = %d, want 403", rec.Code)
 	}
 }
 
@@ -230,16 +64,15 @@ func TestDecodeJSONStrictRejectsDuplicateFieldsAtEveryLevel(t *testing.T) {
 		Entries  []entry          `json:"entries"`
 		Profiles map[string]entry `json:"profiles"`
 	}
-	tests := []string{
+	for _, body := range []string{
 		`{"name":"a","name":"b","nested":{"value":"x"},"entries":[],"profiles":{}}`,
 		`{"name":"a","nested":{"value":"x","value":"y"},"entries":[],"profiles":{}}`,
 		`{"name":"a","nested":{"value":"x"},"entries":[{"value":"x","value":"y"}],"profiles":{}}`,
 		`{"name":"a","nested":{"value":"x"},"entries":[],"profiles":{"p":{"value":"x","value":"y"}}}`,
-	}
-	for _, body := range tests {
+	} {
 		var got payload
 		if err := DecodeJSONStrict([]byte(body), &got); err == nil {
-			t.Fatalf("expected duplicate rejection for %s", body)
+			t.Fatalf("accepted duplicate: %s", body)
 		}
 	}
 }

@@ -13,13 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kvlt/key-vault/internal/api/admin"
-	"github.com/kvlt/key-vault/internal/api/baselineapi"
-	cryptoapi "github.com/kvlt/key-vault/internal/api/crypto"
-	keytransferapi "github.com/kvlt/key-vault/internal/api/keytransfer"
+	"github.com/kvlt/key-vault/internal/api/auditapi"
+	ccsdsapi "github.com/kvlt/key-vault/internal/api/ccsds"
 	"github.com/kvlt/key-vault/internal/api/middleware"
 	"github.com/kvlt/key-vault/internal/api/ops"
-	tenantapi "github.com/kvlt/key-vault/internal/api/tenant"
 	"github.com/kvlt/key-vault/internal/auth/hmacsign"
 	"github.com/kvlt/key-vault/internal/auth/jwt"
 	"github.com/kvlt/key-vault/internal/auth/principal"
@@ -35,16 +32,13 @@ type Server struct {
 
 // Deps bundles the server dependencies.
 type Deps struct {
-	Cfg                *config.Config
-	AdminHandler       *admin.Handler
-	CryptoHandler      *cryptoapi.Handler
-	BaselineHandler    *baselineapi.Handler
-	OpsHandler         *ops.Handler
-	TenantHandler      *tenantapi.Handler
-	KeyTransferHandler *keytransferapi.Handler
-	JWTVerifier        *jwt.Verifier
-	HMACVerifier       *hmacsign.Verifier
-	StaticTokens       map[string]*principal.Principal
+	Cfg          *config.Config
+	CCSDSHandler *ccsdsapi.Handler
+	AuditHandler *auditapi.Handler
+	OpsHandler   *ops.Handler
+	JWTVerifier  *jwt.Verifier
+	HMACVerifier *hmacsign.Verifier
+	StaticTokens map[string]*principal.Principal
 }
 
 // New constructs one plane-scoped server with all transport and request
@@ -61,18 +55,14 @@ func New(deps Deps) (*Server, error) {
 	case "data":
 		registerDataRoutes(mux, deps)
 	case "ops":
-		if deps.OpsHandler != nil {
-			deps.OpsHandler.Routes(mux)
-		}
+		registerOpsRoutes(mux, deps)
 	case "all":
 		if deps.Cfg.Environment == "production" {
 			return nil, fmt.Errorf("server: all-plane listener is forbidden in production")
 		}
 		registerManagementRoutes(mux, deps)
 		registerDataRoutes(mux, deps)
-		if deps.OpsHandler != nil {
-			deps.OpsHandler.Routes(mux)
-		}
+		registerOpsRoutes(mux, deps)
 	default:
 		return nil, fmt.Errorf("server: unsupported active plane %q", deps.Cfg.Server.ActivePlane)
 	}
@@ -98,7 +88,7 @@ func New(deps Deps) (*Server, error) {
 	var handler http.Handler = mux
 	authMiddleware := middleware.Auth(authCfg)
 	admitted := middleware.CapacityGuard(middleware.CapacityConfig{
-		Window: deps.Cfg.Nonce.RateWindow, SigmaThreshold: deps.Cfg.Nonce.RateSigmaThreshold,
+		Window: deps.Cfg.TrafficGuard.RateWindow, SigmaThreshold: deps.Cfg.TrafficGuard.RateSigmaThreshold,
 	})(handler)
 	// Wrap auth so healthz and /ui/ static assets bypass authentication.
 	// /ui/api/ paths must still go through auth.
@@ -162,30 +152,24 @@ func New(deps Deps) (*Server, error) {
 }
 
 func registerManagementRoutes(mux *http.ServeMux, deps Deps) {
-	if deps.AdminHandler != nil {
-		deps.AdminHandler.Routes(mux)
-	}
-	if deps.BaselineHandler != nil {
-		deps.BaselineHandler.ManagementRoutes(mux)
-	}
-	if deps.TenantHandler != nil {
-		deps.TenantHandler.ManagementRoutes(mux)
-	}
-	if deps.KeyTransferHandler != nil {
-		deps.KeyTransferHandler.Routes(mux)
+	if deps.AuditHandler != nil {
+		deps.AuditHandler.Routes(mux)
 	}
 	mux.Handle("GET /ui/", http.StripPrefix("/ui", web.Handler()))
 }
 
 func registerDataRoutes(mux *http.ServeMux, deps Deps) {
-	if deps.CryptoHandler != nil {
-		deps.CryptoHandler.Routes(mux)
+	if deps.CCSDSHandler != nil {
+		deps.CCSDSHandler.Routes(mux)
 	}
-	if deps.BaselineHandler != nil {
-		deps.BaselineHandler.DataRoutes(mux)
+}
+
+func registerOpsRoutes(mux *http.ServeMux, deps Deps) {
+	if deps.OpsHandler != nil {
+		deps.OpsHandler.Routes(mux)
 	}
-	if deps.TenantHandler != nil {
-		deps.TenantHandler.DataRoutes(mux)
+	if deps.CCSDSHandler != nil {
+		deps.CCSDSHandler.OpsRoutes(mux)
 	}
 }
 

@@ -2,24 +2,41 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Lock, ArrowRight, Sun, Moon } from "lucide-react";
 import { useAuth, useTheme } from "../lib/store";
+import { api, HttpError } from "../lib/api";
+import { apiPaths } from "../lib/apiPaths";
 
 export function LoginPage() {
-  const { setToken, setTenantId, token } = useAuth();
+  const { setToken, setTenantId, logout, token } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const [input, setInput] = useState(token ?? "");
   const [tenant, setTenant] = useState("");
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const navigate = useNavigate();
 
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) {
       setError("token required");
       return;
     }
+    setError("");
+    setSubmitting(true);
     setToken(input.trim());
     setTenantId(tenant.trim() || "t-default");
-    navigate("/ui/dashboard");
+    try {
+      await api.get(apiPaths.ops.ccsdsStatus);
+      navigate("/ui/dashboard");
+    } catch (cause) {
+      logout();
+      if (cause instanceof HttpError && (cause.status === 401 || cause.status === 403)) {
+        setError("authentication failed or console access is not permitted");
+      } else {
+        setError("operations service unavailable; try again after connectivity is restored");
+      }
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -73,7 +90,7 @@ export function LoginPage() {
             className="font-display"
             style={{ fontSize: 40, fontWeight: 800, color: "var(--accent-bright)", lineHeight: 1, textShadow: "0 0 28px var(--accent-glow)" }}
           >
-            kvlt
+            CCSDS
           </div>
           <div
             style={{
@@ -85,12 +102,12 @@ export function LoginPage() {
               marginTop: 10,
             }}
           >
-            key vault / engineering baseline
+            mission security / ground console
           </div>
         </div>
         <form onSubmit={submit}>
           <div style={{ marginBottom: 16 }}>
-            <label className="input-label">Static Token</label>
+            <label className="input-label">Access Token</label>
             <div style={{ position: "relative" }}>
               <Lock
                 size={14}
@@ -114,7 +131,7 @@ export function LoginPage() {
             </div>
           </div>
           <div style={{ marginBottom: 20 }}>
-            <label className="input-label">Tenant ID</label>
+            <label className="input-label">Mission / Tenant ID</label>
             <input
               className="input"
               value={tenant}
@@ -134,8 +151,8 @@ export function LoginPage() {
               {error}
             </div>
           )}
-          <button type="submit" className="btn btn-primary" style={{ width: "100%" }}>
-            Authenticate
+          <button type="submit" className="btn btn-primary" style={{ width: "100%" }} disabled={submitting}>
+            {submitting ? "Authenticating..." : "Authenticate"}
             <ArrowRight size={14} />
           </button>
         </form>
@@ -149,12 +166,9 @@ export function LoginPage() {
             lineHeight: 1.8,
           }}
         >
-          supported: static token / jwt / hmac
-          <br />
-          baseline auth / no mTLS
+          authenticated control-plane access
         </div>
       </div>
     </div>
   );
 }
-

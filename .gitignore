@@ -4,16 +4,69 @@
 .cache/
 .gocache/
 .superpowers/
+.pnpm-store/
+.docx-work/
+
+# OS and editor leftovers
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+~$*.docx
+
+# Local configuration and secret material
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.key
+*.pem
+*.p12
+*.pfx
+.ssh/
+secrets/
 
 # Local Docker/offline build artifacts
 p0/.docker/
 p1/.docker/
+.docker/
+/baseline/state/
+
+# Runtime databases and journals
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
 
 # Go build/test artifacts
 *.exe
 *.test
 *.out
 coverage.out
+coverage/
+coverage.*
+coverage-*
+.coverage
+.coverage.*
+htmlcov/
+*.coverprofile
+*.prof
+*.pprof
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+core
+core.*
 bin/
 build/
 dist/
@@ -25,3 +78,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+playwright-report/
+test-results/
+blob-report/
+
+# Python tooling used by document and analysis workflows
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

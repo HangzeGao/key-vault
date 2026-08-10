@@ -10,10 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kvlt/key-vault/internal/api/admin"
-	"github.com/kvlt/key-vault/internal/api/baselineapi"
-	cryptoapi "github.com/kvlt/key-vault/internal/api/crypto"
-	keytransferapi "github.com/kvlt/key-vault/internal/api/keytransfer"
+	"github.com/kvlt/key-vault/internal/api/auditapi"
+	ccsdsapi "github.com/kvlt/key-vault/internal/api/ccsds"
 	"github.com/kvlt/key-vault/internal/api/ops"
 	"github.com/kvlt/key-vault/internal/api/server"
 	"github.com/kvlt/key-vault/internal/bootstrap"
@@ -53,39 +51,20 @@ func main() {
 	}
 	defer app.Store.Close()
 
-	// Lifecycle mutation is owned by the management plane. Data and Ops
-	// processes keep the dependency available for read-only diagnostics but do
-	// not run duplicate schedulers.
-	workerStarted := cfg.Server.ActivePlane == "management" || cfg.Server.ActivePlane == "all"
-	if workerStarted {
-		app.Worker.Start(ctx)
-		defer app.Worker.Stop()
-	}
-
-	adminH := admin.New(app.KeyService)
-	cryptoH := cryptoapi.New(app.CryptoService)
-	keyTransferH := keytransferapi.New(app.KeyTransferService)
-	baselineH := baselineapi.New(app.AuditChain, app.PolicyMgr, app.Worker, app.CryptoService, app.Resolver, app.Store, cfg)
+	ccsdsH := ccsdsapi.New(app.CCSDSFrameSecurity)
+	auditH := auditapi.New(app.AuditChain)
 	opsH := ops.New(ops.Deps{
-		Store:      app.Store,
-		Resolver:   app.Resolver,
-		AuditChain: app.AuditChain,
-		PolicyMgr:  app.PolicyMgr,
-		Worker:     app.Worker,
-		Cfg:        cfg,
+		Store: app.Store, Resolver: app.Resolver, Policies: app.Policies,
 	})
 
 	srv, err := server.New(server.Deps{
-		Cfg:                cfg,
-		AdminHandler:       adminH,
-		CryptoHandler:      cryptoH,
-		BaselineHandler:    baselineH,
-		OpsHandler:         opsH,
-		TenantHandler:      app.TenantHandler,
-		KeyTransferHandler: keyTransferH,
-		JWTVerifier:        app.JWTVerifier,
-		HMACVerifier:       app.HMACVerifier,
-		StaticTokens:       app.StaticTokens,
+		Cfg:          cfg,
+		CCSDSHandler: ccsdsH,
+		AuditHandler: auditH,
+		OpsHandler:   opsH,
+		JWTVerifier:  app.JWTVerifier,
+		HMACVerifier: app.HMACVerifier,
+		StaticTokens: app.StaticTokens,
 	})
 	if err != nil {
 		slog.Error("server initialization failed", "error", err)

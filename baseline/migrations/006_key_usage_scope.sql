@@ -1,5 +1,0 @@
-ALTER TABLE keys ADD COLUMN IF NOT EXISTS usage_scope TEXT NOT NULL DEFAULT 'GENERIC';
-ALTER TABLE keys DROP CONSTRAINT IF EXISTS keys_usage_scope_check;
-ALTER TABLE keys ADD CONSTRAINT keys_usage_scope_check
-    CHECK (usage_scope IN ('GENERIC', 'PROTOCOL'));
-ALTER TABLE keys ALTER COLUMN usage_scope DROP DEFAULT;

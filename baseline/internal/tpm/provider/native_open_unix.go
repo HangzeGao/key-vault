@@ -9,6 +9,8 @@ import (
 )
 
 func openNativeTPM(tcti string) (io.ReadWriteCloser, error) {
-	if tcti == "" { tcti = "/dev/tpmrm0" }
+	if tcti == "" {
+		tcti = "/dev/tpmrm0"
+	}
 	return legacy.OpenTPM(tcti)
 }

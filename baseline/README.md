@@ -1,78 +1,63 @@
-# KVLT Key Vault - Engineering Baseline
+# CCSDS Ground Cryptographic System
 
-This directory contains the single engineering baseline implementation for the TPM 2.0 based key vault. The repository no longer maintains separate staged application trees.
+This repository is the pre-production ground implementation for mission-scoped
+CCSDS link security. Its public contract is intentionally small:
 
-Implemented baseline capabilities:
+- TC frame-data-field protection with ordinary CTR and Recovery GCM profiles.
+- AOS transfer-frame authenticated decryption with GCM.
+- Offline creation of protocol roots and Security Associations.
+- Read-only audit, health, database, and association operations views.
+- TPM-sealed Cryptographic Root Key (CRK); protocol roots are persisted only as wrapped material.
+- One local SQLite `SecurityState` store for associations, counters, replay windows, sealed envelopes, and audit chains.
 
-- Key lifecycle: create, import path, query, enable, disable, rotate, and schedule destroy.
-- Server-side encryption/decryption and detached authentication/verification.
-- A closed service mapping: `AUTH_ONLY` → CMAC, `ENCRYPT_ONLY` → CTR, and
-  `AUTH_ENCRYPT` → GCM, for both AES and SM4 suites.
-- Envelope v1 and canonical AAD.
-- TPM-backed key boundary: plaintext key material is not returned by API responses.
-- Protocol-neutral Key Encryption Key (KEK) upload/download with staged confirmation and activation.
-- Process-scoped HTTP route isolation for management, data, and ops planes,
-  plus internal key-resolver and audit module boundaries.
-- Hash-chained audit, lifecycle worker, signed policy reload, and tenant envelope configuration.
-- Embedded React UI served under `/ui/`.
+Generic key CRUD, arbitrary-data crypto, key upload/download, lifecycle jobs,
+outbox processing, PostgreSQL, and volatile repository modes are not part of
+the current contract.
 
-Current engineering limits:
+## Start
 
-- The in-memory repository is suitable for the current baseline and automated verification, not for durable production storage.
-- Static demo tokens are for isolated development only.
-- Trusted-node and attestation workflows are intentionally not part of this baseline.
-- Client DataKey or plaintext key export is intentionally not provided.
-- A separately deployed Key Plane, transactional CRK rotation, and node-specific
-  CRK envelope distribution remain production blockers. See
-  [Production Security Gate](docs/PRODUCTION_SECURITY.md).
-
-## Docker
-
-```powershell
-cd baseline
-docker compose up --build -d
-docker compose ps
+```bash
+bash start.sh provision-ccsds
+bash start.sh
 ```
 
-Open <http://localhost:8080/ui/login>.
+`start.sh` keeps all durable engineering state below `baseline/state/` by
+default. Override the directory with `KVLT_STATE_DIR`, or only the database
+file with `KVLT_STATE_DB`. No runtime state is placed in `/tmp`.
 
-This Compose profile is development-only. It intentionally uses plain HTTP,
-static tokens, and a non-production TPM provider.
+Open <http://localhost:8080/ui/login>. Development credentials are:
 
-Demo tokens:
-
-| Plane | Token |
+| Purpose | Token |
 | --- | --- |
-| Management | `admin-token-baseline` |
-| Data | `data-token-baseline` |
-| Ops | `ops-token-baseline` |
-| Management + Data + Ops | `admin-data-token-baseline` |
+| TC protect / AOS unprotect | `mission-data-token-baseline` |
+| Mission operations console | `mission-console-token-baseline` |
 
-## Local Build
+These static tokens, plain HTTP, and shell TPM access are development-only.
+
+## Verify
 
 ```powershell
-cd baseline
+$env:GOCACHE="$PWD/.cache/go-build"
 go test ./...
 
 cd web/frontend
 npm ci
+npm run test
 npm run build
 ```
 
-Production configuration shape: [config.production.example.yaml](config.production.example.yaml).
-Protection-mode contracts and examples: [Crypto Modes](docs/CRYPTO_MODES.md).
+## HTTP Contract
 
-## HTTP Entry Points
-
-| Entry point | Description |
+| Entry point | Purpose |
 | --- | --- |
-| `GET /healthz` | Unauthenticated health check |
-| `GET /ui/login` | Embedded web UI |
-| `/ui/api/v1/keys` | Management API |
-| `/ui/api/v1/key-uploads*` | KEK key upload management API |
-| `/ui/api/v1/key-downloads*` | KEK key download/import management API |
-| `/ui/api/v1/crypto/*` | Data-plane crypto API |
-| `/ui/api/v1/audit/*` | Audit API |
-| `/ui/api/v1/policies*` | Policy governance API |
-| `/ui/api/v1/lifecycle/*` | Lifecycle worker status API |
-| `/ui/api/v1/ops/*` | Ops-plane database operations API |
+| `GET /healthz` | Process liveness |
+| `POST /ui/api/v1/ccsds/tc:protect` | Protect one TC frame data field |
+| `POST /ui/api/v1/ccsds/aos:unprotect` | Authenticate and decrypt one AOS frame |
+| `GET /ui/api/v1/audit/*` | Read and verify audit chains |
+| `GET /ui/api/v1/ops/health` | TPM, policy, and SQLite readiness |
+| `GET /ui/api/v1/ops/db/status` | Redacted local-state diagnostics |
+| `GET /ui/api/v1/ops/ccsds/status` | Security Association and counter state |
+
+See [CCSDS Link Security](docs/CCSDS_LINK_SECURITY.md),
+[Ground/Flight Architecture](docs/TC_GROUND_FLIGHT_ARCHITECTURE.md), and
+[Production Security Gate](docs/PRODUCTION_SECURITY.md).

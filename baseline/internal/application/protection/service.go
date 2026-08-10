@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kvlt/key-vault/internal/crypto/aead"
+	"github.com/kvlt/key-vault/internal/crypto/kdf"
 	cryptomac "github.com/kvlt/key-vault/internal/crypto/mac"
 	"github.com/kvlt/key-vault/internal/crypto/suite"
 	keystate "github.com/kvlt/key-vault/internal/domain/key/state"
@@ -59,6 +60,13 @@ type ProtectResult struct {
 	ServiceType   suite.ServiceType
 }
 
+// Derivation fixes the protocol-owned CMAC counter KDF inputs. The root never
+// leaves the protection core; only the derived working key reaches the cipher.
+type Derivation struct {
+	Label   []byte
+	Context []byte
+}
+
 // UnprotectRequest identifies the exact historical decision recorded by the
 // protocol security context.
 type UnprotectRequest struct {
@@ -94,6 +102,20 @@ func New(store Store, leaser KeyLeaser, policies *policy.Engine, maxData int) *S
 }
 
 func (s *Service) Protect(ctx context.Context, req ProtectRequest) (*ProtectResult, error) {
+	return s.protect(ctx, req, nil)
+}
+
+// ProtectDerived derives an epoch-bound working key from the protocol-scoped
+// root identified by req, then protects the data without persisting or leasing
+// the derived key outside this operation.
+func (s *Service) ProtectDerived(ctx context.Context, req ProtectRequest, derivation Derivation) (*ProtectResult, error) {
+	if len(derivation.Label) == 0 || len(derivation.Context) == 0 {
+		return nil, errorsx.New(errorsx.CodeInvalidArgument, "derivation label and context are required", false)
+	}
+	return s.protect(ctx, req, &derivation)
+}
+
+func (s *Service) protect(ctx context.Context, req ProtectRequest, derivation *Derivation) (*ProtectResult, error) {
 	if req.TenantID == "" || req.KeyID == "" || req.KeyVersion == 0 || req.PolicyVersion == 0 {
 		return nil, errorsx.New(errorsx.CodeInvalidArgument, "tenant_id, key_id, key_version, and policy_version are required", false)
 	}
@@ -135,6 +157,14 @@ func (s *Service) Protect(ctx context.Context, req ProtectRequest) (*ProtectResu
 		return nil, errorsx.Wrap(errorsx.CodeTPMUnavailable, "key lease failed", true, err)
 	}
 	defer zeroize(lease.DEK)
+	keyMaterial := lease.DEK
+	if derivation != nil {
+		keyMaterial, err = kdf.CMACCounter(lease.DEK, suiteID, derivation.Label, derivation.Context)
+		if err != nil {
+			return nil, errorsx.Wrap(errorsx.CodeInternal, "working key derivation failed", false, err)
+		}
+		defer zeroize(keyMaterial)
+	}
 
 	result := &ProtectResult{
 		KeyVersion: req.KeyVersion, PolicyVersion: req.PolicyVersion,
@@ -150,10 +180,10 @@ func (s *Service) Protect(ctx context.Context, req ProtectRequest) (*ProtectResu
 	switch suiteID.ServiceType() {
 	case suite.ServiceAuthOnly:
 		result.Data = append([]byte(nil), req.Data...)
-		result.Tag, err = cryptomac.ComputeRaw(suiteID, lease.DEK, req.AuthenticationInput)
+		result.Tag, err = cryptomac.ComputeRaw(suiteID, keyMaterial, req.AuthenticationInput)
 	case suite.ServiceEncryptOnly, suite.ServiceAuthEncrypt:
 		var primitive aead.Cipher
-		primitive, err = aead.New(suiteID, lease.DEK)
+		primitive, err = aead.New(suiteID, keyMaterial)
 		if err == nil {
 			result.Data, result.Tag = primitive.Encrypt(req.Data, result.Nonce, req.AAD)
 		}

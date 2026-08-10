@@ -27,7 +27,7 @@ const (
 type Principal struct {
 	ID         string   // stable principal ID (sub or service ID)
 	TenantID   string   // tenant scope
-	Scopes     []string // e.g. "keys:manage", "crypto:encrypt"
+	Scopes     []string // e.g. "ccsds:tc:protect", "ops:read"
 	Roles      []string
 	Plane      Plane   // primary plane this principal may access
 	Planes     []Plane // optional explicit multi-plane test/development access

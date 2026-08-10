@@ -1,4 +1,3 @@
-// Package bootstrap wires all components together for the engineering baseline service.
 package bootstrap
 
 import (
@@ -7,7 +6,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,12 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kvlt/key-vault/internal/api/admin"
-	cryptoapi "github.com/kvlt/key-vault/internal/api/crypto"
-	tenantapi "github.com/kvlt/key-vault/internal/api/tenant"
-	"github.com/kvlt/key-vault/internal/application/crypto"
-	"github.com/kvlt/key-vault/internal/application/keys"
-	"github.com/kvlt/key-vault/internal/application/keytransfer"
 	"github.com/kvlt/key-vault/internal/application/protection"
 	"github.com/kvlt/key-vault/internal/audit/redaction"
 	"github.com/kvlt/key-vault/internal/auditchain"
@@ -30,52 +22,40 @@ import (
 	"github.com/kvlt/key-vault/internal/auth/principal"
 	"github.com/kvlt/key-vault/internal/config"
 	"github.com/kvlt/key-vault/internal/crypto/aad"
-	"github.com/kvlt/key-vault/internal/crypto/envelope"
-	"github.com/kvlt/key-vault/internal/crypto/nonce"
 	"github.com/kvlt/key-vault/internal/domain/policy"
-	"github.com/kvlt/key-vault/internal/lifecycle"
-	"github.com/kvlt/key-vault/internal/outbox"
 	"github.com/kvlt/key-vault/internal/policysig"
 	"github.com/kvlt/key-vault/internal/protocol/ccsds"
-	"github.com/kvlt/key-vault/internal/repository"
-	"github.com/kvlt/key-vault/internal/repository/memory"
 	"github.com/kvlt/key-vault/internal/repository/models"
-	"github.com/kvlt/key-vault/internal/repository/postgres"
 	"github.com/kvlt/key-vault/internal/resolver/keyresolver"
+	"github.com/kvlt/key-vault/internal/securitystate"
 	"github.com/kvlt/key-vault/internal/tpm/provider"
 )
 
-// App is the assembled application.
+const (
+	clusterID = "ccsds-ground-v1"
+	nrwkName  = "ccsds-root-wrap-v1"
+	planeRole = "ground"
+)
+
+// App contains only the modules used by the CCSDS ground system.
 type App struct {
 	Cfg                *config.Config
-	Store              repository.Repository
+	Store              *securitystate.Store
 	TPM                provider.Provider
 	Resolver           *keyresolver.Resolver
 	Policies           *policy.Engine
 	PolicyMgr          *policysig.Manager
-	KeyService         *keys.Service
-	CryptoService      *crypto.Service
 	CCSDSFrameSecurity *ccsds.FrameSecurity
 	CCSDSStore         ccsds.Store
-	KeyTransferService *keytransfer.Service
-	NonceManager       *nonce.Manager
 	JWTVerifier        *jwt.Verifier
 	HMACVerifier       *hmacsign.Verifier
 	StaticTokens       map[string]*principal.Principal
-	EnvelopeRegistry   *envelope.Registry
-	TenantHandler      *tenantapi.Handler
 	AuditChain         *auditchain.Service
-	OutboxSvc          *outbox.Service
-	Worker             *lifecycle.Worker
 }
 
-// Build assembles the application from config.
-func Build(ctx context.Context, cfg *config.Config) (*App, error) {
+func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 	if cfg == nil {
 		return nil, errors.New("bootstrap: nil config")
-	}
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("bootstrap: validate config: %w", err)
 	}
 	if err := configureRedactionPepper(cfg); err != nil {
 		return nil, err
@@ -83,183 +63,160 @@ func Build(ctx context.Context, cfg *config.Config) (*App, error) {
 	for _, finding := range cfg.Diagnostics() {
 		if finding.Level == "warn" {
 			slog.Warn("configuration posture", "code", finding.Code, "message", finding.Message)
-			continue
-		}
-		slog.Info("configuration posture", "code", finding.Code, "message", finding.Message)
-	}
-	// 1. Repository — memory for baseline, postgres for durable production storage.
-	var store repository.Repository
-	switch cfg.Database.Driver {
-	case "memory", "":
-		store = memory.New()
-	case "postgres":
-		pgStore, err := postgres.New(ctx, cfg.Database.DSN)
-		if err != nil {
-			return nil, fmt.Errorf("bootstrap: postgres: %w", err)
-		}
-		if err := pgStore.Migrate(ctx); err != nil {
-			pgStore.Close()
-			return nil, fmt.Errorf("bootstrap: postgres migrate: %w", err)
-		}
-		store = pgStore
-		slog.Info("postgres storage initialized", "dsn_preview", safePreview(cfg.Database.DSN, 40))
-	default:
-		return nil, fmt.Errorf("bootstrap: unknown database driver %q (use 'memory' or 'postgres')", cfg.Database.Driver)
-	}
-
-	// 2. TPM provider.
-	var tpm provider.Provider
-	var err error
-	switch cfg.TPM.Provider {
-	case "swtpm", "software":
-		tpm, err = provider.NewSoftwareProvider(cfg.TPM.StateDir)
-		if err != nil {
-			return nil, fmt.Errorf("bootstrap: tpm: %w", err)
-		}
-	case "tpm2", "hardware", "tpm2-tools":
-		tpm, err = provider.NewHardwareProviderWithOptions(provider.HardwareOptions{
-			StateDir: cfg.TPM.StateDir,
-			ToolDir:  cfg.TPM.ToolDir,
-			TCTI:     cfg.TPM.TCTI,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("bootstrap: tpm: %w", err)
-		}
-	case "tss", "esapi", "native":
-		tpm, err = provider.NewNativeProvider(provider.NativeOptions{TCTI: cfg.TPM.TCTI, PCRs: cfg.TPM.PolicyPCRs})
-		if err != nil {
-			return nil, fmt.Errorf("bootstrap: native tpm: %w", err)
-		}
-	default:
-		return nil, fmt.Errorf("bootstrap: unknown tpm provider %s", cfg.TPM.Provider)
-	}
-
-	// 3. Policy engine.
-	polEng := policy.NewEngine()
-
-	// 4. Resolver.
-	resolver := keyresolver.New(tpm, "kvlt-nrwk-v1", 5*time.Minute)
-
-	// 5. Nonce manager. The allocator delegates to the store.
-	alloc := &storeNonceAllocator{store: store}
-	nonceMgr := nonce.NewManager(alloc, cfg.Nonce.LeaseSize,
-		cfg.Nonce.PrefetchWatermark, cfg.Nonce.ThrottleWatermark, cfg.Nonce.LeaseTTL)
-
-	// 6. Application services.
-	keySvc := keys.New(store, resolver, polEng)
-	cryptoSvc := crypto.New(store, resolver, polEng, nonceMgr, cfg.Server.MaxRequestBody)
-	keyTransferSvc := keytransfer.New(store, resolver, keySvc)
-	var ccsdsStore ccsds.Store
-	if durable, ok := store.(ccsds.Store); ok {
-		ccsdsStore = durable
-	} else {
-		ccsdsStore, err = ccsds.NewMemoryStore()
-		if err != nil {
-			return nil, fmt.Errorf("bootstrap: CCSDS memory store: %w", err)
+		} else {
+			slog.Info("configuration posture", "code", finding.Code, "message", finding.Message)
 		}
 	}
-	rawProtection := protection.New(store, resolver, polEng, cfg.CCSDS.MaxFrameLength)
-	ccsdsFrameSecurity, err := ccsds.New(rawProtection, ccsdsStore, ccsds.Options{
+
+	store, err := securitystate.Open(ctx, cfg.Database.Path)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap: security state: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = store.Close()
+		}
+	}()
+
+	tpm, err := buildTPM(cfg)
+	if err != nil {
+		return nil, err
+	}
+	policies := policy.NewEngine()
+	resolver := keyresolver.New(tpm, nrwkName, 5*time.Minute)
+	if err := bootstrapRoot(ctx, cfg, store, tpm, resolver); err != nil {
+		return nil, fmt.Errorf("bootstrap: root: %w", err)
+	}
+	resolver.SetFetchDEKHook(func(ctx context.Context, keyVersionID string) ([]byte, []byte, error) {
+		version, err := store.GetKeyVersion(ctx, keyVersionID)
+		if err != nil {
+			return nil, nil, err
+		}
+		return version.WrappedDEK, version.WrapMetadata, nil
+	})
+
+	auditChain := auditchain.New(store)
+	policyMgr := policysig.New(policies, &policyAuditAdapter{audit: auditChain})
+	if err := configureSignedPolicy(ctx, cfg, policyMgr); err != nil {
+		return nil, err
+	}
+
+	protectionCore := protection.New(store, resolver, policies, cfg.CCSDS.MaxFrameLength)
+	frameSecurity, err := ccsds.New(protectionCore, store, ccsds.Options{
 		AOSPrimaryHeaderLength: cfg.CCSDS.AOSPrimaryHeaderLength,
 		MaxFrameLength:         cfg.CCSDS.MaxFrameLength,
 		NodeID:                 cfg.Server.NodeID,
+		TCSpacecraftID:         cfg.CCSDS.TCSpacecraftID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap: CCSDS frame security: %w", err)
 	}
-	// 7. Auth verifiers.
+
 	jwtVerifier := jwt.NewVerifier(cfg.Auth.JWTIssuer, cfg.Auth.JWTAudience, cfg.Auth.JWTAlgWhite)
 	jwtVerifier.SetMaxTokenTTL(cfg.Auth.DefaultTokenTTL)
 	if cfg.Auth.JWKSetURL != "" {
 		keySet, err := jwt.NewRemoteKeySet(cfg.Auth.JWKSetURL, cfg.Auth.JWKCacheTTL, nil)
 		if err != nil {
-			return nil, fmt.Errorf("bootstrap: jwt key set: %w", err)
-		}
-		if err := keySet.Refresh(ctx); err != nil {
-			return nil, fmt.Errorf("bootstrap: initial JWKS fetch: %w", err)
+			return nil, fmt.Errorf("bootstrap: remote JWKS: %w", err)
 		}
 		jwtVerifier.SetPublicKeySet(keySet)
 	}
-	hmacVerifier := hmacsign.NewVerifier(cfg.Auth.HMACMaxSkew)
-
-	// 8. Bootstrap: create default tenant, NRWK, CRK, CRK envelope.
-	if err := bootstrapCluster(ctx, cfg, store, tpm, resolver); err != nil {
-		return nil, fmt.Errorf("bootstrap: cluster: %w", err)
-	}
-
-	// 8b. Bootstrap: create default tenant envelope config.
-	envelopeRegistry := envelope.DefaultRegistry()
-	if err := bootstrapEnvelopeConfig(ctx, store); err != nil {
-		return nil, fmt.Errorf("bootstrap: envelope config: %w", err)
-	}
-	tenantHandler := tenantapi.New(store, envelopeRegistry)
-
-	// Wire resolver's fetch hook to the store.
-	resolver.SetFetchDEKHook(func(ctx context.Context, keyVersionID string) ([]byte, []byte, error) {
-		kv, err := store.GetKeyVersion(ctx, keyVersionID)
-		if err != nil {
-			return nil, nil, err
-		}
-		return kv.WrappedDEK, kv.WrapMetadata, nil
-	})
-
-	// Audit chain service.
-	auditChain := auditchain.New(store)
-
-	// Wire audit into key and crypto services (EB-FR-09).
-	auditAdapter := &auditAdapter{ac: auditChain}
-	keySvc.SetAuditor(auditAdapter)
-	cryptoSvc.SetAuditor(&cryptoAuditAdapter{ac: auditChain})
-	keyTransferSvc.SetAuditor(auditAdapter)
-
-	// Outbox service.
-	outboxSvc := outbox.New(store)
-
-	// Policy signature manager.
-	policyMgr := policysig.New(polEng, &policyAuditAdapter{ac: auditChain})
-	if err := configureSignedPolicy(ctx, cfg, policyMgr); err != nil {
-		return nil, err
-	}
-
-	// Lifecycle worker.
-	worker := lifecycle.New(store, lifecycle.Config{
-		OwnerID:             cfg.Lifecycle.OwnerID,
-		LeaseTTL:            cfg.Lifecycle.LeaseTTL,
-		MaxAttempts:         cfg.Lifecycle.MaxAttempts,
-		PollInterval:        cfg.Lifecycle.PollInterval,
-		ExpiryScanInterval:  cfg.Lifecycle.ExpiryScanInterval,
-		ExpiryWarningWindow: cfg.Lifecycle.ExpiryWarningWindow,
-	})
-	worker.SetExpiryChecker(keySvc)
-	worker.SetDestroyExecutor(keySvc)
-	if cfg.Server.ActivePlane == "management" || cfg.Server.ActivePlane == "all" {
-		if err := keySvc.ReconcileDestroyDueJobs(ctx); err != nil {
-			return nil, fmt.Errorf("bootstrap: reconcile destroy jobs: %w", err)
-		}
-	}
 
 	return &App{
-		Cfg:                cfg,
-		Store:              store,
-		TPM:                tpm,
-		Resolver:           resolver,
-		Policies:           polEng,
-		PolicyMgr:          policyMgr,
-		KeyService:         keySvc,
-		CryptoService:      cryptoSvc,
-		CCSDSFrameSecurity: ccsdsFrameSecurity,
-		CCSDSStore:         ccsdsStore,
-		KeyTransferService: keyTransferSvc,
-		NonceManager:       nonceMgr,
-		JWTVerifier:        jwtVerifier,
-		HMACVerifier:       hmacVerifier,
-		StaticTokens:       loadStaticTokens(),
-		EnvelopeRegistry:   envelopeRegistry,
-		TenantHandler:      tenantHandler,
-		AuditChain:         auditChain,
-		OutboxSvc:          outboxSvc,
-		Worker:             worker,
+		Cfg: cfg, Store: store, TPM: tpm, Resolver: resolver, Policies: policies, PolicyMgr: policyMgr,
+		CCSDSFrameSecurity: frameSecurity, CCSDSStore: store,
+		JWTVerifier: jwtVerifier, HMACVerifier: hmacsign.NewVerifier(cfg.Auth.HMACMaxSkew),
+		StaticTokens: loadStaticTokens(), AuditChain: auditChain,
 	}, nil
+}
+
+func buildTPM(cfg *config.Config) (provider.Provider, error) {
+	switch cfg.TPM.Provider {
+	case "swtpm", "software":
+		value, err := provider.NewSoftwareProvider(cfg.TPM.StateDir)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap: TPM: %w", err)
+		}
+		return value, nil
+	case "tpm2", "hardware", "tpm2-tools":
+		value, err := provider.NewHardwareProviderWithOptions(provider.HardwareOptions{
+			StateDir: cfg.TPM.StateDir, ToolDir: cfg.TPM.ToolDir, TCTI: cfg.TPM.TCTI,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap: TPM: %w", err)
+		}
+		return value, nil
+	case "tss", "esapi", "native":
+		value, err := provider.NewNativeProvider(provider.NativeOptions{TCTI: cfg.TPM.TCTI, PCRs: cfg.TPM.PolicyPCRs})
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap: TPM: %w", err)
+		}
+		return value, nil
+	default:
+		return nil, fmt.Errorf("bootstrap: unknown TPM provider %q", cfg.TPM.Provider)
+	}
+}
+
+func bootstrapRoot(ctx context.Context, cfg *config.Config, store *securitystate.Store,
+	tpm provider.Provider, resolver *keyresolver.Resolver) error {
+	if err := store.EnsureTenant(ctx, "t-default", "default"); err != nil {
+		return err
+	}
+	for _, tenantID := range collectStaticTokenTenantIDs() {
+		if tenantID == "" || tenantID == "t-default" {
+			continue
+		}
+		if err := store.EnsureTenant(ctx, tenantID, strings.TrimPrefix(tenantID, "t-")); err != nil {
+			return err
+		}
+	}
+	baseline := hashBaseline(cfg.Baseline)
+	policyDigest := sha256.Sum256([]byte("ccsds-default-policy-v1"))
+	if err := resolver.Init(ctx, clusterID, cfg.Server.NodeID, planeRole, baseline, policyDigest[:]); err != nil {
+		return err
+	}
+
+	_, record, err := store.LoadLatestCRK(ctx, cfg.Server.NodeID)
+	if err == nil {
+		var envelope provider.CRKEnvelope
+		if err := json.Unmarshal(record.Envelope, &envelope); err != nil {
+			return fmt.Errorf("decode CRK envelope: %w", err)
+		}
+		resolver.SetCRKEnvelope(&envelope)
+		return nil
+	}
+	if !errors.Is(err, securitystate.ErrNotFound) {
+		return err
+	}
+
+	root := make([]byte, 32)
+	if _, err := rand.Read(root); err != nil {
+		return fmt.Errorf("generate CRK: %w", err)
+	}
+	defer zeroize(root)
+	nrwk, err := tpm.EnsureNRWK(ctx, nrwkName)
+	if err != nil {
+		return err
+	}
+	envelope, err := tpm.SealCRK(ctx, nrwk, root, aad.CRKAAD{
+		ClusterID: clusterID, NodeID: cfg.Server.NodeID, PlaneRole: planeRole, CRKVersion: 1,
+		NRWKName: nrwkName, BaselineDigest: baseline, PolicyDigest: policyDigest[:],
+	})
+	if err != nil {
+		return fmt.Errorf("seal CRK: %w", err)
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("encode CRK envelope: %w", err)
+	}
+	version := &models.CRKVersion{ID: "crk-v1", Version: 1, Status: "active", CreatedAt: time.Now().UTC()}
+	record = &models.CRKNodeEnvelope{ID: "crkenv-" + cfg.Server.NodeID, CRKVersionID: version.ID,
+		NodeID: cfg.Server.NodeID, Envelope: encoded, CreatedAt: time.Now().UTC()}
+	if err := store.SaveCRK(ctx, version, record); err != nil {
+		return err
+	}
+	resolver.SetCRKEnvelope(envelope)
+	return nil
 }
 
 func configureRedactionPepper(cfg *config.Config) error {
@@ -288,113 +245,46 @@ func configureSignedPolicy(ctx context.Context, cfg *config.Config, manager *pol
 		}
 		bundle, err := policysig.LoadTrustBundle(cfg.Policy.TrustedKeysPath)
 		if err != nil {
-			return fmt.Errorf("bootstrap: load policy trust bundle: %w", err)
+			return fmt.Errorf("bootstrap: load trust bundle: %w", err)
 		}
 		if err := policysig.InstallTrustBundle(manager, bundle); err != nil {
-			return fmt.Errorf("bootstrap: install policy trust bundle: %w", err)
+			return err
 		}
 		signed, err := policysig.LoadSignedPolicy(cfg.Policy.SignedPolicyPath)
 		if err != nil {
-			return fmt.Errorf("bootstrap: load signed policy file: %w", err)
+			return fmt.Errorf("bootstrap: load signed policy: %w", err)
 		}
-		if err := manager.LoadSigned(ctx, signed); err != nil {
-			return fmt.Errorf("bootstrap: verify signed policy: %w", err)
-		}
-		return nil
+		return manager.LoadSigned(ctx, signed)
 	}
 	if cfg.Environment == "production" {
 		return errors.New("bootstrap: production policy trust is not configured")
 	}
-
-	// Development-only convenience. Production never creates a trust root at
-	// runtime and therefore remains stable across restarts.
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return fmt.Errorf("bootstrap: development policy key: %w", err)
-	}
-	if err := manager.AddTrustedSigningKey("development-policy-key", pub, "active"); err != nil {
 		return err
 	}
-	signed, err := policysig.GenerateDefaultSignedPolicy(priv, "development-policy-key")
+	if err := manager.AddTrustedSigningKey("development-policy-key", publicKey, "active"); err != nil {
+		return err
+	}
+	signed, err := policysig.GenerateDefaultSignedPolicy(privateKey, "development-policy-key")
 	if err != nil {
-		return fmt.Errorf("bootstrap: development signed policy: %w", err)
+		return err
 	}
-	if err := manager.LoadSigned(ctx, signed); err != nil {
-		return fmt.Errorf("bootstrap: load development signed policy: %w", err)
-	}
-	return nil
+	return manager.LoadSigned(ctx, signed)
 }
 
-// policyAuditAdapter connects the audit chain service to the policy manager Auditor interface.
-type policyAuditAdapter struct {
-	ac *auditchain.Service
+type policyAuditAdapter struct{ audit *auditchain.Service }
+
+func (adapter *policyAuditAdapter) RecordPolicyReload(ctx context.Context, policyID string, version uint32, result, reason string) {
+	_ = adapter.audit.Record(ctx, auditchain.RecordRequest{ActorType: "system", ActorHash: "system",
+		Action: "policy.reload", TargetType: "policy", TargetIDHash: redaction.ShortHash(policyID), Result: result,
+		Metadata: map[string]string{"version": fmt.Sprintf("%d", version), "reason": reason}})
 }
 
-func (a *policyAuditAdapter) RecordPolicyReload(ctx context.Context, policyID string, version uint32, result string, reason string) {
-	_ = a.ac.Record(ctx, auditchain.RecordRequest{
-		ActorType:    "system",
-		ActorHash:    "system",
-		Action:       "policy.reload",
-		TargetType:   "policy",
-		TargetIDHash: hashTruncate(policyID),
-		Result:       result,
-		Metadata:     map[string]string{"version": fmt.Sprintf("%d", version), "reason": reason},
-	})
-}
-
-// auditAdapter adapts the auditchain.Service to the keys.Auditor interface.
-// It hashes the principal ID and target ID for privacy per design §15.1 and INV-09.
-type auditAdapter struct {
-	ac *auditchain.Service
-}
-
-// Record implements keys.Auditor.
-func (a *auditAdapter) Record(ctx context.Context, req keys.AuditRequest) error {
-	return a.ac.Record(ctx, auditchain.RecordRequest{
-		ActorType:    "principal",
-		ActorHash:    hashTruncate(req.PrincipalID),
-		TenantID:     req.TenantID,
-		Action:       req.Action,
-		TargetType:   req.TargetType,
-		TargetIDHash: hashTruncate(req.TargetID),
-		Result:       req.Result,
-		ErrorCode:    req.ErrorCode,
-		Metadata:     req.Metadata,
-	})
-}
-
-// cryptoAuditAdapter adapts the auditchain.Service to the crypto.Auditor interface.
-type cryptoAuditAdapter struct {
-	ac *auditchain.Service
-}
-
-// Record implements crypto.Auditor.
-func (a *cryptoAuditAdapter) Record(ctx context.Context, req crypto.AuditRequest) error {
-	return a.ac.Record(ctx, auditchain.RecordRequest{
-		ActorType:    "principal",
-		ActorHash:    hashTruncate(req.PrincipalID),
-		TenantID:     req.TenantID,
-		Action:       req.Action,
-		TargetType:   req.TargetType,
-		TargetIDHash: hashTruncate(req.TargetID),
-		Result:       req.Result,
-		ErrorCode:    req.ErrorCode,
-		Metadata:     req.Metadata,
-	})
-}
-
-func hashTruncate(s string) string {
-	return redaction.ShortHash(s)
-}
-
-// loadStaticTokens reads static token → principal mappings from the
-// KVLT_STATIC_TOKENS env var (JSON array of {token, principal} objects).
-// This is a development convenience. In production, use JWT/HMAC.
 func loadStaticTokens() map[string]*principal.Principal {
 	tokens := make(map[string]*principal.Principal)
 	raw := os.Getenv("KVLT_STATIC_TOKENS")
 	if raw == "" {
-		slog.Warn("KVLT_STATIC_TOKENS env var is empty; static token auth disabled")
 		return tokens
 	}
 	var entries []struct {
@@ -407,34 +297,21 @@ func loadStaticTokens() map[string]*principal.Principal {
 		NodeID   string   `json:"node_id"`
 	}
 	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-		slog.Error("KVLT_STATIC_TOKENS JSON parse failed; static token auth disabled",
-			"error", err, "raw_len", len(raw), "raw_first_40", safePreview(raw, 40))
+		slog.Error("KVLT_STATIC_TOKENS parse failed; static authentication disabled", "error", err)
 		return tokens
 	}
-	for _, e := range entries {
-		if len(e.Token) < 8 {
-			slog.Warn("static token too short, skipping", "token_len", len(e.Token))
+	for _, entry := range entries {
+		if len(entry.Token) < 8 || entry.TenantID == "" {
 			continue
 		}
-		plane, planes := staticTokenPlanes(e.Plane, e.Planes)
-		tokens[e.Token] = &principal.Principal{
-			ID:         "static:" + e.Token[:8],
-			TenantID:   e.TenantID,
-			Scopes:     e.Scopes,
-			Roles:      e.Roles,
-			Plane:      plane,
-			Planes:     planes,
-			NodeID:     e.NodeID,
-			AuthMethod: "static_token",
-		}
+		plane, planes := staticTokenPlanes(entry.Plane, entry.Planes)
+		tokens[entry.Token] = &principal.Principal{ID: "static:" + entry.Token[:8], TenantID: entry.TenantID,
+			Scopes: entry.Scopes, Roles: entry.Roles, Plane: plane, Planes: planes, NodeID: entry.NodeID,
+			AuthMethod: "static_token"}
 	}
-	slog.Info("static tokens loaded", "count", len(tokens))
 	return tokens
 }
 
-// collectStaticTokenTenantIDs parses KVLT_STATIC_TOKENS and returns the unique
-// set of tenant_id values declared across all entries. Used during bootstrap
-// to auto-create tenants referenced by static tokens.
 func collectStaticTokenTenantIDs() []string {
 	raw := os.Getenv("KVLT_STATIC_TOKENS")
 	if raw == "" {
@@ -443,28 +320,24 @@ func collectStaticTokenTenantIDs() []string {
 	var entries []struct {
 		TenantID string `json:"tenant_id"`
 	}
-	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+	if json.Unmarshal([]byte(raw), &entries) != nil {
 		return nil
 	}
-	seen := make(map[string]struct{})
-	var ids []string
-	for _, e := range entries {
-		if e.TenantID == "" {
-			continue
+	seen := make(map[string]bool)
+	var tenants []string
+	for _, entry := range entries {
+		if entry.TenantID != "" && !seen[entry.TenantID] {
+			seen[entry.TenantID] = true
+			tenants = append(tenants, entry.TenantID)
 		}
-		if _, ok := seen[e.TenantID]; ok {
-			continue
-		}
-		seen[e.TenantID] = struct{}{}
-		ids = append(ids, e.TenantID)
 	}
-	return ids
+	return tenants
 }
 
-func staticTokenPlanes(plane string, rawPlanes []string) (principal.Plane, []principal.Plane) {
-	planes := make([]principal.Plane, 0, len(rawPlanes)+1)
-	add := func(raw string) {
-		switch raw {
+func staticTokenPlanes(rawPlane string, rawPlanes []string) (principal.Plane, []principal.Plane) {
+	var planes []principal.Plane
+	add := func(value string) {
+		switch value {
 		case "data":
 			planes = append(planes, principal.PlaneData)
 		case "ops":
@@ -474,239 +347,25 @@ func staticTokenPlanes(plane string, rawPlanes []string) (principal.Plane, []pri
 		}
 	}
 	if len(rawPlanes) == 0 {
-		add(plane)
+		add(rawPlane)
 	} else {
-		for _, raw := range rawPlanes {
-			add(raw)
+		for _, value := range rawPlanes {
+			add(value)
 		}
 	}
 	if len(planes) == 0 {
-		planes = append(planes, principal.PlaneManagement)
+		planes = []principal.Plane{principal.PlaneManagement}
 	}
 	return planes[0], planes
 }
 
-// safePreview returns the first n bytes of s for diagnostic logging.
-// It does not leak full token values.
-func safePreview(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
+func hashBaseline(value config.BaselineConfig) []byte {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%v", value)))
+	return digest[:]
 }
 
-// bootstrapCluster creates the default tenant, NRWK, CRK, and CRK envelope.
-func bootstrapCluster(ctx context.Context, cfg *config.Config, store repository.Repository,
-	tpm provider.Provider, resolver *keyresolver.Resolver) error {
-	nodeID := cfg.Server.NodeID
-	plane := cfg.Server.ActivePlane
-	if plane == "" || plane == "all" {
-		plane = "management"
+func zeroize(value []byte) {
+	for index := range value {
+		value[index] = 0
 	}
-	// Default tenant.
-	tenant := &models.Tenant{
-		ID:     "t-default",
-		Name:   "default",
-		Status: "active",
-	}
-	if err := store.UpsertTenant(ctx, tenant); err != nil {
-		return err
-	}
-
-	// Auto-create tenants referenced by static tokens (e.g. t-admin, t-data,
-	// t-ops). Static token config may declare tenant_id values that don't
-	// exist in the store yet; without this, API calls that validate tenant
-	// existence (CreateKey, ImportKey) return "tenant not found".
-	for _, tid := range collectStaticTokenTenantIDs() {
-		if tid == "" || tid == "t-default" {
-			continue
-		}
-		t := &models.Tenant{
-			ID:     tid,
-			Name:   strings.TrimPrefix(tid, "t-"),
-			Status: "active",
-		}
-		if err := store.UpsertTenant(ctx, t); err != nil {
-			return fmt.Errorf("bootstrap: upsert static token tenant %q: %w", tid, err)
-		}
-		slog.Info("auto-created tenant from static token config", "tenant_id", tid)
-	}
-
-	// Initialize resolver (loads/creates NRWK).
-	baseline := hashBaseline(cfg.Baseline)
-	policyDigest := sha256.Sum256([]byte("kvlt-default-policy-v1"))
-	if err := resolver.Init(ctx, "kvlt-cluster-v1", nodeID, plane, baseline, policyDigest[:]); err != nil {
-		return err
-	}
-
-	// Create CRK version if none exists.
-	latestCRK, err := store.GetLatestCRKVersion(ctx)
-	if err == nil {
-		// Already bootstrapped — load the persisted CRK envelope into the resolver.
-		// Without this, the resolver has no CRK envelope and DEK lease/unwrap fails
-		// with "no CRK envelope" after a restart with durable storage.
-		crkEnv, gerr := store.GetCRKNodeEnvelope(ctx, latestCRK.ID, nodeID)
-		if gerr != nil {
-			if errors.Is(gerr, repository.ErrNotFound) {
-				return fmt.Errorf(
-					"bootstrap: CRK envelope not found for node %q and CRK version %q; set KVLT_NODE_ID to the enrolled node or provision a node-specific envelope",
-					nodeID,
-					latestCRK.ID,
-				)
-			}
-			return fmt.Errorf("bootstrap: load crk envelope: %w", gerr)
-		}
-		var env provider.CRKEnvelope
-		if err := json.Unmarshal(crkEnv.Envelope, &env); err != nil {
-			return fmt.Errorf("bootstrap: decode crk envelope: %w", err)
-		}
-		resolver.SetCRKEnvelope(&env)
-		slog.Info("crk envelope loaded from store", "crk_version", latestCRK.Version)
-		return nil
-	} else if !errors.Is(err, repository.ErrNotFound) {
-		return err
-	}
-
-	// Generate CRK plaintext (32 bytes).
-	crk := make([]byte, 32)
-	if _, err := rand.Read(crk); err != nil {
-		return fmt.Errorf("bootstrap: rand crk: %w", err)
-	}
-
-	// Create CRK version record.
-	crkVer := &models.CRKVersion{
-		ID:        "crk-v1",
-		Version:   1,
-		Epoch:     1,
-		Status:    "active",
-		CreatedAt: time.Now().UTC(),
-	}
-	if err := store.CreateCRKVersion(ctx, crkVer); err != nil {
-		return err
-	}
-
-	// Seal CRK under NRWK.
-	nrwk, err := tpm.EnsureNRWK(ctx, "kvlt-nrwk-v1")
-	if err != nil {
-		return err
-	}
-	a := aad.CRKAAD{
-		ClusterID:      "kvlt-cluster-v1",
-		NodeID:         nodeID,
-		PlaneRole:      plane,
-		CRKVersion:     1,
-		NRWKName:       "kvlt-nrwk-v1",
-		BaselineDigest: baseline,
-		PolicyDigest:   policyDigest[:],
-	}
-	env, err := tpm.SealCRK(ctx, nrwk, crk, a)
-	if err != nil {
-		return fmt.Errorf("bootstrap: seal crk: %w", err)
-	}
-
-	// Persist CRK envelope (JSON-encoded).
-	envBytes, err := json.Marshal(env)
-	if err != nil {
-		return err
-	}
-	crkNodeEnv := &models.CRKNodeEnvelope{
-		ID:           "crkenv-" + nodeID,
-		CRKVersionID: crkVer.ID,
-		NodeID:       nodeID,
-		Envelope:     envBytes,
-	}
-	if err := store.CreateCRKNodeEnvelope(ctx, crkNodeEnv); err != nil {
-		return err
-	}
-
-	// Cache envelope in resolver.
-	resolver.SetCRKEnvelope(env)
-	return nil
 }
-
-// bootstrapEnvelopeConfig creates the default tenant envelope config for t-default.
-func bootstrapEnvelopeConfig(ctx context.Context, store repository.Repository) error {
-	_, err := store.GetTenantEnvelopeConfig(ctx, "t-default")
-	if err == nil {
-		// Already configured.
-		return nil
-	}
-	cfg := &models.TenantEnvelopeConfig{
-		TenantID:      "t-default",
-		DefaultFormat: string(envelope.FormatJSONV1),
-		AllowedFormats: []string{
-			string(envelope.FormatJSONV1),
-			string(envelope.FormatConfigurableJSONV1),
-		},
-		Profiles: []models.EnvelopeFormatProfile{
-			{
-				FormatID: string(envelope.FormatConfigurableJSONV1),
-				Adapter:  string(envelope.FormatConfigurableJSONV1),
-			},
-		},
-		UpdatedBy: "bootstrap",
-	}
-	return store.UpsertTenantEnvelopeConfig(ctx, cfg)
-}
-
-// storeNonceAllocator adapts the repository to the nonce.Allocator interface.
-type storeNonceAllocator struct {
-	store repository.Repository
-}
-
-func (a *storeNonceAllocator) AllocateRange(keyVersionID, nodeID string, domain uint32, size uint64, ttl time.Duration) (*nonce.Lease, error) {
-	ctx := context.Background()
-	nl, err := a.store.AllocateNonceRange(ctx, keyVersionID, nodeID, domain, size, ttl)
-	if err != nil {
-		return nil, err
-	}
-	return &nonce.Lease{
-		LeaseID:      nl.LeaseID,
-		KeyVersionID: nl.KeyVersionID,
-		NodeID:       nl.NodeID,
-		Domain:       nl.Domain,
-		StartCounter: nl.StartCounter,
-		EndCounter:   nl.EndCounter,
-		UsedCounter:  nl.UsedCounter,
-		ExpiresAt:    nl.ExpiresAt,
-		Status:       nonce.LeaseStatus(nl.Status),
-	}, nil
-}
-
-func (a *storeNonceAllocator) UpdateUsed(leaseID string, used uint64) error {
-	return a.store.UpdateNonceUsed(context.Background(), leaseID, used)
-}
-
-func (a *storeNonceAllocator) GetLease(leaseID string) (*nonce.Lease, error) {
-	nl, err := a.store.GetNonceLease(context.Background(), leaseID)
-	if err != nil {
-		return nil, err
-	}
-	return &nonce.Lease{
-		LeaseID:      nl.LeaseID,
-		KeyVersionID: nl.KeyVersionID,
-		NodeID:       nl.NodeID,
-		Domain:       nl.Domain,
-		StartCounter: nl.StartCounter,
-		EndCounter:   nl.EndCounter,
-		UsedCounter:  nl.UsedCounter,
-		ExpiresAt:    nl.ExpiresAt,
-		Status:       nonce.LeaseStatus(nl.Status),
-	}, nil
-}
-
-func hashBaseline(b config.BaselineConfig) []byte {
-	h := sha256.New()
-	h.Write([]byte(fmt.Sprintf("%v", b)))
-	return h.Sum(nil)
-}
-
-// hexEncode is a small helper retained for diagnostic output.
-func hexEncode(b []byte) string { return hex.EncodeToString(b) }
-
-// _ unused import guard.
-var (
-	_ = admin.New
-	_ = cryptoapi.New
-	_ = json.Marshal
-)

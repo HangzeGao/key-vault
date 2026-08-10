@@ -16,20 +16,20 @@ import (
 
 // sensitiveKeys are field names that must be redacted when present in records.
 var sensitiveKeys = map[string]struct{}{
-	"token":               {},
-	"authorization":       {},
-	"plaintext":           {},
-	"plaintext_data_key":  {},
-	"dek":                 {},
-	"crk":                 {},
-	"wrapped_dek":         {},
-	"envelope":            {},
-	"password":            {},
-	"secret":              {},
-	"private_key":         {},
-	"signature":           {},
-	"x-kv-signature":      {},
-	"service_token":       {},
+	"token":              {},
+	"authorization":      {},
+	"plaintext":          {},
+	"plaintext_data_key": {},
+	"dek":                {},
+	"crk":                {},
+	"wrapped_dek":        {},
+	"envelope":           {},
+	"password":           {},
+	"secret":             {},
+	"private_key":        {},
+	"signature":          {},
+	"x-kv-signature":     {},
+	"service_token":      {},
 }
 
 // redactHandler wraps a slog.Handler to redact sensitive fields.

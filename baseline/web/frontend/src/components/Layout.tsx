@@ -1,22 +1,18 @@
-import { type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
-  KeyRound,
-  Lock,
-  Shield,
   ScrollText,
   LogOut,
-  Layers,
-  Boxes,
-  Package,
-  Settings2,
   Sun,
   Moon,
   Database,
-  ArrowUpDown,
+  Satellite,
+  RadioTower,
+  Menu,
+  X,
 } from "lucide-react";
-import { useAuth, useTheme, useUI } from "../lib/store";
+import { useAuth, useTheme } from "../lib/store";
 
 interface NavEntry {
   to: string;
@@ -24,41 +20,23 @@ interface NavEntry {
   icon: ReactNode;
 }
 
-const managementNav: NavEntry[] = [
-  { to: "/ui/keys", label: "Key Management", icon: <KeyRound /> },
-  { to: "/ui/key-transfer", label: "Key Upload / Download", icon: <ArrowUpDown /> },
-  { to: "/ui/policy", label: "Policy", icon: <Shield /> },
-  { to: "/ui/envelope-config", label: "Envelope Config", icon: <Package /> },
+const missionNav: NavEntry[] = [
+  { to: "/ui/dashboard", label: "Operations Overview", icon: <LayoutDashboard /> },
+  { to: "/ui/tc-security", label: "TC Uplink", icon: <Satellite /> },
+  { to: "/ui/aos-security", label: "AOS Downlink", icon: <RadioTower /> },
 ];
 
-const dataNav: NavEntry[] = [
-  { to: "/ui/crypto", label: "Crypto Sandbox", icon: <Lock /> },
-  { to: "/ui/batch-crypto", label: "Batch Crypto", icon: <Boxes /> },
+const assuranceNav: NavEntry[] = [
+  { to: "/ui/audit", label: "Security Audit", icon: <ScrollText /> },
+  { to: "/ui/database", label: "Ground Persistence", icon: <Database /> },
 ];
 
-const auditNav: NavEntry[] = [
-  { to: "/ui/audit", label: "Audit Log", icon: <ScrollText /> },
-  { to: "/ui/lifecycle", label: "Lifecycle", icon: <Layers /> },
-];
-
-const opsNav: NavEntry[] = [
-  { to: "/ui/dashboard", label: "Dashboard", icon: <LayoutDashboard /> },
-  { to: "/ui/database", label: "Database", icon: <Database /> },
-];
-
-const simpleNav: NavEntry[] = [
-  { to: "/ui/dashboard", label: "Dashboard", icon: <LayoutDashboard /> },
-  { to: "/ui/keys", label: "Keys", icon: <KeyRound /> },
-  { to: "/ui/key-transfer", label: "Key Transfer", icon: <ArrowUpDown /> },
-  { to: "/ui/crypto", label: "Encrypt / Decrypt", icon: <Lock /> },
-];
-
-function NavGroup({ label, entries }: { label: string; entries: NavEntry[] }) {
+function NavGroup({ label, entries, onNavigate }: { label: string; entries: NavEntry[]; onNavigate?: () => void }) {
   return (
     <div className="nav-group">
       <div className="nav-group-label">{label}</div>
       {entries.map((e) => (
-        <NavLink key={e.to} to={e.to} className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
+        <NavLink key={e.to} to={e.to} onClick={onNavigate} className={({ isActive }) => `nav-item ${isActive ? "active" : ""}`}>
           {e.icon}
           {e.label}
         </NavLink>
@@ -67,29 +45,23 @@ function NavGroup({ label, entries }: { label: string; entries: NavEntry[] }) {
   );
 }
 
-export function Sidebar() {
+export function Sidebar({ mobileOpen = false, onClose }: { mobileOpen?: boolean; onClose?: () => void }) {
   const { token, tenantId, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
-  const { navigationMode, setNavigationMode } = useUI();
-  const advanced = navigationMode === "advanced";
   return (
-    <aside className="sidebar">
+    <aside className={`sidebar ${mobileOpen ? "mobile-open" : ""}`}>
+      <button className="sidebar-close" type="button" onClick={onClose} aria-label="Close navigation">
+        <X size={18} />
+      </button>
       <div className="brand">
-        <div className="brand-title">kvlt</div>
-        <div className="brand-sub">engineering baseline</div>
+        <div className="brand-title">CCSDS</div>
+        <div className="brand-sub">mission security</div>
       </div>
       <div style={{ flex: 1, overflowY: "auto" }}>
-        {advanced ? <>
-          <NavGroup label="Ops Plane" entries={opsNav} />
-          <NavGroup label="Management Plane" entries={managementNav} />
-          <NavGroup label="Data Plane" entries={dataNav} />
-          <NavGroup label="Audit Plane" entries={auditNav} />
-        </> : <NavGroup label="Daily workflow" entries={simpleNav} />}
+        <NavGroup label="Mission Operations" entries={missionNav} onNavigate={onClose} />
+        <NavGroup label="Assurance" entries={assuranceNav} onNavigate={onClose} />
       </div>
       <div style={{ padding: "12px 18px", borderTop: "1px solid var(--border)", fontSize: 11, fontFamily: '"JetBrains Mono", monospace', color: "var(--text-tertiary)" }}>
-        <button className="navigation-mode-button" onClick={() => setNavigationMode(advanced ? "simple" : "advanced")}>
-          <Settings2 size={13} /> {advanced ? "Simple mode" : "Advanced controls"}
-        </button>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <span>{tenantId}</span>
           <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -120,13 +92,16 @@ export function Sidebar() {
   );
 }
 
-export function Topbar({ children }: { children?: ReactNode }) {
+export function Topbar({ children, onOpenMenu }: { children?: ReactNode; onOpenMenu?: () => void }) {
   const location = useLocation();
   const path = location.pathname.replace("/ui/", "").replace("/ui", "");
   return (
     <div className="topbar">
+      <button className="mobile-menu-button" type="button" onClick={onOpenMenu} aria-label="Open navigation">
+        <Menu size={18} />
+      </button>
       <div className="breadcrumb">
-        <span>kvlt</span>
+        <span>ccsds</span>
         <span>/</span>
         <span style={{ color: "var(--accent)" }}>{path || "dashboard"}</span>
       </div>
@@ -137,11 +112,13 @@ export function Topbar({ children }: { children?: ReactNode }) {
 }
 
 export function PageContainer({ children }: { children: ReactNode }) {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   return (
     <div className="app-shell">
-      <Sidebar />
+      <Sidebar mobileOpen={mobileNavOpen} onClose={() => setMobileNavOpen(false)} />
+      {mobileNavOpen && <button className="sidebar-scrim" type="button" onClick={() => setMobileNavOpen(false)} aria-label="Close navigation" />}
       <div className="main-area">
-        <Topbar />
+        <Topbar onOpenMenu={() => setMobileNavOpen(true)} />
         <div className="content stagger">{children}</div>
       </div>
     </div>

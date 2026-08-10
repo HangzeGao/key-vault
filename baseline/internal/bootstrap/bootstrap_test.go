@@ -65,10 +65,10 @@ func TestStaticTokenPlanes(t *testing.T) {
 
 func TestLoadStaticTokensSupportsPlanes(t *testing.T) {
 	t.Setenv("KVLT_STATIC_TOKENS", `[
-		{"token":"admin-token-baseline","tenant_id":"t-default","scopes":["keys:manage"],"roles":["admin"],"plane":"management"},
-		{"token":"data-token-baseline","tenant_id":"t-default","scopes":["crypto:encrypt"],"roles":["data"],"plane":"data"},
-		{"token":"ops-token-baseline","tenant_id":"t-default","scopes":["ops:read","ops:repair"],"roles":["ops"],"plane":"ops"},
-		{"token":"admin-data-token-baseline","tenant_id":"t-default","scopes":["keys:manage","crypto:encrypt","ops:read","ops:repair"],"roles":["admin","data","ops"],"planes":["management","data","ops"]}
+		{"token":"admin-token-baseline","tenant_id":"t-default","scopes":["audit:read"],"roles":["admin"],"plane":"management"},
+		{"token":"data-token-baseline","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:aos:unprotect"],"roles":["data"],"plane":"data"},
+		{"token":"ops-token-baseline","tenant_id":"t-default","scopes":["ops:read"],"roles":["ops"],"plane":"ops"},
+		{"token":"admin-data-token-baseline","tenant_id":"t-default","scopes":["audit:read","ccsds:tc:protect","ccsds:aos:unprotect","ops:read"],"roles":["admin","data","ops"],"planes":["management","data","ops"]}
 	]`)
 
 	tokens := loadStaticTokens()

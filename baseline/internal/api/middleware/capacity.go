@@ -1,7 +1,6 @@
 package middleware
 
 import (
-	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -46,7 +45,7 @@ func CapacityGuard(cfg CapacityConfig) func(http.Handler) http.Handler {
 			if p := PrincipalFromContext(r.Context()); p != nil && p.ID != "" {
 				identity = p.ID
 			}
-			key := identity + "\x00" + r.Method + "\x00" + r.URL.Path + hotKeySuffix(BodyFromContext(r.Context()))
+			key := identity + "\x00" + r.Method + "\x00" + r.URL.Path
 			now := time.Now()
 			mu.Lock()
 			bucket := buckets[key]
@@ -73,30 +72,11 @@ func CapacityGuard(cfg CapacityConfig) func(http.Handler) http.Handler {
 }
 
 func routeLimit(method, path string) int {
-	if method == http.MethodPost && strings.Contains(path, "-batch") {
-		return 20
-	}
-	if method == http.MethodPost && strings.HasPrefix(path, "/ui/api/v1/crypto/") {
+	if method == http.MethodPost && strings.HasPrefix(path, "/ui/api/v1/ccsds/") {
 		return 120
 	}
-	if method == http.MethodPost && strings.HasPrefix(path, "/ui/api/v1/ops/") {
-		return 10
-	}
-	if method == http.MethodGet && (strings.HasPrefix(path, "/ui/api/v1/audit/") || strings.HasPrefix(path, "/ui/api/v1/lifecycle/")) {
+	if method == http.MethodGet && strings.HasPrefix(path, "/ui/api/v1/audit/") {
 		return 60
 	}
 	return 0
-}
-
-func hotKeySuffix(body []byte) string {
-	if len(body) == 0 {
-		return ""
-	}
-	var value struct {
-		KeyID string `json:"key_id"`
-	}
-	if json.Unmarshal(body, &value) == nil && value.KeyID != "" {
-		return "\x00key:" + value.KeyID
-	}
-	return ""
 }

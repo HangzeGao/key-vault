@@ -4,18 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
-
-func TestLifecycleExpiryWarningWindowDefault(t *testing.T) {
-	cfg := Default()
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if cfg.Lifecycle.ExpiryWarningWindow != 7*24*time.Hour {
-		t.Fatalf("ExpiryWarningWindow = %s, want 168h", cfg.Lifecycle.ExpiryWarningWindow)
-	}
-}
 
 func TestCCSDSFrameBoundariesAreExplicitAndValidated(t *testing.T) {
 	cfg := Default()
@@ -28,15 +17,21 @@ func TestCCSDSFrameBoundariesAreExplicitAndValidated(t *testing.T) {
 	}
 }
 
-func TestLifecycleExpiryWarningWindowEnvOverride(t *testing.T) {
-	t.Setenv("KVLT_LIFECYCLE_EXPIRY_WARNING_WINDOW", "2h")
-
-	cfg, err := Load("")
-	if err != nil {
-		t.Fatalf("Load: %v", err)
+func TestTCMissionSpacecraftIDMustFitWireField(t *testing.T) {
+	cfg := Default()
+	cfg.CCSDS.TCSpacecraftID = 1024
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("11-bit TC spacecraft ID was accepted")
 	}
-	if cfg.Lifecycle.ExpiryWarningWindow != 2*time.Hour {
-		t.Fatalf("ExpiryWarningWindow = %s, want 2h", cfg.Lifecycle.ExpiryWarningWindow)
+}
+
+func TestLegacyStorageAndLifecycleFieldsAreRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.yaml")
+	if err := os.WriteFile(path, []byte("database:\n  driver: postgres\nlifecycle:\n  owner_id: old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("legacy database and lifecycle contract was accepted")
 	}
 }
 
@@ -45,8 +40,8 @@ func TestProductionRejectsNonDurableOrFallbackSecurityBoundaries(t *testing.T) {
 		name   string
 		mutate func(*Config)
 	}{
-		{"memory repository", func(c *Config) {
-			c.Database.Driver = "memory"
+		{"relative state path", func(c *Config) {
+			c.Database.Path = "relative/security.db"
 		}},
 		{"software TPM", func(c *Config) {
 			c.TPM.Provider = "software"
@@ -85,7 +80,7 @@ func productionConfig(t *testing.T) *Config {
 	}
 	cfg := Default()
 	cfg.Environment = "production"
-	cfg.Database = DatabaseConfig{Driver: "postgres", DSN: "postgres://kvlt@db/kvlt"}
+	cfg.Database = DatabaseConfig{Path: filepath.Join(dir, "security-state.db")}
 	cfg.TPM = TPMConfig{Provider: "native", TCTI: "device:/dev/tpmrm0"}
 	cfg.Server.PlaneIsolationMode = "physical"
 	cfg.Server.ActivePlane = "management"
@@ -102,28 +97,24 @@ func productionConfig(t *testing.T) *Config {
 	cfg.Policy.TrustedKeysPath = file
 	cfg.Policy.SignedPolicyPath = file
 	cfg.Audit.RedactionPepperFile = file
-	cfg.Recovery.PITREnabled = true
 	cfg.Recovery.RestoreDrillEvidenceFile = file
 	return cfg
 }
 
 func TestProductionFingerprintGuardRejectsAmbiguousConfig(t *testing.T) {
-	// A config that looks production-ready (postgres + native TPM + physical
+	// A config that looks production-ready (native TPM + physical
 	// isolation) but is missing environment: production must fail-closed,
 	// preventing accidental deployment with development-mode safeguards off.
 	cfg := Default()
 	cfg.Environment = "development"
-	cfg.Database.Driver = "postgres"
 	cfg.TPM.Provider = "native"
 	cfg.Server.PlaneIsolationMode = "physical"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("production-like config with development environment was accepted")
 	}
-	// Partial production fingerprints should still be allowed (e.g. postgres
-	// with swtpm is a valid integration-test setup).
+	// A software TPM with logical isolation remains a valid test setup.
 	cfg2 := Default()
 	cfg2.Environment = "test"
-	cfg2.Database.Driver = "postgres"
 	cfg2.TPM.Provider = "swtpm"
 	cfg2.Server.PlaneIsolationMode = "logical"
 	if err := cfg2.Validate(); err != nil {
@@ -138,7 +129,6 @@ func TestDiagnosticsDescribeDeploymentPosture(t *testing.T) {
 	}
 	prod := Default()
 	prod.Environment = "production"
-	prod.Database.Driver = "postgres"
 	prod.TPM.Provider = "native"
 	prod.Server.PlaneIsolationMode = "physical"
 	findings := prod.Diagnostics()

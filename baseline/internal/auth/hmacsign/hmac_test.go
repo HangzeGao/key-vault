@@ -10,7 +10,7 @@ func TestVerifierRejectsReplay(t *testing.T) {
 	secret := []byte("test-secret-with-enough-entropy")
 	v := NewVerifier(time.Minute)
 	v.AddKey("key-1", secret)
-	req := httptest.NewRequest("POST", "/ui/api/v1/crypto/encrypt", nil)
+	req := httptest.NewRequest("POST", "/ui/api/v1/ccsds/tc:protect", nil)
 	if err := SignRequest(req, nil, "key-1", secret, "node-1"); err != nil {
 		t.Fatal(err)
 	}
