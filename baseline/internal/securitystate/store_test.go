@@ -3,6 +3,7 @@ package securitystate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -131,6 +132,7 @@ func TestCCSDSCounterPromotionReplayAndPersistence(t *testing.T) {
 	if err := store.CheckReplay(ctx, "current", 1, 64); !errors.Is(err, ccsds.ErrAssociationState) {
 		t.Fatalf("TC replay state error=%v", err)
 	}
+	prepareStoredRotation(t, store, 0x1001, 0x1002)
 
 	if err := store.PromoteNextTC(ctx, "tenant-1"); err != nil {
 		t.Fatal(err)
@@ -152,6 +154,13 @@ func TestCCSDSCounterPromotionReplayAndPersistence(t *testing.T) {
 	defer store.Close()
 	if got, err := store.NextTransmitCounter(ctx, promoted.ID); err != nil || got != 0 {
 		t.Fatalf("persisted promoted IV=%d err=%v", got, err)
+	}
+	if err := store.MarkTCRotationFrameProduced(ctx, "tenant-1", promoted.ID); err != nil {
+		t.Fatal(err)
+	}
+	rotation, err := store.ReadTCRotationState(ctx, "tenant-1")
+	if err != nil || rotation.Phase != ccsds.TCRotationActive {
+		t.Fatalf("rotation=%+v err=%v", rotation, err)
 	}
 	if err := store.CheckReplay(ctx, "aos", 100, 64); !errors.Is(err, ccsds.ErrReplay) {
 		t.Fatalf("replay was forgotten after restart: %v", err)
@@ -179,12 +188,71 @@ func TestCCSDSPromotionWrapsCompleteSPISpace(t *testing.T) {
 	if _, err := store.db.ExecContext(ctx, `UPDATE security_associations SET spi=0 WHERE id='next'`); err != nil {
 		t.Fatal(err)
 	}
+	prepareStoredRotation(t, store, 0xffff, 0x0000)
 	if err := store.PromoteNextTC(ctx, "tenant-1"); err != nil {
 		t.Fatalf("0xFFFF -> 0x0000 promotion failed: %v", err)
 	}
 	promoted, err := store.GetTransmitAssociation(ctx, "tenant-1", ccsds.DirectionTCTx)
 	if err != nil || promoted.SPI != 0x0000 {
 		t.Fatalf("promoted=%+v err=%v", promoted, err)
+	}
+}
+
+func TestPersistedTCRotationLifecycleAndCorruption(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, filepath.Join(t.TempDir(), "security.db"))
+	provisionTestAssociations(t, store)
+	if _, err := store.ReadTCRotationState(ctx, "tenant-1"); !errors.Is(err, ccsds.ErrAssociationNotFound) {
+		t.Fatalf("missing=%v", err)
+	}
+	invalid := ccsds.TCRotationState{Phase: ccsds.TCRotationPrepared, TransactionID: 1,
+		CurrentSPI: 0x1001, NextSPI: 0x1002, CurrentRootVersion: 1, NextRootVersion: 1}
+	if err := store.MarkTCRotationPrepared(ctx, "tenant-1", invalid); !errors.Is(err, ccsds.ErrAssociationState) {
+		t.Fatalf("invalid=%v", err)
+	}
+	invalid.NextRootVersion = 2
+	invalid.NextSPI = 0x1003
+	if err := store.MarkTCRotationPrepared(ctx, "tenant-1", invalid); !errors.Is(err, ccsds.ErrAssociationState) {
+		t.Fatalf("mismatch=%v", err)
+	}
+	prepareStoredRotation(t, store, 0x1001, 0x1002)
+	if err := store.MarkTCRotationFrameProduced(ctx, "tenant-1", "current"); !errors.Is(err, ccsds.ErrAssociationState) {
+		t.Fatalf("early=%v", err)
+	}
+	if err := store.PromoteNextTC(ctx, "tenant-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkTCRotationFrameProduced(ctx, "tenant-1", "current"); !errors.Is(err, ccsds.ErrAssociationState) {
+		t.Fatalf("wrong=%v", err)
+	}
+	if err := store.MarkTCRotationFrameProduced(ctx, "tenant-1", "next"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkTCRotationFrameProduced(ctx, "tenant-1", "next"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.ReadTCRotationState(ctx, "tenant-1")
+	if err != nil || state.Phase != ccsds.TCRotationActive {
+		t.Fatalf("state=%+v err=%v", state, err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE tc_rotation_states SET transaction_id='bad' WHERE tenant_id='tenant-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadTCRotationState(ctx, "tenant-1"); err == nil {
+		t.Fatal("corrupt rotation accepted")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadTCRotationState(ctx, "tenant-1"); err == nil {
+		t.Fatal("closed read succeeded")
+	}
+	if err := store.MarkTCRotationPrepared(ctx, "tenant-1", ccsds.TCRotationState{Phase: ccsds.TCRotationPrepared,
+		TransactionID: 1, CurrentSPI: 1, NextSPI: 2, CurrentRootVersion: 1, NextRootVersion: 2}); err == nil {
+		t.Fatal("closed prepare succeeded")
+	}
+	if err := store.MarkTCRotationFrameProduced(ctx, "tenant-1", "next"); err == nil {
+		t.Fatal("closed completion succeeded")
 	}
 }
 
@@ -247,14 +315,25 @@ func testKey(tenantID, id, suite string) (*models.Key, *models.KeyVersion) {
 	return key, version
 }
 
+func testKeyAtVersion(tenantID, id, suite string, versionNo uint32) (*models.Key, *models.KeyVersion) {
+	key, version := testKey(tenantID, id, suite)
+	key.CurrentVersion = versionNo
+	version.ID = fmt.Sprintf("%s-v%d", id, versionNo)
+	version.VersionNo = versionNo
+	return key, version
+}
+
 func provisionTestAssociations(t *testing.T, store *Store) {
 	t.Helper()
 	ctx := context.Background()
 	if err := store.EnsureTenant(ctx, "tenant-1", "Mission 1"); err != nil {
 		t.Fatal(err)
 	}
-	for _, spec := range []struct{ id, suite string }{{"operational", "SM4_HCTR"}, {"recovery-root", "SM4_GCM"}, {"aos-root", "SM4_GCM"}} {
-		key, version := testKey("tenant-1", spec.id, spec.suite)
+	for _, spec := range []struct {
+		id, suite string
+		version   uint32
+	}{{"operational", "SM4_HCTR", 1}, {"next-root", "SM4_HCTR", 2}, {"recovery-root", "SM4_GCM", 1}, {"aos-root", "SM4_GCM", 1}} {
+		key, version := testKeyAtVersion("tenant-1", spec.id, spec.suite, spec.version)
 		if err := store.CreateProtocolKey(ctx, key, version); err != nil {
 			t.Fatal(err)
 		}
@@ -265,7 +344,7 @@ func provisionTestAssociations(t *testing.T, store *Store) {
 			KeyID: "operational", KeyVersion: 1, SecurityEpoch: 1, PolicyVersion: 1, SuiteID: "SM4_HCTR",
 			State: ccsds.AssociationCurrent, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: prefix}},
 		{ID: "next", TenantID: "tenant-1", SPI: 0x1002, Direction: ccsds.DirectionTCTx,
-			KeyID: "operational", KeyVersion: 1, SecurityEpoch: 2, PolicyVersion: 1, SuiteID: "SM4_HCTR",
+			KeyID: "next-root", KeyVersion: 2, SecurityEpoch: 2, PolicyVersion: 1, SuiteID: "SM4_HCTR",
 			State: ccsds.AssociationNext, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: prefix}},
 		{ID: "recovery", TenantID: "tenant-1", SPI: 0x7001, Direction: ccsds.DirectionTCRecoveryTx,
 			KeyID: "recovery-root", KeyVersion: 1, PolicyVersion: 1, SuiteID: "SM4_GCM",
@@ -279,6 +358,16 @@ func provisionTestAssociations(t *testing.T, store *Store) {
 		if err := store.CreateAssociation(ctx, association); err != nil {
 			t.Fatalf("create %s: %v", association.ID, err)
 		}
+	}
+}
+
+func prepareStoredRotation(t *testing.T, store *Store, currentSPI, nextSPI uint16) {
+	t.Helper()
+	if err := store.MarkTCRotationPrepared(context.Background(), "tenant-1", ccsds.TCRotationState{
+		Phase: ccsds.TCRotationPrepared, TransactionID: 1, CurrentSPI: currentSPI, NextSPI: nextSPI,
+		CurrentRootVersion: 1, NextRootVersion: 2,
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -549,6 +638,7 @@ func TestPromotionRejectsInvalidNextAndWriteFailure(t *testing.T) {
 	} {
 		store := openTestStore(t, filepath.Join(t.TempDir(), "security.db"))
 		provisionTestAssociations(t, store)
+		prepareStoredRotation(t, store, 0x1001, 0x1002)
 		if _, err := store.db.ExecContext(ctx, mutation); err != nil {
 			t.Fatal(err)
 		}
@@ -561,6 +651,7 @@ func TestPromotionRejectsInvalidNextAndWriteFailure(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "security.db"))
 	defer store.Close()
 	provisionTestAssociations(t, store)
+	prepareStoredRotation(t, store, 0x1001, 0x1002)
 	if _, err := store.db.ExecContext(ctx, `CREATE TRIGGER reject_promotion BEFORE UPDATE ON security_associations BEGIN SELECT RAISE(ABORT,'reject promotion'); END`); err != nil {
 		t.Fatal(err)
 	}

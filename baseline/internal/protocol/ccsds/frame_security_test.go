@@ -13,6 +13,7 @@ import (
 type fakeCore struct {
 	aosNonce       []byte
 	lastDerivation protection.Derivation
+	lastAAD        []byte
 	protectErr     error
 	unprotectErr   error
 	nilProtect     bool
@@ -26,6 +27,7 @@ func (f *fakeCore) ProtectDerived(_ context.Context, req protection.ProtectReque
 	f.lastDerivation = protection.Derivation{
 		Label: append([]byte(nil), derivation.Label...), Context: append([]byte(nil), derivation.Context...),
 	}
+	f.lastAAD = append([]byte(nil), req.AAD...)
 	if f.protectErr != nil {
 		return nil, f.protectErr
 	}
@@ -110,8 +112,20 @@ func nextTCAssociation() SecurityAssociation {
 	sa.ID = "tx-next"
 	sa.SPI++
 	sa.SecurityEpoch++
+	sa.KeyVersion++
 	sa.State = AssociationNext
 	return sa
+}
+
+func prepareTestRotation(t *testing.T, store Store, current, next SecurityAssociation) {
+	t.Helper()
+	err := store.MarkTCRotationPrepared(context.Background(), current.TenantID, TCRotationState{
+		Phase: TCRotationPrepared, TransactionID: 1, CurrentSPI: current.SPI, NextSPI: next.SPI,
+		CurrentRootVersion: current.KeyVersion, NextRootVersion: next.KeyVersion,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func aosAssociation() SecurityAssociation {
@@ -139,22 +153,34 @@ func newTestSecurity(t *testing.T, core ProtectionCore, associations ...Security
 	return security, store
 }
 
-func TestProtectTCDataOwnsSecurityHeaderAndSelectsCurrent(t *testing.T) {
+func plainTCFrame(t *testing.T, data []byte) []byte {
+	t.Helper()
+	frame, err := assembleTCFrame([]byte{0x20, 0x01, 0, 0, 0x07}, data, TCMaxFrameLength)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return frame
+}
+
+func TestProtectTCFrameOwnsFramingAndSelectsCurrent(t *testing.T) {
 	core := &fakeCore{}
 	security, _ := newTestSecurity(t, core, nextTCAssociation(), tcAssociation())
 	plain := []byte("command-16-bytes")
-	protected, err := security.ProtectTCData(context.Background(), "tenant-1", plain)
+	clearFrame := plainTCFrame(t, plain)
+	protected, err := security.ProtectTCFrame(context.Background(), "tenant-1", clearFrame)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if protected.Metadata.AssociationID != "tx-current" || protected.Metadata.Counter != 0 ||
-		len(protected.Data) != TCSecurityHeaderLength+len(plain) {
-		t.Fatalf("unexpected TC result: metadata=%+v len=%d", protected.Metadata, len(protected.Data))
+		len(protected.Frame) != len(clearFrame)+TCSecurityHeaderLength {
+		t.Fatalf("unexpected TC result: metadata=%+v len=%d", protected.Metadata, len(protected.Frame))
 	}
-	if !bytes.Equal(protected.Data[:TCSecurityHeaderLength], []byte{0x10, 0x01, 0, 0, 0, 0}) {
-		t.Fatalf("security header = %x", protected.Data[:TCSecurityHeaderLength])
+	if validateTCFrame(protected.Frame) != nil ||
+		!bytes.Equal(protected.Frame[TCPrimaryHeaderLength:TCPrimaryHeaderLength+TCSecurityHeaderLength],
+			[]byte{0x10, 0x01, 0, 0, 0, 0}) {
+		t.Fatalf("protected frame = %x", protected.Frame)
 	}
-	if bytes.Equal(protected.Data[TCSecurityHeaderLength:], plain) {
+	if bytes.Equal(protected.Frame[TCPrimaryHeaderLength+TCSecurityHeaderLength:len(protected.Frame)-TCFECFLength], plain) {
 		t.Fatal("TC data field was not encrypted")
 	}
 	if !bytes.Equal(core.lastDerivation.Label, ordinaryKDFLabel) || len(core.lastDerivation.Context) != 15 {
@@ -163,11 +189,13 @@ func TestProtectTCDataOwnsSecurityHeaderAndSelectsCurrent(t *testing.T) {
 }
 
 func TestAdvanceTCTransmitEpochIsLocalAndAtomic(t *testing.T) {
-	security, store := newTestSecurity(t, &fakeCore{}, tcAssociation(), nextTCAssociation())
+	current, next := tcAssociation(), nextTCAssociation()
+	security, store := newTestSecurity(t, &fakeCore{}, current, next)
+	prepareTestRotation(t, store, current, next)
 	if err := security.AdvanceTCTransmitEpoch(context.Background(), "tenant-1"); err != nil {
 		t.Fatal(err)
 	}
-	protected, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16))
+	protected, err := security.ProtectTCFrame(context.Background(), "tenant-1", plainTCFrame(t, make([]byte, 16)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,11 +226,12 @@ func TestAdvanceTCTransmitEpochWrapsCompleteSPISpace(t *testing.T) {
 	current.SPI = 0xffff
 	next := nextTCAssociation()
 	next.SPI = 0x0000
-	security, _ := newTestSecurity(t, &fakeCore{}, current, next)
+	security, store := newTestSecurity(t, &fakeCore{}, current, next)
+	prepareTestRotation(t, store, current, next)
 	if err := security.AdvanceTCTransmitEpoch(context.Background(), "tenant-1"); err != nil {
 		t.Fatalf("0xFFFF -> 0x0000 promotion failed: %v", err)
 	}
-	protected, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16))
+	protected, err := security.ProtectTCFrame(context.Background(), "tenant-1", plainTCFrame(t, make([]byte, 16)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +240,7 @@ func TestAdvanceTCTransmitEpochWrapsCompleteSPISpace(t *testing.T) {
 	}
 }
 
-func TestProtectRootPrepareDataUsesRecoveryOnlyAndAADIsSecurityHeader(t *testing.T) {
+func TestProtectRootPrepareFrameOwnsFramingAndAuthenticatesBothHeaders(t *testing.T) {
 	core := &fakeCore{}
 	current := tcAssociation()
 	next := nextTCAssociation()
@@ -222,17 +251,22 @@ func TestProtectRootPrepareDataUsesRecoveryOnlyAndAADIsSecurityHeader(t *testing
 		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4HCTR,
 		NewOperationalRoot: bytes.Repeat([]byte{0x44}, 16),
 	}
-	protected, err := security.ProtectRootPrepareData(context.Background(), "tenant-1", command)
+	protected, err := security.ProtectRootPrepareFrame(context.Background(), "tenant-1",
+		[]byte{0x20, 0x01, 0, 0, 0x01}, command)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantLength := TCSecurityHeaderLength + rootPrepareFixedLength + 16 + TCRecoveryTagLength
-	if len(protected.Data) != wantLength || protected.Metadata.ServiceType != suite.ServiceAuthEncrypt {
-		t.Fatalf("unexpected recovery result: len=%d metadata=%+v", len(protected.Data), protected.Metadata)
+	wantLength := TCPrimaryHeaderLength + TCSecurityHeaderLength + rootPrepareFixedLength + 16 + TCRecoveryTagLength + TCFECFLength
+	if len(protected.Frame) != wantLength || protected.Metadata.ServiceType != suite.ServiceAuthEncrypt ||
+		validateTCFrame(protected.Frame) != nil {
+		t.Fatalf("unexpected recovery result: len=%d metadata=%+v", len(protected.Frame), protected.Metadata)
 	}
-	if !bytes.Equal(protected.Data[:TCSecurityHeaderLength], []byte{0x70, 0x01, 0, 0, 0, 0}) ||
-		!bytes.Equal(protected.Data[len(protected.Data)-TCRecoveryTagLength:], bytes.Repeat([]byte{0xa5}, 16)) {
-		t.Fatalf("invalid recovery security fields: %x", protected.Data)
+	securityStart := TCPrimaryHeaderLength
+	tagEnd := len(protected.Frame) - TCFECFLength
+	if !bytes.Equal(protected.Frame[securityStart:securityStart+TCSecurityHeaderLength], []byte{0x70, 0x01, 0, 0, 0, 0}) ||
+		!bytes.Equal(protected.Frame[tagEnd-TCRecoveryTagLength:tagEnd], bytes.Repeat([]byte{0xa5}, 16)) ||
+		!bytes.Equal(core.lastAAD, protected.Frame[:TCRecoveryAADLength]) {
+		t.Fatalf("invalid recovery security fields: %x", protected.Frame)
 	}
 	if !bytes.Equal(core.lastDerivation.Label, recoveryKDFLabel) || len(core.lastDerivation.Context) != 10 {
 		t.Fatalf("recovery KDF binding = %x/%x", core.lastDerivation.Label, core.lastDerivation.Context)
@@ -248,7 +282,7 @@ func TestRootPrepareMustMatchProvisionedCurrentAndNext(t *testing.T) {
 		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4HCTR,
 		NewOperationalRoot: bytes.Repeat([]byte{1}, 16)}
 	command.NextSecurityEpoch++
-	if _, err := security.ProtectRootPrepareData(context.Background(), "tenant-1", command); !errors.Is(err, ErrAssociationState) {
+	if _, err := security.ProtectRootPrepareFrame(context.Background(), "tenant-1", make([]byte, 5), command); !errors.Is(err, ErrAssociationState) {
 		t.Fatalf("mismatched next epoch error = %v", err)
 	}
 }
@@ -353,28 +387,40 @@ func TestRecoveryAssociationAllowsOnlyGCM(t *testing.T) {
 	}
 }
 
-func TestProtectTCDataRejectsEmptyOrOversizedInput(t *testing.T) {
+func TestProtectTCFrameRejectsMalformedOrOversizedInput(t *testing.T) {
 	security, _ := newTestSecurity(t, &fakeCore{}, tcAssociation())
-	if _, err := security.ProtectTCData(context.Background(), "tenant-1", nil); !errors.Is(err, ErrFrameInvalid) {
+	if _, err := security.ProtectTCFrame(context.Background(), "tenant-1", nil); !errors.Is(err, ErrFrameInvalid) {
 		t.Fatalf("empty data error = %v", err)
 	}
-	if _, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, TCMaxFrameLength)); !errors.Is(err, ErrFrameInvalid) {
+	if _, err := security.ProtectTCFrame(context.Background(), "tenant-1", make([]byte, TCMaxFrameLength)); !errors.Is(err, ErrFrameInvalid) {
 		t.Fatalf("oversized data error = %v", err)
+	}
+	badFECF := plainTCFrame(t, make([]byte, 16))
+	badFECF[len(badFECF)-1] ^= 1
+	if _, err := security.ProtectTCFrame(context.Background(), "tenant-1", badFECF); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("bad clear-frame FECF error = %v", err)
+	}
+	protected, err := security.ProtectTCFrame(context.Background(), "tenant-1", plainTCFrame(t, make([]byte, 16)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if protected.Metadata.Counter != 0 {
+		t.Fatalf("invalid clear frame consumed IV counter: %d", protected.Metadata.Counter)
 	}
 }
 
 func TestFrameSecurityPropagatesCoreAndBindingFailures(t *testing.T) {
 	coreFailure := errors.New("core failure")
 	security, _ := newTestSecurity(t, &fakeCore{protectErr: coreFailure}, tcAssociation())
-	if _, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16)); !errors.Is(err, coreFailure) {
+	if _, err := security.ProtectTCFrame(context.Background(), "tenant-1", plainTCFrame(t, make([]byte, 16))); !errors.Is(err, coreFailure) {
 		t.Fatalf("TC core error = %v", err)
 	}
 	security, _ = newTestSecurity(t, &fakeCore{wrongBinding: true}, tcAssociation())
-	if _, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16)); !errors.Is(err, ErrFrameInvalid) {
+	if _, err := security.ProtectTCFrame(context.Background(), "tenant-1", plainTCFrame(t, make([]byte, 16))); !errors.Is(err, ErrFrameInvalid) {
 		t.Fatalf("TC binding error = %v", err)
 	}
 	security, _ = newTestSecurity(t, &fakeCore{nilProtect: true}, tcAssociation())
-	if _, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16)); !errors.Is(err, ErrFrameInvalid) {
+	if _, err := security.ProtectTCFrame(context.Background(), "tenant-1", plainTCFrame(t, make([]byte, 16))); !errors.Is(err, ErrFrameInvalid) {
 		t.Fatalf("nil TC result error = %v", err)
 	}
 	for name, mutate := range map[string]func(*protection.ProtectResult){
@@ -383,13 +429,13 @@ func TestFrameSecurityPropagatesCoreAndBindingFailures(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			security, _ := newTestSecurity(t, &fakeCore{mutateProtect: mutate}, tcAssociation())
-			if _, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16)); !errors.Is(err, ErrFrameInvalid) {
+			if _, err := security.ProtectTCFrame(context.Background(), "tenant-1", plainTCFrame(t, make([]byte, 16))); !errors.Is(err, ErrFrameInvalid) {
 				t.Fatalf("TC result binding error = %v", err)
 			}
 		})
 	}
 	security, _ = newTestSecurity(t, &fakeCore{}, tcAssociation())
-	if _, err := security.ProtectTCData(context.Background(), "missing", make([]byte, 16)); !errors.Is(err, ErrAssociationNotFound) {
+	if _, err := security.ProtectTCFrame(context.Background(), "missing", plainTCFrame(t, make([]byte, 16))); !errors.Is(err, ErrAssociationNotFound) {
 		t.Fatalf("missing TC association = %v", err)
 	}
 
@@ -401,19 +447,23 @@ func TestFrameSecurityPropagatesCoreAndBindingFailures(t *testing.T) {
 		NextSecurityEpoch: 10, NextSPI: next.SPI, OrdinarySuiteID: suite.SM4HCTR,
 		NewOperationalRoot: bytes.Repeat([]byte{1}, 16),
 	}
+	security, _ = newTestSecurity(t, &fakeCore{}, current, next, recoveryAssociation())
+	if _, err := security.ProtectRootPrepareFrame(context.Background(), "tenant-1", nil, command); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("invalid recovery primary header error = %v", err)
+	}
 	security, _ = newTestSecurity(t, &fakeCore{protectErr: coreFailure},
 		current, next, recoveryAssociation())
-	if _, err := security.ProtectRootPrepareData(context.Background(), "tenant-1", command); !errors.Is(err, coreFailure) {
+	if _, err := security.ProtectRootPrepareFrame(context.Background(), "tenant-1", make([]byte, 5), command); !errors.Is(err, coreFailure) {
 		t.Fatalf("recovery core error = %v", err)
 	}
 	security, _ = newTestSecurity(t, &fakeCore{wrongBinding: true},
 		current, next, recoveryAssociation())
-	if _, err := security.ProtectRootPrepareData(context.Background(), "tenant-1", command); !errors.Is(err, ErrFrameInvalid) {
+	if _, err := security.ProtectRootPrepareFrame(context.Background(), "tenant-1", make([]byte, 5), command); !errors.Is(err, ErrFrameInvalid) {
 		t.Fatalf("recovery binding error = %v", err)
 	}
 	security, _ = newTestSecurity(t, &fakeCore{nilProtect: true},
 		current, next, recoveryAssociation())
-	if _, err := security.ProtectRootPrepareData(context.Background(), "tenant-1", command); !errors.Is(err, ErrFrameInvalid) {
+	if _, err := security.ProtectRootPrepareFrame(context.Background(), "tenant-1", make([]byte, 5), command); !errors.Is(err, ErrFrameInvalid) {
 		t.Fatalf("nil recovery result error = %v", err)
 	}
 }
@@ -448,6 +498,9 @@ func TestUnprotectAOSBoundaryFailures(t *testing.T) {
 }
 
 func TestTCFrameValidationAndSequenceBoundaries(t *testing.T) {
+	if _, err := assembleTCFrame(nil, []byte{1}, TCMaxFrameLength); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("invalid assembly error = %v", err)
+	}
 	frame := appendTCFECF([]byte{0x20, 0x01, 0, 0, 0x07, 0xaa})
 	setTCFrameLength(frame, len(frame))
 	// FECF must be regenerated after writing the encoded frame length.

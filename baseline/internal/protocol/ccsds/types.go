@@ -51,7 +51,7 @@ const (
 	TCIVCounterLength      = 4
 	TCNoncePrefixLength    = 6
 	TCRecoveryTagLength    = 16
-	TCRecoveryAADLength    = TCSecurityHeaderLength
+	TCRecoveryAADLength    = TCPrimaryHeaderLength + TCSecurityHeaderLength
 )
 
 // ManagedParameters are direction-specific mission wire parameters. TC uses a
@@ -157,8 +157,8 @@ type OperationMetadata struct {
 	ServiceType   suite.ServiceType
 }
 
-type ProtectedTCData struct {
-	Data     []byte
+type ProtectedTCFrame struct {
+	Frame    []byte
 	Metadata OperationMetadata
 }
 

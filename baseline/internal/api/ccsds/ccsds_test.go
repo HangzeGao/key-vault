@@ -21,11 +21,11 @@ type fakeService struct {
 	input  []byte
 }
 
-func (service *fakeService) ProtectTCData(_ context.Context, tenantID string, data []byte) (*protocol.ProtectedTCData, error) {
-	service.tenant, service.input = tenantID, append([]byte(nil), data...)
-	return &protocol.ProtectedTCData{Data: []byte{0x10, 0x01, 0, 0, 0, 7, 0xaa},
+func (service *fakeService) ProtectTCFrame(_ context.Context, tenantID string, frame []byte) (*protocol.ProtectedTCFrame, error) {
+	service.tenant, service.input = tenantID, append([]byte(nil), frame...)
+	return &protocol.ProtectedTCFrame{Frame: []byte{0x20, 0x01, 0, 0, 7, 0x10, 0x01, 0, 0, 0, 7, 0xaa, 0, 0},
 		Metadata: protocol.OperationMetadata{SPI: 0x1001, Counter: 7, KeyVersion: 3,
-			PolicyVersion: 2, SuiteID: suite.AES256CTR.String(), ServiceType: suite.ServiceEncryptOnly}}, nil
+			PolicyVersion: 2, SuiteID: suite.SM4HCTR.String(), ServiceType: suite.ServiceEncryptOnly}}, nil
 }
 
 func (service *fakeService) UnprotectAOS(_ context.Context, tenantID string, frame []byte) (*protocol.PlainAOSFrame, error) {
@@ -40,32 +40,48 @@ func (service *fakeService) OperationsStatus(_ context.Context, tenantID string)
 	counter := uint64(42)
 	return &protocol.OperationsStatus{
 		Status: "READY", Ready: true,
+		TCRotation: &protocol.TCRotationState{Phase: protocol.TCRotationPrepared, TransactionID: ^uint64(0),
+			CurrentSPI: 0x1001, NextSPI: 0x1002, CurrentRootVersion: 4, NextRootVersion: 5},
 		TCCurrent: &protocol.AssociationRuntimeState{ID: "tc-current", SPI: 0x1001, Direction: protocol.DirectionTCTx,
-			State: protocol.AssociationCurrent, SuiteID: suite.AES256CTR.String(), SecurityEpoch: 3,
+			State: protocol.AssociationCurrent, SuiteID: suite.SM4HCTR.String(), SecurityEpoch: 3,
 			KeyVersion: 4, PolicyVersion: 2, TransmittedIVLength: 4, NextIVCounter: &counter},
 		AOSActive: []protocol.AssociationRuntimeState{}, Warnings: []string{},
 	}, nil
 }
 
-func TestTCDataAPIAcceptsOnlyPayloadAndReturnsSecurityData(t *testing.T) {
+func TestTCAPIConsumesAndReturnsCompleteFrames(t *testing.T) {
 	service := &fakeService{}
 	handler := authenticatedHandler(service, "ccsds:tc:protect")
-	body := []byte(`{"data":"` + base64.StdEncoding.EncodeToString([]byte("command")) + `"}`)
+	plainFrame := []byte{0x20, 0x01, 0, 0, 7, 0xca, 0xfe, 0, 0}
+	body := []byte(`{"frame":"` + base64.StdEncoding.EncodeToString(plainFrame) + `"}`)
 	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/tc:protect", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer test-token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || service.tenant != "tenant-1" || !bytes.Equal(service.input, []byte("command")) {
+	if response.Code != http.StatusOK || service.tenant != "tenant-1" || !bytes.Equal(service.input, plainFrame) {
 		t.Fatalf("status=%d tenant=%q input=%x body=%s", response.Code, service.tenant, service.input, response.Body.String())
 	}
 	var result struct {
-		SecurityData string `json:"security_data"`
+		ProtectedFrame string `json:"protected_frame"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.SecurityData != base64.StdEncoding.EncodeToString([]byte{0x10, 0x01, 0, 0, 0, 7, 0xaa}) {
+	if result.ProtectedFrame != base64.StdEncoding.EncodeToString([]byte{0x20, 0x01, 0, 0, 7, 0x10, 0x01, 0, 0, 0, 7, 0xaa, 0, 0}) {
 		t.Fatalf("response = %+v", result)
+	}
+}
+
+func TestTCAPIRejectsObsoleteDataOnlyContract(t *testing.T) {
+	service := &fakeService{}
+	handler := authenticatedHandler(service, "ccsds:tc:protect")
+	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/tc:protect",
+		bytes.NewReader([]byte(`{"data":"AQID"}`)))
+	request.Header.Set("Authorization", "Bearer test-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || len(service.input) != 0 {
+		t.Fatalf("obsolete data-only request accepted: status=%d input=%x", response.Code, service.input)
 	}
 }
 
@@ -99,11 +115,16 @@ func TestOperationsStatusExposesOnlyNonSecretRuntimeState(t *testing.T) {
 	}
 	body := response.Body.String()
 	if bytes.Contains([]byte(body), []byte("key_id")) || bytes.Contains([]byte(body), []byte("nonce_prefix")) ||
-		bytes.Contains([]byte(body), []byte("bitmap")) || bytes.Contains([]byte(body), []byte("root")) {
+		bytes.Contains([]byte(body), []byte("bitmap")) || bytes.Contains([]byte(body), []byte(`"root":`)) {
 		t.Fatalf("operations response exposed secret or internal state: %s", body)
 	}
 	if !bytes.Contains([]byte(body), []byte(`"warnings":[]`)) || !bytes.Contains([]byte(body), []byte(`"aos":[]`)) {
 		t.Fatalf("empty collections must use the strict JSON array contract: %s", body)
+	}
+	if !bytes.Contains([]byte(body), []byte(`"phase":"PREPARED"`)) ||
+		!bytes.Contains([]byte(body), []byte(`"evidence":"RECOVERY_FRAME_PRODUCED"`)) ||
+		!bytes.Contains([]byte(body), []byte(`"transaction_id":"18446744073709551615"`)) {
+		t.Fatalf("rotation evidence missing: %s", body)
 	}
 }
 

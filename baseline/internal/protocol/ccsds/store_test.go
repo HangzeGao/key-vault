@@ -140,3 +140,51 @@ func TestMemoryStoreCounterAndReplayFailures(t *testing.T) {
 		t.Fatalf("oversized replay window = %v", err)
 	}
 }
+
+func TestMemoryStoreRotationLifecycleIsClosed(t *testing.T) {
+	ctx := context.Background()
+	current, next := tcAssociation(), nextTCAssociation()
+	store, err := NewMemoryStore(current, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadTCRotationState(ctx, "tenant-1"); !errors.Is(err, ErrAssociationNotFound) {
+		t.Fatalf("missing=%v", err)
+	}
+	invalid := TCRotationState{Phase: TCRotationPrepared, TransactionID: 1, CurrentSPI: current.SPI,
+		NextSPI: next.SPI, CurrentRootVersion: current.KeyVersion, NextRootVersion: current.KeyVersion}
+	if err := store.MarkTCRotationPrepared(ctx, "tenant-1", invalid); !errors.Is(err, ErrAssociationState) {
+		t.Fatalf("invalid=%v", err)
+	}
+	prepared := TCRotationState{Phase: TCRotationPrepared, TransactionID: 2, CurrentSPI: current.SPI,
+		NextSPI: next.SPI, CurrentRootVersion: current.KeyVersion, NextRootVersion: next.KeyVersion}
+	if err := store.MarkTCRotationPrepared(ctx, "tenant-1", prepared); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := store.ReadTCRotationState(ctx, "tenant-1"); err != nil || state.TransactionID != 2 {
+		t.Fatalf("state=%+v err=%v", state, err)
+	}
+	if err := store.MarkTCRotationFrameProduced(ctx, "tenant-1", current.ID); !errors.Is(err, ErrAssociationState) {
+		t.Fatalf("early frame=%v", err)
+	}
+	if err := store.PromoteNextTC(ctx, "tenant-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkTCRotationFrameProduced(ctx, "tenant-1", "missing"); !errors.Is(err, ErrAssociationState) {
+		t.Fatalf("wrong frame=%v", err)
+	}
+	if err := store.MarkTCRotationFrameProduced(ctx, "tenant-1", next.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkTCRotationFrameProduced(ctx, "tenant-1", next.ID); err != nil {
+		t.Fatal(err)
+	}
+	state, err := store.ReadTCRotationState(ctx, "tenant-1")
+	if err != nil || state.Phase != TCRotationActive {
+		t.Fatalf("state=%+v err=%v", state, err)
+	}
+	empty, _ := NewMemoryStore(current)
+	if err := empty.MarkTCRotationFrameProduced(ctx, "tenant-1", current.ID); err != nil {
+		t.Fatal(err)
+	}
+}

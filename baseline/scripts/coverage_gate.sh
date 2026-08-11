@@ -34,6 +34,7 @@ mkdir -p -- "$COVERAGE_DIR"
 
 readonly C_SOURCES=(
   src/tc_security.c
+  src/tc_security_nvm.c
   src/sm4.c
   src/hctr.c
   src/gcm.c
@@ -58,7 +59,7 @@ readonly GCOV_OUTPUT="$COVERAGE_DIR/gcov-summary.txt"
   cd "$COVERAGE_DIR"
   gcov -b -c -o . \
     "$C_DIR/src/tc_security.c" "$C_DIR/src/sm4.c" "$C_DIR/src/hctr.c" \
-    "$C_DIR/src/gcm.c" "$C_DIR/src/kdf.c"
+    "$C_DIR/src/gcm.c" "$C_DIR/src/kdf.c" "$C_DIR/src/tc_security_nvm.c"
 ) | tee "$GCOV_OUTPUT"
 
 c_coverage="$(awk -F'[:%]' '/^Lines executed:/ { value=$2 } END { print value }' "$GCOV_OUTPUT")"

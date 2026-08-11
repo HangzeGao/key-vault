@@ -40,6 +40,13 @@ The flight API uses caller-owned contexts and contains no mutable global state.
 Calls using distinct contexts may be concurrent or nested. A single context
 owns replay and rotation state and must be serialized by flight software.
 
+The ground CCSDS module accepts a complete clear TC transfer frame and returns
+a complete protected TC transfer frame. It validates the input length and FECF,
+inserts the security field selected by the SA, rewrites the transfer-frame
+length, and recomputes FECF. Link software transports the returned bytes without
+performing a second framing step. Recovery GCM authenticates the final primary
+header together with `SPI || IV_COUNTER` as its 11-byte AAD.
+
 ## Consequences
 
 - HCTR preserves the existing frame length and removes CTR's controlled
@@ -51,3 +58,5 @@ owns replay and rotation state and must be serialized by flight software.
   retained; Previous/Grace and compatibility parsers are not introduced.
 - Ground and flight must pass the same KDF, standard HCTR, complete-frame, and
   non-block-aligned interoperability vectors.
+- The CCSDS module owns frame parsing and assembly; callers cannot submit a bare
+  data field or assemble a protected frame from returned fragments.

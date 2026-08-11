@@ -140,6 +140,83 @@ func scanOperationsState(row rowScanner) (*ccsds.AssociationRuntimeState, error)
 	return &state, nil
 }
 
+func (s *Store) ReadTCRotationState(ctx context.Context, tenantID string) (*ccsds.TCRotationState, error) {
+	var state ccsds.TCRotationState
+	var phase, transactionID string
+	err := s.db.QueryRowContext(ctx, `SELECT phase,transaction_id,current_spi,next_spi,current_root_version,next_root_version
+		FROM tc_rotation_states WHERE tenant_id=?`, tenantID).Scan(&phase, &transactionID, &state.CurrentSPI,
+		&state.NextSPI, &state.CurrentRootVersion, &state.NextRootVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ccsds.ErrAssociationNotFound
+	}
+	if err != nil {
+		return nil, wrap("read TC rotation state", err)
+	}
+	state.Phase = ccsds.TCRotationPhase(phase)
+	state.TransactionID, err = strconv.ParseUint(transactionID, 10, 64)
+	if err != nil || state.TransactionID == 0 || state.NextSPI != ccsds.NextSPI(state.CurrentSPI) ||
+		state.NextRootVersion <= state.CurrentRootVersion ||
+		(state.Phase != ccsds.TCRotationPrepared && state.Phase != ccsds.TCRotationSwitching && state.Phase != ccsds.TCRotationActive) {
+		return nil, errors.New("securitystate: invalid persisted TC rotation state")
+	}
+	return &state, nil
+}
+
+func (s *Store) MarkTCRotationPrepared(ctx context.Context, tenantID string, state ccsds.TCRotationState) error {
+	if state.Phase != ccsds.TCRotationPrepared || state.TransactionID == 0 ||
+		state.NextSPI != ccsds.NextSPI(state.CurrentSPI) || state.NextRootVersion <= state.CurrentRootVersion {
+		return ccsds.ErrAssociationState
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return wrap("begin TC rotation prepare", err)
+	}
+	defer tx.Rollback()
+	var count int
+	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_associations WHERE tenant_id=? AND direction='TC_TX' AND
+		((state='CURRENT' AND spi=? AND key_version=?) OR (state='NEXT' AND spi=? AND key_version=?))`,
+		tenantID, state.CurrentSPI, state.CurrentRootVersion, state.NextSPI, state.NextRootVersion).Scan(&count)
+	if err != nil {
+		return wrap("validate TC rotation associations", err)
+	}
+	if count != 2 {
+		return ccsds.ErrAssociationState
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO tc_rotation_states(tenant_id,phase,transaction_id,current_spi,next_spi,
+		current_root_version,next_root_version,updated_at) VALUES(?,?,?,?,?,?,?,?)
+		ON CONFLICT(tenant_id) DO UPDATE SET phase=excluded.phase,transaction_id=excluded.transaction_id,
+		current_spi=excluded.current_spi,next_spi=excluded.next_spi,current_root_version=excluded.current_root_version,
+		next_root_version=excluded.next_root_version,updated_at=excluded.updated_at`, tenantID, string(state.Phase),
+		strconv.FormatUint(state.TransactionID, 10), state.CurrentSPI, state.NextSPI, state.CurrentRootVersion,
+		state.NextRootVersion, formatTime(time.Now()))
+	if err != nil {
+		return wrap("write TC rotation prepare", err)
+	}
+	return wrap("commit TC rotation prepare", tx.Commit())
+}
+
+func (s *Store) MarkTCRotationFrameProduced(ctx context.Context, tenantID, associationID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE tc_rotation_states SET phase='ACTIVE',updated_at=? WHERE tenant_id=? AND phase='SWITCHING'
+		AND EXISTS(SELECT 1 FROM security_associations sa WHERE sa.id=? AND sa.tenant_id=tc_rotation_states.tenant_id
+		AND sa.direction='TC_TX' AND sa.state='CURRENT' AND sa.spi=tc_rotation_states.next_spi
+		AND sa.key_version=tc_rotation_states.next_root_version)`, formatTime(time.Now()), tenantID, associationID)
+	if err != nil {
+		return wrap("complete TC rotation", err)
+	}
+	if count, _ := result.RowsAffected(); count == 1 {
+		return nil
+	}
+	var phase string
+	err = s.db.QueryRowContext(ctx, `SELECT phase FROM tc_rotation_states WHERE tenant_id=?`, tenantID).Scan(&phase)
+	if errors.Is(err, sql.ErrNoRows) || phase == string(ccsds.TCRotationActive) {
+		return nil
+	}
+	if err != nil {
+		return wrap("read TC rotation completion", err)
+	}
+	return ccsds.ErrAssociationState
+}
+
 func (s *Store) PromoteNextTC(ctx context.Context, tenantID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -156,6 +233,18 @@ func (s *Store) PromoteNextTC(ctx context.Context, tenantID string) error {
 	if err != nil {
 		return ccsds.ErrAssociationState
 	}
+	var rotationPhase, transactionID string
+	var rotationCurrentSPI, rotationNextSPI uint16
+	var rotationCurrentVersion, rotationNextVersion uint32
+	err = tx.QueryRowContext(ctx, `SELECT phase,transaction_id,current_spi,next_spi,current_root_version,next_root_version
+		FROM tc_rotation_states WHERE tenant_id=?`, tenantID).Scan(&rotationPhase, &transactionID,
+		&rotationCurrentSPI, &rotationNextSPI, &rotationCurrentVersion, &rotationNextVersion)
+	parsedTransactionID, parseErr := strconv.ParseUint(transactionID, 10, 64)
+	if err != nil || parseErr != nil || parsedTransactionID == 0 || rotationPhase != string(ccsds.TCRotationPrepared) ||
+		rotationCurrentSPI != current.SPI || rotationNextSPI != next.SPI ||
+		rotationCurrentVersion != current.KeyVersion || rotationNextVersion != next.KeyVersion {
+		return ccsds.ErrAssociationState
+	}
 	if next.SPI != ccsds.NextSPI(current.SPI) ||
 		next.SecurityEpoch != current.SecurityEpoch+1 || string(next.Parameters.NoncePrefix) != string(current.Parameters.NoncePrefix) {
 		return ccsds.ErrAssociationState
@@ -170,6 +259,14 @@ func (s *Store) PromoteNextTC(ctx context.Context, tenantID string) error {
 	result, err = tx.ExecContext(ctx, `UPDATE security_associations SET state='CURRENT' WHERE id=? AND state='NEXT'`, next.ID)
 	if err != nil {
 		return wrap("promote next TC", err)
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return ccsds.ErrAssociationState
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE tc_rotation_states SET phase='SWITCHING',updated_at=?
+		WHERE tenant_id=? AND phase='PREPARED'`, formatTime(time.Now()), tenantID)
+	if err != nil {
+		return wrap("advance TC rotation state", err)
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return ccsds.ErrAssociationState

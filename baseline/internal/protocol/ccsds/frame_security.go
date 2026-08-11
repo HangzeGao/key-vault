@@ -38,20 +38,22 @@ func New(core ProtectionCore, store Store, options Options) (*FrameSecurity, err
 }
 
 // AdvanceTCTransmitEpoch is a ground-local state change. It emits no management
-// frame: the next ProtectTCData call uses the unique NEXT association, and the
+// frame: the next ProtectTCFrame call uses the unique NEXT association, and the
 // flight receiver converges when that first valid next-SPI frame arrives.
 func (s *FrameSecurity) AdvanceTCTransmitEpoch(ctx context.Context, tenantID string) error {
 	return s.store.PromoteNextTC(ctx, tenantID)
 }
 
-// ProtectTCData protects only the caller-owned TC data field. It selects the
-// tenant's unique CURRENT association and owns SPI, IV, KDF, and ciphertext.
-// The transport caller prepends its primary header and appends FECF.
-func (s *FrameSecurity) ProtectTCData(ctx context.Context, tenantID string, data []byte) (*ProtectedTCData, error) {
-	if len(data) < 16 || TCPrimaryHeaderLength+TCSecurityHeaderLength+len(data)+TCFECFLength > TCMaxFrameLength ||
-		TCPrimaryHeaderLength+TCSecurityHeaderLength+len(data)+TCFECFLength > s.options.MaxFrameLength {
-		return nil, ErrFrameInvalid
+// ProtectTCFrame transforms one complete plaintext TC transfer frame into the
+// complete protected frame accepted by flight. It validates the caller's frame
+// and FECF before allocating an IV, then owns security-header insertion, frame
+// length rewriting, and the new FECF.
+func (s *FrameSecurity) ProtectTCFrame(ctx context.Context, tenantID string, frame []byte) (*ProtectedTCFrame, error) {
+	primaryHeader, data, err := splitPlainTCFrame(frame, s.options.MaxFrameLength)
+	if err != nil {
+		return nil, err
 	}
+	defer zeroizeBytes(data)
 	sa, err := s.store.GetTransmitAssociation(ctx, tenantID, DirectionTCTx)
 	if err != nil {
 		return nil, err
@@ -88,14 +90,25 @@ func (s *FrameSecurity) ProtectTCData(ctx context.Context, tenantID string, data
 		len(result.Data) != len(data) || len(result.Tag) != 0 || !equalBytes(result.Nonce, tweak) {
 		return nil, fmt.Errorf("%w: protection result does not match association binding", ErrFrameInvalid)
 	}
-	return &ProtectedTCData{Data: join(securityHeader, result.Data),
+	protectedFrame, err := assembleTCFrame(primaryHeader, join(securityHeader, result.Data), s.options.MaxFrameLength)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.MarkTCRotationFrameProduced(ctx, tenantID, sa.ID); err != nil {
+		return nil, err
+	}
+	return &ProtectedTCFrame{Frame: protectedFrame,
 		Metadata: metadata(*sa, uint64(counter), result.ServiceType)}, nil
 }
 
-// ProtectRootPrepareData constructs the one authenticated transaction allowed
-// to install the operational root for the next ordinary SPI. It returns only
-// SPI||IV||ciphertext||tag and authenticates the six-byte security header.
-func (s *FrameSecurity) ProtectRootPrepareData(ctx context.Context, tenantID string, command RootPrepareCommand) (*ProtectedTCData, error) {
+// ProtectRootPrepareFrame constructs the one authenticated transaction allowed
+// to install the operational root for the next ordinary SPI. It returns a
+// complete TC frame and authenticates its final primary and security headers.
+func (s *FrameSecurity) ProtectRootPrepareFrame(ctx context.Context, tenantID string, primaryHeader []byte,
+	command RootPrepareCommand) (*ProtectedTCFrame, error) {
+	if len(primaryHeader) != TCPrimaryHeaderLength {
+		return nil, ErrFrameInvalid
+	}
 	plaintext, err := command.MarshalBinary()
 	if err != nil {
 		return nil, err
@@ -116,8 +129,9 @@ func (s *FrameSecurity) ProtectRootPrepareData(ctx context.Context, tenantID str
 		!equalBytes(current.Parameters.NoncePrefix, next.Parameters.NoncePrefix) {
 		return nil, ErrAssociationState
 	}
-	frameLength := TCPrimaryHeaderLength + TCSecurityHeaderLength + len(plaintext) + TCRecoveryTagLength + TCFECFLength
-	if frameLength > TCMaxFrameLength || frameLength > s.options.MaxFrameLength {
+	finalPrimaryHeader, err := prepareTCPrimaryHeader(primaryHeader,
+		TCSecurityHeaderLength+len(plaintext)+TCRecoveryTagLength, s.options.MaxFrameLength)
+	if err != nil {
 		return nil, ErrFrameInvalid
 	}
 	sa, err := s.store.GetTransmitAssociation(ctx, tenantID, DirectionTCRecoveryTx)
@@ -136,7 +150,7 @@ func (s *FrameSecurity) ProtectRootPrepareData(ctx context.Context, tenantID str
 	}
 	securityHeader := encodeTCSecurityHeader(sa.SPI, counter)
 	nonce := tcRecoveryNonce(sa.Parameters.NoncePrefix, sa.SPI, counter)
-	aad := append([]byte(nil), securityHeader...)
+	aad := join(finalPrimaryHeader, securityHeader)
 	suiteID, _ := suite.Parse(sa.SuiteID)
 	result, err := s.core.ProtectDerived(ctx, protection.ProtectRequest{
 		TenantID: tenantID, KeyID: sa.KeyID, UsageScope: models.KeyUsageProtocol,
@@ -152,7 +166,13 @@ func (s *FrameSecurity) ProtectRootPrepareData(ctx context.Context, tenantID str
 		len(result.Tag) != TCRecoveryTagLength || !equalBytes(result.Nonce, nonce) || len(result.Data) != len(plaintext) {
 		return nil, fmt.Errorf("%w: recovery protection result does not match association binding", ErrFrameInvalid)
 	}
-	return &ProtectedTCData{Data: join(securityHeader, result.Data, result.Tag),
+	if err := s.store.MarkTCRotationPrepared(ctx, tenantID, TCRotationState{Phase: TCRotationPrepared,
+		TransactionID: command.TransactionID, CurrentSPI: current.SPI, NextSPI: next.SPI,
+		CurrentRootVersion: current.KeyVersion, NextRootVersion: next.KeyVersion}); err != nil {
+		return nil, err
+	}
+	protectedFrame := appendTCFECF(join(finalPrimaryHeader, securityHeader, result.Data, result.Tag))
+	return &ProtectedTCFrame{Frame: protectedFrame,
 		Metadata: metadata(*sa, uint64(counter), result.ServiceType)}, nil
 }
 

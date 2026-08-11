@@ -1,6 +1,5 @@
-// Command ccsds-provision performs offline initial provisioning for the
-// mission-scoped CCSDS security associations. It exposes no network listener
-// and never prints or persists plaintext key material.
+// Command ccsds-provision consumes one controlled Mission Security Profile and
+// creates matching ground state, flight NVM, Recovery frame, and hash evidence.
 package main
 
 import (
@@ -8,11 +7,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/kvlt/key-vault/internal/auditchain"
@@ -25,60 +26,63 @@ import (
 )
 
 const (
-	defaultTenant      = "t-default"
-	defaultPolicyID    = "default-v1"
-	defaultPolicyVer   = 1
-	defaultCurrentSPI  = 0x1001
-	defaultRecoverySPI = 0x7001
-	defaultAOSSPI      = 0x2001
-	defaultEpoch       = 1
-	defaultReplay      = 32
+	defaultPolicyID  = "default-v1"
+	defaultPolicyVer = 1
 )
 
-type profile struct {
-	ordinarySuite string
-	recoverySuite string
-	aosSuite      string
-}
-
 func main() {
-	configPath := flag.String("config", "", "path to YAML config file")
-	tenantID := flag.String("tenant", defaultTenant, "tenant to provision")
-	currentSPI := flag.Uint("tc-current-spi", defaultCurrentSPI, "ordinary TC Current SPI")
-	recoverySPI := flag.Uint("tc-recovery-spi", defaultRecoverySPI, "Recovery GCM SPI")
-	aosSPI := flag.Uint("aos-spi", defaultAOSSPI, "AOS receive SPI")
-	epoch := flag.Uint("tc-security-epoch", defaultEpoch, "initial ordinary TC security epoch")
-	replayWindow := flag.Uint("aos-replay-window", defaultReplay, "AOS replay window (1..64)")
+	configPath := flag.String("config", "", "path to ground YAML configuration")
+	profilePath := flag.String("mission-profile", "", "path to the controlled Mission Security Profile")
+	artifactsDir := flag.String("artifacts-dir", "", "private directory for flight NVM, Recovery frame, and evidence")
 	flag.Parse()
-
-	if err := run(context.Background(), provisionOptions{
-		configPath: *configPath, tenantID: *tenantID,
-		currentSPI: *currentSPI, recoverySPI: *recoverySPI, aosSPI: *aosSPI,
-		epoch: *epoch, replayWindow: *replayWindow,
-	}); err != nil {
+	if err := run(context.Background(), provisionOptions{configPath: *configPath,
+		profilePath: *profilePath, artifactsDir: *artifactsDir}); err != nil {
 		slog.Error("CCSDS provisioning failed", "error", err)
 		os.Exit(1)
 	}
 }
 
 type provisionOptions struct {
-	configPath   string
-	tenantID     string
-	currentSPI   uint
-	recoverySPI  uint
-	aosSPI       uint
-	epoch        uint
-	replayWindow uint
+	configPath, profilePath, artifactsDir string
+}
+
+func (options provisionOptions) validate() error {
+	if options.profilePath == "" || options.artifactsDir == "" {
+		return errors.New("mission-profile and artifacts-dir are required")
+	}
+	return nil
 }
 
 func run(ctx context.Context, options provisionOptions) error {
 	if err := options.validate(); err != nil {
 		return err
 	}
-	profile := tcProfile()
+	file, err := os.Open(options.profilePath)
+	if err != nil {
+		return fmt.Errorf("open mission profile: %w", err)
+	}
+	profile, err := ccsds.DecodeMissionSecurityProfile(file)
+	closeErr := file.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close mission profile: %w", closeErr)
+	}
+	digest, _ := profile.Digest()
+	secrets, err := profile.Secrets()
+	if err != nil {
+		return err
+	}
+	defer secrets.Zeroize()
+
 	cfg, err := config.Load(options.configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	if cfg.CCSDS.TCSpacecraftID != profile.SpacecraftID {
+		return fmt.Errorf("mission profile spacecraft_id 0x%03X does not match ground config 0x%03X",
+			profile.SpacecraftID, cfg.CCSDS.TCSpacecraftID)
 	}
 	app, err := bootstrap.Build(ctx, cfg)
 	if err != nil {
@@ -86,75 +90,84 @@ func run(ctx context.Context, options provisionOptions) error {
 	}
 	defer app.Store.Close()
 
-	ids := provisionIDs(options.tenantID)
-	keysToEnsure := []keySpec{
-		{id: ids.operationalKey, name: "CCSDS TC operational root", suite: profile.ordinarySuite},
-		{id: ids.recoveryKey, name: "CCSDS TC Recovery root", suite: profile.recoverySuite},
-		{id: ids.aosKey, name: "CCSDS AOS receive key", suite: profile.aosSuite},
+	ids := provisionIDs(profile.TenantID, profile.TC.CurrentRootVersion, profile.TC.NextRootVersion)
+	keySpecs := []keySpec{
+		{id: ids.CurrentKey, name: "CCSDS TC current operational root", suite: "SM4_HCTR", version: profile.TC.CurrentRootVersion, material: secrets.CurrentRoot},
+		{id: ids.NextKey, name: "CCSDS TC next operational root", suite: "SM4_HCTR", version: profile.TC.NextRootVersion, material: secrets.NextRoot},
+		{id: ids.RecoveryKey, name: "CCSDS TC Recovery root", suite: "SM4_GCM", version: profile.TC.RecoveryRootVersion, material: secrets.RecoveryRoot},
+		{id: ids.AOSKey, name: "CCSDS AOS receive key", suite: "SM4_GCM", version: profile.AOS.KeyVersion, material: secrets.AOSKey},
 	}
-	for _, spec := range keysToEnsure {
-		if err := ensureProtocolKey(ctx, app, options.tenantID, spec); err != nil {
+	for _, spec := range keySpecs {
+		if err := ensureProtocolKey(ctx, app, profile.TenantID, hex.EncodeToString(digest[:]), spec); err != nil {
 			return err
 		}
 	}
-
-	associations := desiredAssociations(options, profile, ids)
+	associations, err := profile.Associations(ids, defaultPolicyVer)
+	if err != nil {
+		return err
+	}
 	for _, association := range associations {
 		created, err := ensureAssociation(ctx, app, association)
 		if err != nil {
 			return err
 		}
-		state := "verified"
+		result := "verified"
 		if created {
-			state = "created"
+			result = "created"
 		}
 		slog.Info("CCSDS association ready", "association_id", association.ID,
 			"direction", association.Direction, "state", association.State,
-			"spi", fmt.Sprintf("0x%04X", association.SPI), "result", state)
+			"spi", fmt.Sprintf("0x%04X", association.SPI), "result", result)
 	}
-	slog.Info("CCSDS provisioning complete", "tenant_id", options.tenantID,
-		"TC_profile", profile.ordinarySuite, "associations", len(associations))
+	command, primaryHeader, err := profile.RootPrepareCommand()
+	if err != nil {
+		return err
+	}
+	defer clear(command.NewOperationalRoot)
+	recoveryFrame, err := app.CCSDSFrameSecurity.ProtectRootPrepareFrame(ctx, profile.TenantID, primaryHeader, command)
+	if err != nil {
+		return fmt.Errorf("create authenticated Recovery frame: %w", err)
+	}
+	flightNVM, err := profile.MarshalInitialFlightNVM(profile.TC.CurrentRootVersion)
+	if err != nil {
+		return err
+	}
+	defer clear(flightNVM)
+	if err := writeArtifacts(options.artifactsDir, *profile, digest, flightNVM, recoveryFrame.Frame); err != nil {
+		return err
+	}
+	slog.Info("CCSDS mission provisioning complete", "mission_id", profile.MissionID,
+		"tenant_id", profile.TenantID, "profile_sha256", hex.EncodeToString(digest[:]),
+		"artifacts_dir", options.artifactsDir)
 	return nil
-}
-
-func (options provisionOptions) validate() error {
-	if options.tenantID == "" {
-		return errors.New("tenant is required")
-	}
-	if options.currentSPI > 0xffff || options.recoverySPI > 0xffff || options.aosSPI > 0xffff {
-		return errors.New("SPI values must be in the range 0x0000..0xFFFF")
-	}
-	nextSPI := uint(ccsds.NextSPI(uint16(options.currentSPI)))
-	if options.recoverySPI == options.currentSPI || options.recoverySPI == nextSPI ||
-		options.aosSPI == options.currentSPI || options.aosSPI == nextSPI || options.aosSPI == options.recoverySPI {
-		return errors.New("Current, Next, Recovery, and AOS SPIs must be distinct")
-	}
-	if options.epoch == 0 || options.epoch >= 0xffffffff {
-		return errors.New("TC security epoch must be 1..4294967294")
-	}
-	if options.replayWindow == 0 || options.replayWindow > 64 {
-		return errors.New("AOS replay window must be 1..64")
-	}
-	return nil
-}
-
-func tcProfile() profile {
-	return profile{ordinarySuite: "SM4_HCTR", recoverySuite: "SM4_GCM", aosSuite: "SM4_GCM"}
 }
 
 type keySpec struct {
-	id    string
-	name  string
-	suite string
+	id, name, suite string
+	version         uint32
+	material        []byte
 }
 
-func ensureProtocolKey(ctx context.Context, app *bootstrap.App, tenantID string, spec keySpec) error {
+func ensureProtocolKey(ctx context.Context, app *bootstrap.App, tenantID, profileDigest string, spec keySpec) error {
 	existing, err := app.Store.GetKey(ctx, tenantID, spec.id)
 	if err == nil {
 		if existing.TenantID != tenantID || existing.Purpose != "encrypt_decrypt" ||
 			existing.UsageScope != models.KeyUsageProtocol || existing.PolicyID != defaultPolicyID ||
-			existing.SuiteID != spec.suite || existing.CurrentVersion != 1 || existing.Status != "ACTIVE" {
-			return fmt.Errorf("existing protocol key %s does not match the strict provisioning profile", spec.id)
+			existing.SuiteID != spec.suite || existing.CurrentVersion != spec.version ||
+			existing.Status != "ACTIVE" {
+			return fmt.Errorf("existing protocol key %s does not match the strict mission profile", spec.id)
+		}
+		version, err := app.Store.GetKeyVersionByNo(ctx, spec.id, spec.version)
+		if err != nil {
+			return fmt.Errorf("read protocol key version %s: %w", spec.id, err)
+		}
+		plaintext, err := app.Resolver.UnwrapDEK(ctx, version.WrappedDEK, version.WrapMetadata, version.ID)
+		if err != nil {
+			return fmt.Errorf("verify protocol key %s: %w", spec.id, err)
+		}
+		defer clear(plaintext)
+		if !bytes.Equal(plaintext, spec.material) {
+			return fmt.Errorf("existing protocol key %s material does not match the mission profile", spec.id)
 		}
 		return nil
 	}
@@ -163,19 +176,19 @@ func ensureProtocolKey(ctx context.Context, app *bootstrap.App, tenantID string,
 	}
 	suiteID, err := suite.Parse(spec.suite)
 	if err != nil {
-		return fmt.Errorf("parse protocol key suite %s: %w", spec.id, err)
+		return err
 	}
-	versionID := spec.id + "-v1"
-	material, err := app.Resolver.GenerateAndWrapDEK(ctx, suiteID, versionID)
+	versionID := fmt.Sprintf("%s-v%d", spec.id, spec.version)
+	material, err := app.Resolver.WrapExternalKey(ctx, suiteID, versionID, spec.material)
 	if err != nil {
-		return fmt.Errorf("generate protocol key %s: %w", spec.id, err)
+		return fmt.Errorf("wrap protocol key %s: %w", spec.id, err)
 	}
 	now := time.Now().UTC()
 	key := &models.Key{ID: spec.id, TenantID: tenantID, Name: spec.name, Purpose: "encrypt_decrypt",
 		UsageScope: models.KeyUsageProtocol, PolicyID: defaultPolicyID, SuiteID: spec.suite,
-		CurrentVersion: 1, Status: "ACTIVE", Tags: map[string]string{"owner": "ccsds", "provisioning": "offline"},
-		CreatedAt: now, UpdatedAt: now}
-	version := &models.KeyVersion{ID: versionID, KeyID: spec.id, VersionNo: 1, SuiteID: spec.suite,
+		CurrentVersion: spec.version, Status: "ACTIVE", Tags: map[string]string{"owner": "ccsds",
+			"provisioning": "mission-profile", "mission_profile_sha256": profileDigest}, CreatedAt: now, UpdatedAt: now}
+	version := &models.KeyVersion{ID: versionID, KeyID: spec.id, VersionNo: spec.version, SuiteID: spec.suite,
 		WrappedDEK: material.WrappedDEK, WrapMetadata: material.WrapMetadata, Status: "ACTIVE", CreatedAt: now}
 	if err := app.Store.CreateProtocolKey(ctx, key, version); err != nil {
 		return fmt.Errorf("create protocol key %s: %w", spec.id, err)
@@ -183,65 +196,20 @@ func ensureProtocolKey(ctx context.Context, app *bootstrap.App, tenantID string,
 	return nil
 }
 
-type provisionedIDs struct {
-	operationalKey string
-	recoveryKey    string
-	aosKey         string
-	currentSA      string
-	nextSA         string
-	recoverySA     string
-	aosSA          string
-}
+type provisionedIDs = ccsds.MissionAssociationIDs
 
-func provisionIDs(tenantID string) provisionedIDs {
+func provisionIDs(tenantID string, currentVersion, nextVersion uint32) provisionedIDs {
 	digest := sha256.Sum256([]byte(tenantID))
 	scope := hex.EncodeToString(digest[:6])
+	prefix := "ccsds-" + scope
 	return provisionedIDs{
-		operationalKey: "ccsds-" + scope + "-tc-operational-root",
-		recoveryKey:    "ccsds-" + scope + "-tc-recovery-root",
-		aosKey:         "ccsds-" + scope + "-aos-receive-key",
-		currentSA:      "ccsds-" + scope + "-tc-current",
-		nextSA:         "ccsds-" + scope + "-tc-next",
-		recoverySA:     "ccsds-" + scope + "-tc-recovery",
-		aosSA:          "ccsds-" + scope + "-aos-receive",
+		CurrentKey:  fmt.Sprintf("%s-tc-root-v%d", prefix, currentVersion),
+		NextKey:     fmt.Sprintf("%s-tc-root-v%d", prefix, nextVersion),
+		RecoveryKey: prefix + "-tc-recovery-root", AOSKey: prefix + "-aos-receive-key",
+		CurrentSA:  fmt.Sprintf("%s-tc-sa-v%d", prefix, currentVersion),
+		NextSA:     fmt.Sprintf("%s-tc-sa-v%d", prefix, nextVersion),
+		RecoverySA: prefix + "-tc-recovery", AOSSA: prefix + "-aos-receive",
 	}
-}
-
-func desiredAssociations(options provisionOptions, profile profile, ids provisionedIDs) []ccsds.SecurityAssociation {
-	tcPrefix := noncePrefix(options.tenantID, "TC-ORDINARY")
-	recoveryPrefix := noncePrefix(options.tenantID, "TC-RECOVERY")
-	current := ccsds.SecurityAssociation{
-		ID: ids.currentSA, TenantID: options.tenantID, SPI: uint16(options.currentSPI),
-		Direction: ccsds.DirectionTCTx, KeyID: ids.operationalKey, KeyVersion: 1,
-		SecurityEpoch: uint32(options.epoch), PolicyVersion: defaultPolicyVer,
-		SuiteID: profile.ordinarySuite, State: ccsds.AssociationCurrent,
-		Parameters: ccsds.ManagedParameters{TransmittedIVLength: ccsds.TCIVCounterLength, NoncePrefix: tcPrefix},
-	}
-	next := current
-	next.ID = ids.nextSA
-	next.SPI = ccsds.NextSPI(current.SPI)
-	next.SecurityEpoch++
-	next.State = ccsds.AssociationNext
-	recovery := ccsds.SecurityAssociation{
-		ID: ids.recoverySA, TenantID: options.tenantID, SPI: uint16(options.recoverySPI),
-		Direction: ccsds.DirectionTCRecoveryTx, KeyID: ids.recoveryKey, KeyVersion: 1,
-		PolicyVersion: defaultPolicyVer, SuiteID: profile.recoverySuite, State: ccsds.AssociationActive,
-		Parameters: ccsds.ManagedParameters{TransmittedIVLength: ccsds.TCIVCounterLength,
-			TagLength: ccsds.TCRecoveryTagLength, NoncePrefix: recoveryPrefix},
-	}
-	aos := ccsds.SecurityAssociation{
-		ID: ids.aosSA, TenantID: options.tenantID, SPI: uint16(options.aosSPI),
-		Direction: ccsds.DirectionAOSRx, KeyID: ids.aosKey, KeyVersion: 1,
-		PolicyVersion: defaultPolicyVer, SuiteID: profile.aosSuite, State: ccsds.AssociationActive,
-		Parameters: ccsds.ManagedParameters{SequenceNumberLength: 4, TransmittedIVLength: 12,
-			TagLength: 16, ReplayWindow: uint8(options.replayWindow), NoncePrefix: []byte{}},
-	}
-	return []ccsds.SecurityAssociation{current, next, recovery, aos}
-}
-
-func noncePrefix(tenantID, domain string) []byte {
-	digest := sha256.Sum256([]byte("CCSDS-NONCE-PREFIX\x00" + tenantID + "\x00" + domain))
-	return append([]byte(nil), digest[:ccsds.TCNoncePrefixLength]...)
 }
 
 func ensureAssociation(ctx context.Context, app *bootstrap.App, desired ccsds.SecurityAssociation) (bool, error) {
@@ -251,31 +219,26 @@ func ensureAssociation(ctx context.Context, app *bootstrap.App, desired ccsds.Se
 	existing, err := app.CCSDSStore.GetAssociation(ctx, desired.TenantID, desired.ID)
 	if err == nil {
 		if !associationEqual(*existing, desired) {
-			return false, fmt.Errorf("existing association %s does not match the strict provisioning profile", desired.ID)
+			return false, fmt.Errorf("existing association %s does not match the strict mission profile", desired.ID)
 		}
 		return false, nil
 	}
 	if !errors.Is(err, ccsds.ErrAssociationNotFound) {
 		return false, fmt.Errorf("read association %s: %w", desired.ID, err)
 	}
-	if err := app.AuditChain.Record(ctx, auditchain.RecordRequest{
-		TenantID: desired.TenantID, ActorType: "system", ActorHash: "offline:ccsds-provision",
-		Action: "ccsds.association.provision.requested", TargetType: "ccsds_association",
-		TargetIDHash: shortHash(desired.ID), Result: "requested",
-		Metadata: map[string]string{"direction": string(desired.Direction), "spi": fmt.Sprintf("0x%04X", desired.SPI)},
-	}); err != nil {
+	if err := app.AuditChain.Record(ctx, auditchain.RecordRequest{TenantID: desired.TenantID,
+		ActorType: "system", ActorHash: "offline:ccsds-provision", Action: "ccsds.association.provision.requested",
+		TargetType: "ccsds_association", TargetIDHash: shortHash(desired.ID), Result: "requested",
+		Metadata: map[string]string{"direction": string(desired.Direction), "spi": fmt.Sprintf("0x%04X", desired.SPI)}}); err != nil {
 		return false, fmt.Errorf("audit association provisioning: %w", err)
 	}
-	err = app.Store.CreateAssociation(ctx, desired)
-	if err != nil {
+	if err := app.Store.CreateAssociation(ctx, desired); err != nil {
 		return false, fmt.Errorf("create association %s: %w", desired.ID, err)
 	}
-	if err := app.AuditChain.Record(ctx, auditchain.RecordRequest{
-		TenantID: desired.TenantID, ActorType: "system", ActorHash: "offline:ccsds-provision",
-		Action: "ccsds.association.provisioned", TargetType: "ccsds_association",
-		TargetIDHash: shortHash(desired.ID), Result: "success",
-		Metadata: map[string]string{"direction": string(desired.Direction), "spi": fmt.Sprintf("0x%04X", desired.SPI)},
-	}); err != nil {
+	if err := app.AuditChain.Record(ctx, auditchain.RecordRequest{TenantID: desired.TenantID,
+		ActorType: "system", ActorHash: "offline:ccsds-provision", Action: "ccsds.association.provisioned",
+		TargetType: "ccsds_association", TargetIDHash: shortHash(desired.ID), Result: "success",
+		Metadata: map[string]string{"direction": string(desired.Direction), "spi": fmt.Sprintf("0x%04X", desired.SPI)}}); err != nil {
 		return true, fmt.Errorf("association %s was created but success audit failed: %w", desired.ID, err)
 	}
 	return true, nil
@@ -288,12 +251,93 @@ func associationEqual(left, right ccsds.SecurityAssociation) bool {
 		left.SuiteID == right.SuiteID && left.State == right.State &&
 		left.Parameters.SequenceNumberLength == right.Parameters.SequenceNumberLength &&
 		left.Parameters.TransmittedIVLength == right.Parameters.TransmittedIVLength &&
-		left.Parameters.TagLength == right.Parameters.TagLength &&
-		left.Parameters.ReplayWindow == right.Parameters.ReplayWindow &&
+		left.Parameters.TagLength == right.Parameters.TagLength && left.Parameters.ReplayWindow == right.Parameters.ReplayWindow &&
 		bytes.Equal(left.Parameters.NoncePrefix, right.Parameters.NoncePrefix)
 }
 
-func shortHash(value string) string {
-	digest := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(digest[:8])
+type releaseEvidence struct {
+	FormatVersion       uint16 `json:"format_version"`
+	MissionID           string `json:"mission_id"`
+	TenantID            string `json:"tenant_id"`
+	ProfileSHA256       string `json:"profile_sha256"`
+	FlightNVMSHA256     string `json:"flight_nvm_sha256"`
+	RecoveryFrameSHA256 string `json:"recovery_frame_sha256"`
+	CurrentSPI          uint16 `json:"current_spi"`
+	NextSPI             uint16 `json:"next_spi"`
+	RecoverySPI         uint16 `json:"recovery_spi"`
+	CurrentRootVersion  uint32 `json:"current_root_version"`
+	NextRootVersion     uint32 `json:"next_root_version"`
+}
+
+func writeArtifacts(directory string, profile ccsds.MissionSecurityProfile, digest [32]byte,
+	flightNVM, recoveryFrame []byte) error {
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return fmt.Errorf("create artifact directory: %w", err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		return fmt.Errorf("protect artifact directory: %w", err)
+	}
+	evidence := releaseEvidence{FormatVersion: 1, MissionID: profile.MissionID, TenantID: profile.TenantID,
+		ProfileSHA256: hex.EncodeToString(digest[:]), FlightNVMSHA256: digestBytes(flightNVM),
+		RecoveryFrameSHA256: digestBytes(recoveryFrame), CurrentSPI: profile.TC.CurrentSPI,
+		NextSPI: ccsds.NextSPI(profile.TC.CurrentSPI), RecoverySPI: profile.TC.RecoverySPI,
+		CurrentRootVersion: profile.TC.CurrentRootVersion, NextRootVersion: profile.TC.NextRootVersion}
+	encodedEvidence, err := json.MarshalIndent(evidence, "", "  ")
+	if err != nil {
+		return err
+	}
+	encodedEvidence = append(encodedEvidence, '\n')
+	for _, artifact := range []struct {
+		name string
+		data []byte
+	}{
+		{"flight-tcsec.nvm", flightNVM}, {"root-prepare.tc", recoveryFrame},
+		// Evidence is installed last. Its hashes make any interrupted prior
+		// artifact replacement detectable on the next verification.
+		{"release-evidence.json", encodedEvidence},
+	} {
+		if err := writeAtomicPrivate(filepath.Join(directory, artifact.name), artifact.data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeAtomicPrivate(path string, data []byte) error {
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".tcsec-artifact-*")
+	if err != nil {
+		return fmt.Errorf("create temporary artifact: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(data); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("install artifact %s: %w", filepath.Base(path), err)
+	}
+	return nil
+}
+
+func shortHash(value string) string { return digestBytes([]byte(value))[:16] }
+func digestBytes(value []byte) string {
+	digest := sha256.Sum256(value)
+	return hex.EncodeToString(digest[:])
+}
+func clear(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }

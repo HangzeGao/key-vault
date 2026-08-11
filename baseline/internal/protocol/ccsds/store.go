@@ -14,6 +14,9 @@ type Store interface {
 	GetAssociationBySPI(ctx context.Context, tenantID string, direction Direction, spi uint16) (*SecurityAssociation, error)
 	GetTransmitAssociation(ctx context.Context, tenantID string, direction Direction) (*SecurityAssociation, error)
 	ReadOperationsState(ctx context.Context, tenantID string) ([]AssociationRuntimeState, error)
+	ReadTCRotationState(ctx context.Context, tenantID string) (*TCRotationState, error)
+	MarkTCRotationPrepared(ctx context.Context, tenantID string, state TCRotationState) error
+	MarkTCRotationFrameProduced(ctx context.Context, tenantID, associationID string) error
 	PromoteNextTC(ctx context.Context, tenantID string) error
 	NextTransmitCounter(ctx context.Context, associationID string) (uint32, error)
 	CheckReplay(ctx context.Context, associationID string, sequence uint64, window uint8) error
@@ -24,11 +27,12 @@ type Store interface {
 // use a durable adapter so restarts cannot reuse transmit state or forget the
 // receive replay window.
 type MemoryStore struct {
-	mu     sync.Mutex
-	byID   map[string]SecurityAssociation
-	bySPI  map[string]string
-	txNext map[string]uint64
-	rx     map[string]ReplayState
+	mu       sync.Mutex
+	byID     map[string]SecurityAssociation
+	bySPI    map[string]string
+	txNext   map[string]uint64
+	rx       map[string]ReplayState
+	rotation map[string]TCRotationState
 }
 
 // ReplayState is the durable representation of a sliding replay window.
@@ -43,7 +47,7 @@ type ReplayState struct {
 func NewMemoryStore(associations ...SecurityAssociation) (*MemoryStore, error) {
 	s := &MemoryStore{
 		byID: make(map[string]SecurityAssociation), bySPI: make(map[string]string),
-		txNext: make(map[string]uint64), rx: make(map[string]ReplayState),
+		txNext: make(map[string]uint64), rx: make(map[string]ReplayState), rotation: make(map[string]TCRotationState),
 	}
 	for _, association := range associations {
 		if err := s.PutAssociation(association); err != nil {
@@ -157,6 +161,52 @@ func (s *MemoryStore) ReadOperationsState(_ context.Context, tenantID string) ([
 	return states, nil
 }
 
+func (s *MemoryStore) ReadTCRotationState(_ context.Context, tenantID string) (*TCRotationState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.rotation[tenantID]
+	if !ok {
+		return nil, ErrAssociationNotFound
+	}
+	copy := state
+	return &copy, nil
+}
+
+func (s *MemoryStore) MarkTCRotationPrepared(_ context.Context, tenantID string, state TCRotationState) error {
+	if state.Phase != TCRotationPrepared || state.TransactionID == 0 || state.CurrentRootVersion == 0 ||
+		state.NextRootVersion <= state.CurrentRootVersion || state.NextSPI != NextSPI(state.CurrentSPI) {
+		return ErrAssociationState
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	currentID, currentOK := s.bySPI[spiKey(tenantID, DirectionTCTx, state.CurrentSPI)]
+	nextID, nextOK := s.bySPI[spiKey(tenantID, DirectionTCTx, state.NextSPI)]
+	current, next := s.byID[currentID], s.byID[nextID]
+	if !currentOK || !nextOK || current.State != AssociationCurrent || next.State != AssociationNext ||
+		current.KeyVersion != state.CurrentRootVersion || next.KeyVersion != state.NextRootVersion {
+		return ErrAssociationState
+	}
+	s.rotation[tenantID] = state
+	return nil
+}
+
+func (s *MemoryStore) MarkTCRotationFrameProduced(_ context.Context, tenantID, associationID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.rotation[tenantID]
+	if !ok || state.Phase == TCRotationActive {
+		return nil
+	}
+	association, associationOK := s.byID[associationID]
+	if !associationOK || state.Phase != TCRotationSwitching || association.State != AssociationCurrent ||
+		association.SPI != state.NextSPI || association.KeyVersion != state.NextRootVersion {
+		return ErrAssociationState
+	}
+	state.Phase = TCRotationActive
+	s.rotation[tenantID] = state
+	return nil
+}
+
 func (s *MemoryStore) PromoteNextTC(_ context.Context, tenantID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,15 +230,20 @@ func (s *MemoryStore) PromoteNextTC(_ context.Context, tenantID string) error {
 	}
 	current := s.byID[currentID]
 	next := s.byID[nextID]
+	rotation, rotationOK := s.rotation[tenantID]
 	if currentID == "" || nextID == "" ||
 		next.SecurityEpoch != current.SecurityEpoch+1 || next.SPI != NextSPI(current.SPI) ||
-		!equalBytes(next.Parameters.NoncePrefix, current.Parameters.NoncePrefix) {
+		!equalBytes(next.Parameters.NoncePrefix, current.Parameters.NoncePrefix) || !rotationOK ||
+		rotation.Phase != TCRotationPrepared || rotation.CurrentSPI != current.SPI || rotation.NextSPI != next.SPI ||
+		rotation.CurrentRootVersion != current.KeyVersion || rotation.NextRootVersion != next.KeyVersion {
 		return ErrAssociationState
 	}
 	current.State = AssociationDisabled
 	next.State = AssociationCurrent
 	s.byID[currentID] = current
 	s.byID[nextID] = next
+	rotation.Phase = TCRotationSwitching
+	s.rotation[tenantID] = rotation
 	return nil
 }
 

@@ -58,6 +58,16 @@ fail-closed SPI/configuration handling remain unconditional safety invariants.
 ECC/EDAC, memory scrubbing, MPU, watchdog, executable-image checking, and the
 physical NVM redundancy strategy remain platform/BSP responsibilities.
 
+`tc_security_nvm.h` supplies the fixed 175-byte, endian-stable two-slot state
+codec used at the BSP seam. Every slot carries a monotonic generation, Mission
+Security Profile SHA-256 digest, CRC32C and its inverse. Decode validates the
+complete `tcsec_config_t`; selection accepts the newest valid slot, falls back
+after an interrupted/corrupt write, rejects ambiguous equal generations, and
+enforces a caller-provided rollback floor. The BSP still owns physical erase,
+write, read-back and storage of the trusted generation floor. CRC detects
+accidental corruption; it is not an authenticity mechanism, so only trusted
+flight software may write these slots.
+
 Build and run the shared Go/C vectors:
 
 ```sh

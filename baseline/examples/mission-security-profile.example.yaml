@@ -1,0 +1,24 @@
+# EXAMPLE ONLY. These deterministic roots must never be used for flight.
+format_version: 1
+mission_id: example-satellite
+tenant_id: t-default
+spacecraft_id: 291
+tc:
+  current_spi: 4097
+  security_epoch: 1
+  current_root_version: 1
+  current_operational_root_hex: "00112233445566778899aabbccddeeff"
+  next_root_version: 2
+  next_operational_root_hex: "102132435465768798a9bacbdcedfe0f"
+  nonce_prefix_hex: "102030405060"
+  recovery_spi: 28673
+  recovery_root_version: 1
+  recovery_root_hex: "0123456789abcdeffedcba9876543210"
+  recovery_nonce_prefix_hex: "a0a1a2a3a4a5"
+  recovery_transaction_id: 1
+  recovery_primary_header_hex: "2001000001"
+aos:
+  spi: 8193
+  key_version: 1
+  receive_key_hex: "ffeeddccbbaa99887766554433221100"
+  replay_window: 32

@@ -46,6 +46,15 @@ export interface CCSDSOperationsStatus {
     next: CCSDSAssociationStatus | null;
     recovery: CCSDSAssociationStatus | null;
   };
+  tc_rotation: {
+    phase: "PREPARED" | "SWITCHING" | "ACTIVE";
+    transaction_id: string;
+    current_spi: number;
+    next_spi: number;
+    current_root_version: number;
+    next_root_version: number;
+    evidence: "RECOVERY_FRAME_PRODUCED" | "GROUND_PROMOTED" | "FIRST_NEXT_FRAME_PRODUCED";
+  } | null;
   aos: CCSDSAssociationStatus[];
   warnings: string[];
 }

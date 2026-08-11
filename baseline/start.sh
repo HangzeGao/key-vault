@@ -47,10 +47,17 @@ chmod 700 "$KVLT_STATE_DIR" "$KVLT_TPM_STATE_DIR"
 
 cd "$SCRIPT_DIR"
 if [ "$MODE" = "provision-ccsds" ]; then
+  if [ -z "${KVLT_MISSION_PROFILE:-}" ]; then
+    echo "KVLT_MISSION_PROFILE must point to the controlled Mission Security Profile" >&2
+    exit 2
+  fi
+  KVLT_PROVISION_ARTIFACTS_DIR="${KVLT_PROVISION_ARTIFACTS_DIR:-$KVLT_STATE_DIR/provisioning-artifacts}"
   echo "building offline CCSDS provisioner..."
   go build -trimpath -o bin/ccsds-provision ./cmd/ccsds-provision
-  echo "provisioning SM4 CCSDS security associations..."
-  exec "$SCRIPT_DIR/bin/ccsds-provision" -family sm4
+  echo "provisioning paired ground and flight TC security state..."
+  exec "$SCRIPT_DIR/bin/ccsds-provision" \
+    -mission-profile "$KVLT_MISSION_PROFILE" \
+    -artifacts-dir "$KVLT_PROVISION_ARTIFACTS_DIR"
 fi
 
 echo "building frontend..."

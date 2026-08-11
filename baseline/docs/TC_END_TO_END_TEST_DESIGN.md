@@ -2,13 +2,13 @@
 
 ## 1. 目标与验收边界
 
-本测试验证一条真实的 TC 处理链：测控调用地面密码系统 HTTP API，地面系统从持久化安全关联中选择 SPI 和派生密钥并分配 IV，测控链路适配器组装完整 TC 帧，编译后的星载 C 模块校验、解密、持久化状态，最后才向星务侧释放明文。
+本测试验证一条真实的 TC 处理链：测控向地面密码系统提交完整 TC 明帧，地面系统验证原帧、选择 SPI、派生密钥、分配 IV 并输出完整密帧，测控链路原样传输，编译后的星载 C 模块校验、解密、持久化状态，最后才向星务侧释放明文。
 
 只有下列链路全部实际参与，才称为端到端测试：
 
 ```text
 HTTP API -> 地面 CCSDS 应用服务 -> SQLite SecurityState/测试 TPM
-         -> 测控链路组帧 -> 编译后的星载 C 模块
+         -> 完整密帧传输 -> 编译后的星载 C 模块
          -> 明文校验器 -> 原子 NVM 适配器 -> 明文或拒绝结果
 ```
 
@@ -35,10 +35,10 @@ TC Primary Header(5) | Recovery SPI(2) | IV Counter(4)
 
 | 模块 | 输入 | 输出或职责 |
 | --- | --- | --- |
-| 测控调用方 | TC 数据域、用途为 TC 加密 | 调用 `POST /ui/api/v1/ccsds/tc:protect` |
-| 地面密码系统普通 TC API | Base64 数据域 | Base64 `SPI(2) \| IV(4) \| Ciphertext` |
-| 地面密码系统受控 Recovery 流程 | 换根事务 | Base64 `SPI(2) \| IV(4) \| Recovery Ciphertext \| Tag(16)` |
-| 测控链路适配器 | 主导头、地面返回的安全数据 | 设置帧长并追加 CRC16-CCITT FECF，形成完整 TC 帧 |
+| 测控调用方 | 带合法帧长和 FECF 的完整 TC 明帧 | 调用 `POST /ui/api/v1/ccsds/tc:protect` |
+| 地面密码系统普通 TC API | Base64 完整明帧 | Base64 完整 `Primary Header \| SPI \| IV \| Ciphertext \| FECF` 密帧 |
+| 地面密码系统受控 Recovery 流程 | 主导头模板与换根事务 | 完整 Recovery GCM 密帧；Primary Header 与安全头均被认证 |
+| 测控链路适配器 | 地面返回的完整密帧 | 原样传输并提供受控故障注入，不再组帧 |
 | 星载密码模块 | 完整 TC 帧 | 状态码、普通明文；Recovery 消息不输出普通明文 |
 | 星务适配器 | 解密明文 | 按测控团队提供的规则校验包格式和允许范围 |
 | 星载 NVM 适配器 | 待提交状态 | 原子持久化；失败时不得释放明文或推进重放状态 |
@@ -49,11 +49,11 @@ TC Primary Header(5) | Recovery SPI(2) | IV Counter(4)
 
 ```mermaid
 flowchart LR
-    T["E2E Runner"] -->|"TC data field"| G["Ground HTTP API"]
+    T["E2E Runner"] -->|"Complete plain TC frame"| G["Ground HTTP API"]
     G --> P["SQLite SecurityState"]
     G --> K["Ephemeral swtpm / TPM adapter"]
-    G -->|"SPI + IV + ciphertext / tag"| L["Telemetry & Control Link Adapter"]
-    L -->|"Primary header + security data + FECF"| F["Compiled Flight C Harness"]
+    G -->|"Complete protected TC frame"| L["Telemetry & Control Link Adapter"]
+    L -->|"Unmodified frame"| F["Compiled Flight C Harness"]
     F --> V["Plaintext Validator Adapter"]
     F --> N["Atomic NVM Adapter"]
     F -->|"status + released plaintext metadata"| T
@@ -82,7 +82,7 @@ func (h *Harness) Run(ctx context.Context, scenario Scenario) (Report, error)
 Harness 内部只保留以下适配器：
 
 - `GroundAdapter`：通过真实 HTTP 登录和 TC protect API 操作地面系统。
-- `LinkAdapter`：生成主导头、设置帧长、追加 FECF，并提供按位损坏、截断和错误长度等链路故障注入。
+- `LinkAdapter`：只传输地面返回的完整密帧，并提供按位损坏、截断和错误长度等链路故障注入；不得重新组帧或重算正常业务帧的 FECF。
 - `FlightAdapter`：启动并调用链接真实 `tc_security.c` 的 C harness 进程；后续上板时替换为串口或总线适配器。
 - `FlightStateAdapter`：文件模拟的原子 NVM，支持提交失败注入、进程重启和状态快照。
 - `FixtureAdapter`：只负责创建隔离租户、装载测试根密钥和清理环境，不参与业务断言。
@@ -249,19 +249,19 @@ Harness 内部只保留以下适配器：
 
 PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、失败路径均满足“不提交、不释放”。发布门禁还要求 L3 在物理 TPM 和目标星载板卡通过。
 
-## 11. 实施前必须补齐的架构缺口
+## 11. 已闭环的架构入口与硬件验收余项
 
 ### 11.1 星地同源测试密钥装载
 
-当前地面离线配置倾向于生成不可导出的根密钥，不能自然地给星载 C 测试实例装载同一个 root。需要一个仅测试构建可用的临时夹具入口，同时把固定测试 root 导入地面测试 TPM 和星载测试 NVM。禁止为此增加生产环境明文导出 API。
+`ccsds-provision` 现只接受一个严格 Mission Security Profile：同一受控输入将 Current/Next/Recovery/AOS 材料导入地面 TPM 封装流程，并生成星载初始 NVM 镜像、Recovery Root Prepare 完整帧和哈希证据。运行时仍不存在明文导出接口。
 
 ### 11.2 地面 epoch 切换的生产编排入口
 
-代码已有地面本地 `AdvanceTCTransmitEpoch` 原子操作，但当前 TC protect HTTP 契约没有暴露或调度该操作。端到端切换测试不应直接改 SQL。应先提供一个生产可用的内部调度/运维编排接口，再由测试通过同一接口触发；它不生成额外的链路管理指令。
+地面状态闭环固定为 `PREPARED -> SWITCHING -> ACTIVE`：Recovery 帧生成后持久化 PREPARED，原子提升进入 SWITCHING，首个 Next-SPI 完整密帧生成后进入 ACTIVE。该证据只代表地面发送侧，不冒充星上接收确认，也不生成额外链路指令。
 
 ### 11.3 Recovery 帧生成入口
 
-普通测控 API 只接收 TC 数据域，不应让测控团队传入 root、SPI、IV 或事务字段。需要确认 Recovery Root Prepare 由地面密码系统的受控管理流程生成，并给 Harness 一个同路径的受权入口。
+普通测控 API 仍只接收带有效 FECF 的完整明文 TC 帧。Root Prepare 由离线 Mission Security Profile 强类型生成，Harness 消费同一个 `root-prepare.tc` 制品，不允许测控调用方传入 root、SPI、IV 或事务字段。
 
 ### 11.4 正式明文校验规则
 
@@ -271,7 +271,7 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 
 ### 11.5 真实板载适配器
 
-主机文件 NVM 只能验证接口语义。发布前必须实现并测试目标平台的原子写、掉电恢复、字节序、时间预算和输出缓冲区管理。
+通用 C 模块已提供固定长度双槽 NVM codec，覆盖字节序、CRC32C/inverse、最高有效 generation 选择、掉电半写回退、位翻转和回滚 floor。发布前仍必须在目标 BSP 验收物理擦写、读回、可信 generation floor、时间预算和输出缓冲区管理。
 
 ## 12. 完成定义
 

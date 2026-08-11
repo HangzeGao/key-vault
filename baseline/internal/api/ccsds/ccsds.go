@@ -1,5 +1,6 @@
-// Package ccsds exposes the mission CCSDS data-plane contract. Callers submit
-// payload bytes; they never select a key, suite, SPI, IV, or key epoch.
+// Package ccsds exposes the mission CCSDS data-plane contract. TC callers
+// submit complete plaintext transfer frames; they never select a key, suite,
+// SPI, IV, key epoch, or construct the protected frame.
 package ccsds
 
 import (
@@ -8,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/kvlt/key-vault/internal/api/middleware"
@@ -17,7 +19,7 @@ import (
 )
 
 type Service interface {
-	ProtectTCData(ctx context.Context, tenantID string, data []byte) (*protocol.ProtectedTCData, error)
+	ProtectTCFrame(ctx context.Context, tenantID string, frame []byte) (*protocol.ProtectedTCFrame, error)
 	UnprotectAOS(ctx context.Context, tenantID string, frame []byte) (*protocol.PlainAOSFrame, error)
 	OperationsStatus(ctx context.Context, tenantID string) (*protocol.OperationsStatus, error)
 }
@@ -66,8 +68,19 @@ type operationsStatusResponse struct {
 		Next     *associationStatusResponse `json:"next"`
 		Recovery *associationStatusResponse `json:"recovery"`
 	} `json:"tc"`
-	AOS      []associationStatusResponse `json:"aos"`
-	Warnings []string                    `json:"warnings"`
+	TCRotation *tcRotationStatusResponse   `json:"tc_rotation"`
+	AOS        []associationStatusResponse `json:"aos"`
+	Warnings   []string                    `json:"warnings"`
+}
+
+type tcRotationStatusResponse struct {
+	Phase              protocol.TCRotationPhase `json:"phase"`
+	TransactionID      string                   `json:"transaction_id"`
+	CurrentSPI         uint16                   `json:"current_spi"`
+	NextSPI            uint16                   `json:"next_spi"`
+	CurrentRootVersion uint32                   `json:"current_root_version"`
+	NextRootVersion    uint32                   `json:"next_root_version"`
+	Evidence           string                   `json:"evidence"`
 }
 
 func (h *Handler) operationsStatus(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +105,19 @@ func (h *Handler) operationsStatus(w http.ResponseWriter, r *http.Request) {
 	response.TC.Current = mapAssociationStatus(status.TCCurrent)
 	response.TC.Next = mapAssociationStatus(status.TCNext)
 	response.TC.Recovery = mapAssociationStatus(status.TCRecovery)
+	if status.TCRotation != nil {
+		evidence := "RECOVERY_FRAME_PRODUCED"
+		if status.TCRotation.Phase == protocol.TCRotationSwitching {
+			evidence = "GROUND_PROMOTED"
+		}
+		if status.TCRotation.Phase == protocol.TCRotationActive {
+			evidence = "FIRST_NEXT_FRAME_PRODUCED"
+		}
+		response.TCRotation = &tcRotationStatusResponse{Phase: status.TCRotation.Phase,
+			TransactionID: strconv.FormatUint(status.TCRotation.TransactionID, 10), CurrentSPI: status.TCRotation.CurrentSPI,
+			NextSPI: status.TCRotation.NextSPI, CurrentRootVersion: status.TCRotation.CurrentRootVersion,
+			NextRootVersion: status.TCRotation.NextRootVersion, Evidence: evidence}
+	}
 	for i := range status.AOSActive {
 		response.AOS = append(response.AOS, *mapAssociationStatus(&status.AOSActive[i]))
 	}
@@ -114,7 +140,7 @@ func mapAssociationStatus(state *protocol.AssociationRuntimeState) *associationS
 
 type protectTCRequest struct {
 	TenantID string `json:"tenant_id,omitempty"`
-	Data     string `json:"data"`
+	Frame    string `json:"frame"`
 }
 
 type unprotectAOSRequest struct {
@@ -139,18 +165,18 @@ func (h *Handler) protectTC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "tenant mismatch")
 		return
 	}
-	data, err := base64.StdEncoding.DecodeString(request.Data)
-	if err != nil || len(data) == 0 {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "data must be non-empty base64")
+	frame, err := base64.StdEncoding.DecodeString(request.Frame)
+	if err != nil || len(frame) == 0 {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "frame must be non-empty base64")
 		return
 	}
-	result, err := h.service.ProtectTCData(r.Context(), tenantID, data)
+	result, err := h.service.ProtectTCFrame(r.Context(), tenantID, frame)
 	if err != nil {
 		writeProtocolError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"security_data": base64.StdEncoding.EncodeToString(result.Data),
+		"protected_frame": base64.StdEncoding.EncodeToString(result.Frame),
 	})
 }
 

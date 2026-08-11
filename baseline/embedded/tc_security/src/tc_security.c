@@ -4,6 +4,7 @@
 #include "hctr.h"
 #include "sm4.h"
 #include "tc_security_kdf.h"
+#include "tc_security_internal.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -213,6 +214,22 @@ static uint16_t next_spi(uint16_t spi) {
     return (uint16_t)(spi + 1u);
 }
 
+int tcsec_config_valid_internal(const tcsec_config_t *config) {
+    const tcsec_ordinary_config_t *ordinary;
+    const tcsec_recovery_config_t *recovery;
+    if (config == NULL) return 0;
+    ordinary = &config->ordinary;
+    recovery = &config->recovery;
+    return suite_is_ordinary(ordinary->suite) && suite_is_gcm(recovery->suite) &&
+           ordinary->operational_root_length == suite_root_length(ordinary->suite) &&
+           recovery->recovery_root_length == suite_root_length(recovery->suite) &&
+           ordinary->root_version != 0u && ordinary->current_epoch != 0u &&
+           ordinary->current_epoch != UINT32_MAX && recovery->root_version != 0u &&
+           next_spi(ordinary->current_spi) != recovery->spi &&
+           ordinary->current_spi != recovery->spi && replay_state_valid(&ordinary->replay) &&
+           replay_state_valid(&recovery->replay) && pending_config_valid(ordinary);
+}
+
 static int derive_ordinary_hardened(const uint8_t *root, size_t root_length,
                                     uint16_t spacecraft_id,
                                     tcsec_suite_t suite, uint16_t spi,
@@ -263,14 +280,7 @@ tcsec_status_t tcsec_init(tcsec_context_t *context, const tcsec_config_t *config
         return TCSEC_INVALID_ARGUMENT;
     ordinary = &config->ordinary;
     recovery = &config->recovery;
-    if (!suite_is_ordinary(ordinary->suite) || !suite_is_gcm(recovery->suite) ||
-        ordinary->operational_root_length != suite_root_length(ordinary->suite) ||
-        recovery->recovery_root_length != suite_root_length(recovery->suite) ||
-        ordinary->root_version == 0u || ordinary->current_epoch == 0u ||
-        ordinary->current_epoch == UINT32_MAX ||
-        recovery->root_version == 0u || next_spi(ordinary->current_spi) == recovery->spi ||
-        ordinary->current_spi == recovery->spi || !replay_state_valid(&ordinary->replay) ||
-        !replay_state_valid(&recovery->replay) || !pending_config_valid(ordinary))
+    if (!tcsec_config_valid_internal(config))
         return TCSEC_INVALID_CONFIGURATION;
     memset(context, 0, sizeof(*context));
     context->spacecraft_id = ordinary->spacecraft_id;
@@ -504,14 +514,14 @@ static tcsec_status_t receive_root_prepare(tcsec_context_t *context, const uint8
     ciphertext = &frame[TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH];
     build_gcm_nonce(context->recovery_nonce_prefix, context->recovery_spi, iv_counter, nonce);
     if (tcsec_gcm_open(context->recovery_suite, context->recovery_key, nonce,
-                       &frame[TCSEC_PRIMARY_HEADER_LENGTH], TCSEC_SECURITY_HEADER_LENGTH,
+                       frame, TCSEC_RECOVERY_AAD_LENGTH,
                        ciphertext, ciphertext_length, &ciphertext[ciphertext_length], plaintext) != 0) {
         zeroize(nonce, sizeof(nonce));
         zeroize(plaintext, sizeof(plaintext));
         return TCSEC_AUTHENTICATION_FAILED;
     }
     if (tcsec_gcm_open(context->recovery_suite, context->recovery_key, nonce,
-                       &frame[TCSEC_PRIMARY_HEADER_LENGTH], TCSEC_SECURITY_HEADER_LENGTH,
+                       frame, TCSEC_RECOVERY_AAD_LENGTH,
                        ciphertext, ciphertext_length, &ciphertext[ciphertext_length],
                        repeated_plaintext) != 0 ||
         memcmp(plaintext, repeated_plaintext, ciphertext_length) != 0) {

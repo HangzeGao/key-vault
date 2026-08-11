@@ -30,12 +30,16 @@
 ### CCSDS 链路安全最小内核
 
 - [x] 建立不输出 Envelope 的原始保护核心，并保持 `AUTH_ONLY -> CMAC`、`ENCRYPT_ONLY -> CTR`、`AUTH_ENCRYPT -> GCM` 闭合集合。
-- [x] 将确认的 TC profile 收敛为 `主导头5B + SPI2B + IV_COUNTER4B + CTR密文 + FECF2B`，无 Tag，不保留独立 sequence/full-IV 兼容格式。
-- [x] 增加星上 C11 AES-256-CTR 接收模块，以固定内存完成帧长/FECF、SPI/SA、解密、业务校验回调和防重放状态持久化顺序。
-- [x] 地面 Go 与星上 C 共用固定 TC 联调向量；TC 只声明保密性，不声明认证、完整性或密码学抗重放。
-- [x] AOS 解保护保持独立 profile，等待任务线格式确认后再收敛。
+- [x] 将普通 TC profile 收敛为 `主导头5B + SPI2B + IV_COUNTER4B + SM4-HCTR密文 + FECF2B`，无 Tag，不保留 CTR/AES 或数据域返回兼容格式。
+- [x] 增加星上 C11 SM4-HCTR 接收模块，以固定内存完成帧长/FECF、SPI/SA、解密、业务校验回调和防重放状态持久化顺序。
+- [x] 地面 Go 完整明帧输入/完整密帧输出与星上 C 完整密帧输入形成闭环，并共用固定 TC 联调向量；普通 TC 只声明保密性，不声明认证或密码学完整性。
+- [x] 以严格 Mission Security Profile 作为星地唯一配置源，一次生成 TPM 包装的地面 Root、初始星载 NVM、完整 Recovery Root Prepare 帧和哈希发布证据；拒绝未知字段、重复字段、旧参数和配置漂移。
+- [x] 固化 `PREPARED -> SWITCHING -> ACTIVE` 地面轮换证据链；受控本地激活要求 reason/ticket 并审计，星上通过首帧合法 Next SPI 自动提交 Pending Root，不新增线上管理指令。
+- [x] 实现星载固定格式双槽 NVM 编解码、CRC32C 及反码、Profile 摘要、单调 generation 下限、损坏新槽回退和歧义状态拒绝。
+- [x] 增加统一 release gate：Go 全量测试、真实 API 到星载共享向量、地面/星载 95% 覆盖率门禁、前端测试与构建，并输出源码及向量哈希证据。
+- [ ] AOS 帧格式冻结后，将解保护接口收敛为完整密帧输入、完整明帧输出，并统一处理 Security Trailer、帧长与 FECF；冻结前不固化临时线上格式。
 - [x] 协议 Key 与通用数据 Key 使用域隔离；SA 固定绑定精确 KeyVersion、PolicyVersion 与 suite。
-- [x] PostgreSQL 持久化 TC IV Counter 和 AOS 64 位滑动防重放窗口；认证失败不推进接收状态。
+- [x] SQLite SecurityState 持久化 TC IV Counter 和 AOS 64 位滑动防重放窗口；认证失败不推进接收状态。
 - [x] 暂不引入 Protocol Registry、插件生命周期或通用帧 DSL，仅保留原始保护接口作为未来第二协议的扩展缝。
 
 ### P0 · 安全边界与生产化

@@ -26,7 +26,9 @@ API or generic persistence model is retained for that possibility.
 
 Rules:
 
-- Never persist or return plaintext CRK, protocol root, or derived working keys.
+- Runtime modules never return plaintext CRK, protocol root, or derived working
+  keys. The offline provisioner is the sole explicit seam allowed to create a
+  mode-0600 flight NVM artifact containing flight roots.
 - Allocate counters and commit replay acceptance transactionally before success.
 - Treat unknown suites, states, fields, routes, and configuration keys as errors.
 - Provision or mutate SAs only with the offline `cmd/ccsds-provision` tool.

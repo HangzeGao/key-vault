@@ -28,6 +28,25 @@ type AssociationRuntimeState struct {
 	ReplaySeen           bool
 }
 
+type TCRotationPhase string
+
+const (
+	TCRotationPrepared  TCRotationPhase = "PREPARED"
+	TCRotationSwitching TCRotationPhase = "SWITCHING"
+	TCRotationActive    TCRotationPhase = "ACTIVE"
+)
+
+// TCRotationState is ground-local evidence. ACTIVE means the first protected
+// Next-SPI frame was produced; it is not a claim that flight received it.
+type TCRotationState struct {
+	Phase              TCRotationPhase
+	TransactionID      uint64
+	CurrentSPI         uint16
+	NextSPI            uint16
+	CurrentRootVersion uint32
+	NextRootVersion    uint32
+}
+
 // OperationsStatus is the single read model consumed by mission operations.
 // State changes remain internal to the protocol module.
 type OperationsStatus struct {
@@ -36,6 +55,7 @@ type OperationsStatus struct {
 	TCCurrent  *AssociationRuntimeState
 	TCNext     *AssociationRuntimeState
 	TCRecovery *AssociationRuntimeState
+	TCRotation *TCRotationState
 	AOSActive  []AssociationRuntimeState
 	Warnings   []string
 }
@@ -48,6 +68,12 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 		return nil, err
 	}
 	status := &OperationsStatus{Status: "UNCONFIGURED", AOSActive: make([]AssociationRuntimeState, 0), Warnings: make([]string, 0)}
+	rotation, rotationErr := s.store.ReadTCRotationState(ctx, tenantID)
+	if rotationErr == nil {
+		status.TCRotation = rotation
+	} else if rotationErr != ErrAssociationNotFound {
+		return nil, rotationErr
+	}
 	for i := range associations {
 		association := associations[i]
 		switch {
@@ -80,6 +106,16 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 	}
 	if status.TCNext == nil {
 		status.Warnings = append(status.Warnings, "TC_NEXT_MISSING")
+	} else if status.TCCurrent != nil {
+		if status.TCNext.KeyVersion <= status.TCCurrent.KeyVersion {
+			status.Warnings = append(status.Warnings, "TC_NEXT_ROOT_NOT_ADVANCED")
+		} else if status.TCRotation == nil {
+			status.Warnings = append(status.Warnings, "TC_ROTATION_NOT_PREPARED")
+		} else if status.TCRotation.CurrentSPI != status.TCCurrent.SPI || status.TCRotation.NextSPI != status.TCNext.SPI ||
+			status.TCRotation.CurrentRootVersion != status.TCCurrent.KeyVersion ||
+			status.TCRotation.NextRootVersion != status.TCNext.KeyVersion {
+			status.Warnings = append(status.Warnings, "TC_ROTATION_STATE_MISMATCH")
+		}
 	}
 	if status.TCRecovery == nil {
 		status.Warnings = append(status.Warnings, "TC_RECOVERY_MISSING")

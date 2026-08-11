@@ -7,6 +7,7 @@ import (
 
 func TestOperationsStatusReportsReadyRuntimeStateWithoutMutation(t *testing.T) {
 	security, store := newTestSecurity(t, &fakeCore{}, tcAssociation(), nextTCAssociation(), recoveryAssociation(), aosAssociation())
+	prepareTestRotation(t, store, tcAssociation(), nextTCAssociation())
 	if _, err := store.NextTransmitCounter(context.Background(), "tx-current"); err != nil {
 		t.Fatal(err)
 	}
@@ -91,4 +92,45 @@ func TestOperationsStatusReportsAmbiguityAndCounterWarning(t *testing.T) {
 			t.Fatal("status counter pointer aliased store")
 		}
 	}
+}
+
+func TestOperationsStatusReportsRotationClosureWarnings(t *testing.T) {
+	current, next := tcAssociation(), nextTCAssociation()
+	security, store := newTestSecurity(t, &fakeCore{}, current, next, recoveryAssociation(), aosAssociation())
+	status, err := security.OperationsStatus(context.Background(), "tenant-1")
+	if err != nil || !containsWarning(status.Warnings, "TC_ROTATION_NOT_PREPARED") {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	prepareTestRotation(t, store, current, next)
+	state := store.rotation["tenant-1"]
+	state.NextSPI++
+	store.rotation["tenant-1"] = state
+	status, err = security.OperationsStatus(context.Background(), "tenant-1")
+	if err != nil || !containsWarning(status.Warnings, "TC_ROTATION_STATE_MISMATCH") {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	next.KeyVersion = current.KeyVersion
+	legacy, _ := newTestSecurity(t, &fakeCore{}, current, next, recoveryAssociation(), aosAssociation())
+	status, err = legacy.OperationsStatus(context.Background(), "tenant-1")
+	if err != nil || !containsWarning(status.Warnings, "TC_NEXT_ROOT_NOT_ADVANCED") {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+}
+
+func TestRuntimeStateCloneOwnsReplayPointer(t *testing.T) {
+	highest := uint64(44)
+	cloned := cloneRuntimeState(AssociationRuntimeState{ReplayHighest: &highest})
+	*cloned.ReplayHighest = 45
+	if highest != 44 {
+		t.Fatal("runtime replay pointer was aliased")
+	}
+}
+
+func containsWarning(warnings []string, wanted string) bool {
+	for _, warning := range warnings {
+		if warning == wanted {
+			return true
+		}
+	}
+	return false
 }

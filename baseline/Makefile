@@ -1,4 +1,4 @@
-.PHONY: test coverage-gate
+.PHONY: test coverage-gate release-gate
 
 test:
 	go test ./internal/protocol/ccsds ./internal/securitystate \
@@ -7,3 +7,6 @@ test:
 
 coverage-gate:
 	bash scripts/coverage_gate.sh
+
+release-gate:
+	bash scripts/release_gate.sh

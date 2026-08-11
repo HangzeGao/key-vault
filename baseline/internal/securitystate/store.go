@@ -199,6 +199,16 @@ var schemaStatements = []string{
 		next_iv INTEGER NOT NULL DEFAULT 0 CHECK (next_iv BETWEEN 0 AND 4294967296),
 		updated_at TEXT NOT NULL
 	) STRICT`,
+	`CREATE TABLE IF NOT EXISTS tc_rotation_states (
+		tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+		phase TEXT NOT NULL CHECK (phase IN ('PREPARED','SWITCHING','ACTIVE')),
+		transaction_id TEXT NOT NULL,
+		current_spi INTEGER NOT NULL CHECK (current_spi BETWEEN 0 AND 65535),
+		next_spi INTEGER NOT NULL CHECK (next_spi BETWEEN 0 AND 65535),
+		current_root_version INTEGER NOT NULL CHECK (current_root_version>0),
+		next_root_version INTEGER NOT NULL CHECK (next_root_version>current_root_version),
+		updated_at TEXT NOT NULL
+	) STRICT`,
 	`CREATE TABLE IF NOT EXISTS rx_states (
 		association_id TEXT PRIMARY KEY REFERENCES security_associations(id) ON DELETE CASCADE,
 		highest_sequence TEXT NOT NULL DEFAULT '0',

@@ -21,10 +21,11 @@ const emptyResponse = (path: string) => {
   if (path.endsWith("/ops/ccsds/status")) return {
     observed_at: new Date().toISOString(), status: "READY", ready: true, warnings: [],
     tc: {
-      current: { id: "tc-current", spi: 4097, direction: "TC_TX", state: "CURRENT", suite_id: "AES_256_CTR", security_epoch: 5, key_version: 2, policy_version: 1, sequence_number_length: 0, transmitted_iv_length: 4, tag_length: 0, replay_window: 0, next_iv_counter: 42, replay_seen: false },
-      next: { id: "tc-next", spi: 4098, direction: "TC_TX", state: "NEXT", suite_id: "AES_256_CTR", security_epoch: 6, key_version: 3, policy_version: 1, sequence_number_length: 0, transmitted_iv_length: 4, tag_length: 0, replay_window: 0, next_iv_counter: 0, replay_seen: false },
-      recovery: { id: "tc-recovery", spi: 28673, direction: "TC_RECOVERY_TX", state: "ACTIVE", suite_id: "AES_256_GCM", security_epoch: 0, key_version: 1, policy_version: 1, sequence_number_length: 0, transmitted_iv_length: 4, tag_length: 16, replay_window: 0, next_iv_counter: 3, replay_seen: false },
+      current: { id: "tc-current", spi: 4097, direction: "TC_TX", state: "CURRENT", suite_id: "SM4_HCTR", security_epoch: 5, key_version: 2, policy_version: 1, sequence_number_length: 0, transmitted_iv_length: 4, tag_length: 0, replay_window: 0, next_iv_counter: 42, replay_seen: false },
+      next: { id: "tc-next", spi: 4098, direction: "TC_TX", state: "NEXT", suite_id: "SM4_HCTR", security_epoch: 6, key_version: 3, policy_version: 1, sequence_number_length: 0, transmitted_iv_length: 4, tag_length: 0, replay_window: 0, next_iv_counter: 0, replay_seen: false },
+      recovery: { id: "tc-recovery", spi: 28673, direction: "TC_RECOVERY_TX", state: "ACTIVE", suite_id: "SM4_GCM", security_epoch: 0, key_version: 1, policy_version: 1, sequence_number_length: 0, transmitted_iv_length: 4, tag_length: 16, replay_window: 0, next_iv_counter: 3, replay_seen: false },
     },
+    tc_rotation: { phase: "PREPARED", transaction_id: "9", current_spi: 4097, next_spi: 4098, current_root_version: 2, next_root_version: 3, evidence: "RECOVERY_FRAME_PRODUCED" },
     aos: [{ id: "aos-active", spi: 8193, direction: "AOS_RX", state: "ACTIVE", suite_id: "SM4_GCM", security_epoch: 0, key_version: 4, policy_version: 1, sequence_number_length: 4, transmitted_iv_length: 12, tag_length: 16, replay_window: 32, replay_highest: 88, replay_seen: true }],
   };
   if (path.endsWith("/ops/db/status")) return {

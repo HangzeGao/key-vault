@@ -1,6 +1,6 @@
 # CCSDS 链路安全当前契约
 
-本系统当前只实现 CCSDS TC 上行加密和 AOS 下行解密，不提供通用协议插件或旧格式兼容层。普通 TC 固定使用 SM4-HCTR，仅 Root Prepare 使用带 16 字节 Tag 的 SM4-GCM；AOS 仍按安全关联配置使用 CMAC、CTR 或 GCM。
+本系统当前冻结的线上合同只有 CCSDS TC 上行加密，不提供通用协议插件或旧格式兼容层。普通 TC 固定使用 SM4-HCTR，仅 Root Prepare 使用带 16 字节 Tag 的 SM4-GCM。AOS 密码处理代码仍按安全关联配置支持 CMAC、CTR 或 GCM，但任务 AOS 帧格式尚未冻结，因此完整帧边界、Security Trailer、帧长和 FECF 处理不属于本次发布合同。
 
 ## TC 线格式
 
@@ -9,14 +9,14 @@
 恢复 TC：Primary Header(5) | Recovery SPI(2) | IV Counter(4) | GCM Ciphertext(41) | Tag(16) | FECF(2)
 ```
 
-地面密码系统 API 只接收 TC 数据域，返回：
+地面密码系统 API 接收带正确帧长与 FECF 的完整 TC 明帧，返回可直接上链的完整 TC 密帧：
 
 ```text
-普通：SPI | IV | Ciphertext
-恢复：SPI | IV | Ciphertext | Tag
+输入：Primary Header | Plaintext Data | FECF
+输出：Primary Header | SPI | IV | Ciphertext | [Recovery Tag] | New FECF
 ```
 
-测控系统拥有主导头和 FECF，不传入密钥、SPI、IV、模式、Security Epoch 或关联 ID。普通 HCTR 的 16 字节 tweak 固定为 `prefix(6) | SPI(2) | IV(4) | 0x00000000`，不在线增加字段。恢复 GCM 的 nonce 为 `prefix(6) | SPI(2) | IV(4)`，AAD 仅为线上安全头 `SPI | IV`。主导头不属于 AAD；星载模块仍独立校验帧长和 FECF。
+测控系统拥有主导头业务语义，但不再负责安全域插入、密帧长度或密帧 FECF，也不传入密钥、SPI、IV、模式、Security Epoch 或关联 ID。地面模块先验证输入明帧的声明长度和 FECF，成功后才分配 IV；输出时插入安全头、重写帧长并重新计算 FECF。普通 HCTR 的 16 字节 tweak 固定为 `prefix(6) | SPI(2) | IV(4) | 0x00000000`。恢复 GCM 的 nonce 为 `prefix(6) | SPI(2) | IV(4)`，AAD 固定为最终线上 `Primary Header | SPI | IV` 共 11 字节；星载端认证相同字节。
 
 ## 密钥派生
 
@@ -64,21 +64,20 @@ AOS 先做只读 replay 检查，再完成认证/解密；只有成功后才提�
 
 ## 对外数据面 API
 
-- `POST /ui/api/v1/ccsds/tc:protect`，scope `ccsds:tc:protect`；请求字段 `data` 为 Base64 TC 数据域，响应 `security_data` 为 Base64 安全域与密文。
-- `POST /ui/api/v1/ccsds/aos:unprotect`，scope `ccsds:aos:unprotect`；请求字段 `frame` 为 Base64 完整 AOS 密帧，响应 `plain_frame` 为 Base64 主导头与明文数据。
+- `POST /ui/api/v1/ccsds/tc:protect`，scope `ccsds:tc:protect`；请求字段 `frame` 为 Base64 完整 TC 明帧，响应 `protected_frame` 为 Base64 完整 TC 密帧。
+- `POST /ui/api/v1/ccsds/aos:unprotect`，scope `ccsds:aos:unprotect`；当前仅供密码处理联调，不声明为冻结的完整 AOS 帧合同，生产接入必须等待任务 AOS 格式冻结。
 - `GET /ui/api/v1/ops/ccsds/status`，Ops Plane + scope `ops:read`；只读返回 Current/Next/Recovery、TC 下一 IV 计数器及 AOS replay 高水位。接口不返回 Key ID、Root、nonce prefix 或 replay bitmap，也不提供任何切换与密钥写操作。
 
 ## 离线初始配置
 
 安全关联只允许通过本机离线命令 `bash start.sh provision-ccsds` 初始化，不能从
-HTTP 或运维前端写入。默认 profile 为：
+HTTP 或运维前端写入。任务必须提供一份严格 Mission Security Profile；仓库示例仅用于测试，示例值为：
 
 - TC Current：`SPI=0x1001`、`SM4_HCTR`、`epoch=1`；
 - TC Next：`SPI=0x1002`、`SM4_HCTR`、`epoch=2`，与 Current 共用当前 Operational Root；
 - Recovery：`SPI=0x7001`、`SM4_GCM`、16 字节 Tag；
 - AOS Receive：`SPI=0x2001`、`SM4_GCM`、4 字节序号、12 字节 IV、16 字节 Tag、32 帧 replay window。
 
-命令在 TPM 边界内生成并封装协议密钥，不输出明文密钥。重复执行只接受完全一致
-的现有配置；任何 SPI、算法、状态、版本或管理参数不一致都会失败关闭。
+命令读取 profile 中由任务离线产生的 Root，将地面副本立即置于 TPM 包装边界，并生成初始星载 NVM、完整 Recovery Root Prepare 帧和哈希发布证据。初始 NVM 不携带 Next Root；星载 Next 只能经 Recovery GCM 认证链路装入。重复执行只接受完全一致的现有密钥材料与配置；任何 SPI、算法、状态、版本或管理参数不一致都会失败关闭。
 
 两个接口使用独立最小权限 scope，严格 JSON 解码，并按调用方租户隔离。普通测控调用者无法选择管理参数。

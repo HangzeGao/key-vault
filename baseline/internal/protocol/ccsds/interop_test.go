@@ -75,13 +75,13 @@ func TestGroundOrdinaryTCMatchesFlightCVectors(t *testing.T) {
 				t.Fatal(err)
 			}
 			advanceCounter(t, store, sa.ID, vector.counter)
-			protected, err := security.ProtectTCData(context.Background(), sa.TenantID, vector.plaintext)
+			plainFrame := assembleVectorTCFrame([]byte{0x20, 0x01, 0x04, 0, 0x07}, vector.plaintext)
+			protected, err := security.ProtectTCFrame(context.Background(), sa.TenantID, plainFrame)
 			if err != nil {
 				t.Fatal(err)
 			}
-			frame := assembleVectorTCFrame([]byte{0x20, 0x01, 0x04, 0, 0x07}, protected.Data)
-			if !equalBytes(frame, vector.protected) {
-				t.Fatalf("protected frame = %x, want %x", frame, vector.protected)
+			if !equalBytes(protected.Frame, vector.protected) {
+				t.Fatalf("protected frame = %x, want %x", protected.Frame, vector.protected)
 			}
 		})
 	}
@@ -121,13 +121,13 @@ func TestGroundRootPrepareMatchesFlightCVectors(t *testing.T) {
 				t.Fatal(err)
 			}
 			advanceCounter(t, store, sa.ID, vector.counter)
-			protected, err := security.ProtectRootPrepareData(context.Background(), sa.TenantID, command)
+			protected, err := security.ProtectRootPrepareFrame(context.Background(), sa.TenantID,
+				[]byte{0x20, 0x01, 0, 0, 0x01}, command)
 			if err != nil {
 				t.Fatal(err)
 			}
-			frame := assembleVectorTCFrame([]byte{0x20, 0x01, 0, 0, 0x01}, protected.Data)
-			if !equalBytes(frame, vector.protected) {
-				t.Fatalf("protected frame = %x, want %x", frame, vector.protected)
+			if !equalBytes(protected.Frame, vector.protected) {
+				t.Fatalf("protected frame = %x, want %x", protected.Frame, vector.protected)
 			}
 		})
 	}

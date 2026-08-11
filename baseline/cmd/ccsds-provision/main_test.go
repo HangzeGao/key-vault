@@ -1,76 +1,56 @@
 package main
 
 import (
-	"bytes"
+	"crypto/sha256"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/kvlt/key-vault/internal/protocol/ccsds"
 )
 
-func TestProvisioningUsesTheSingleTCProfile(t *testing.T) {
-	options := provisionOptions{tenantID: defaultTenant, currentSPI: defaultCurrentSPI,
-		recoverySPI: defaultRecoverySPI, aosSPI: defaultAOSSPI, epoch: defaultEpoch, replayWindow: defaultReplay}
-	profile := tcProfile()
-	associations := desiredAssociations(options, profile, provisionIDs(options.tenantID))
-	if len(associations) != 4 {
-		t.Fatalf("association count = %d", len(associations))
+func TestProvisioningRequiresSingleMissionProfileContract(t *testing.T) {
+	if err := (provisionOptions{}).validate(); err == nil {
+		t.Fatal("empty options accepted")
 	}
-	for _, association := range associations {
-		if err := association.Validate(); err != nil {
-			t.Fatalf("association %s invalid: %v", association.ID, err)
+	if err := (provisionOptions{profilePath: "mission.yaml", artifactsDir: "out"}).validate(); err != nil {
+		t.Fatal(err)
+	}
+	ids := provisionIDs("tenant-1", 7, 8)
+	if ids.CurrentKey == ids.NextKey || ids.CurrentSA == "" || ids.RecoverySA == "" {
+		t.Fatalf("IDs=%+v", ids)
+	}
+}
+
+func TestProvisioningArtifactsArePairedAndHashed(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "private")
+	profile := ccsds.MissionSecurityProfile{MissionID: "mission", TenantID: "tenant-1",
+		TC: ccsds.MissionTCProfile{CurrentSPI: 0x1001, RecoverySPI: 0x7001, CurrentRootVersion: 7, NextRootVersion: 8}}
+	profileDigest := sha256.Sum256([]byte("profile"))
+	flight := []byte("flight-nvm-secret")
+	recovery := []byte("complete-recovery-frame")
+	if err := writeArtifacts(directory, profile, profileDigest, flight, recovery); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"flight-tcsec.nvm", "root-prepare.tc", "release-evidence.json"} {
+		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
+			t.Fatal(err)
 		}
 	}
-	current, next, recovery, aos := associations[0], associations[1], associations[2], associations[3]
-	if current.SuiteID != "SM4_HCTR" || current.State != ccsds.AssociationCurrent ||
-		next.SPI != ccsds.NextSPI(current.SPI) || next.SecurityEpoch != current.SecurityEpoch+1 ||
-		next.KeyID != current.KeyID || next.KeyVersion != current.KeyVersion ||
-		!bytes.Equal(next.Parameters.NoncePrefix, current.Parameters.NoncePrefix) {
-		t.Fatalf("ordinary Current/Next profile is inconsistent: current=%+v next=%+v", current, next)
+	raw, err := os.ReadFile(filepath.Join(directory, "release-evidence.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if recovery.SuiteID != "SM4_GCM" || recovery.Parameters.TagLength != 16 {
-		t.Fatalf("recovery profile = %+v", recovery)
+	var evidence releaseEvidence
+	if json.Unmarshal(raw, &evidence) != nil || evidence.FlightNVMSHA256 != digestBytes(flight) ||
+		evidence.RecoveryFrameSHA256 != digestBytes(recovery) || evidence.NextSPI != 0x1002 {
+		t.Fatalf("evidence=%+v", evidence)
 	}
-	if aos.SuiteID != "SM4_GCM" || aos.Parameters.ReplayWindow != defaultReplay || aos.Parameters.TransmittedIVLength != 12 {
-		t.Fatalf("AOS profile = %+v", aos)
+	if err := writeAtomicPrivate(filepath.Join(directory, "flight-tcsec.nvm"), []byte("replacement")); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestProvisioningAcceptsComplete16BitSPIRange(t *testing.T) {
-	options := provisionOptions{tenantID: defaultTenant, currentSPI: 0xffff,
-		recoverySPI: 1, aosSPI: 2, epoch: 1, replayWindow: 32}
-	if err := options.validate(); err != nil {
-		t.Fatalf("full-range SPI profile rejected: %v", err)
-	}
-	associations := desiredAssociations(options, tcProfile(), provisionIDs(options.tenantID))
-	if associations[0].SPI != 0xffff || associations[1].SPI != 0x0000 {
-		t.Fatalf("SPI boundary transition = 0x%04X -> 0x%04X", associations[0].SPI, associations[1].SPI)
-	}
-
-	options.recoverySPI = 0
-	if err := options.validate(); err == nil {
-		t.Fatal("Recovery SPI overlapping wrapped Next SPI was accepted")
-	}
-	options.recoverySPI = 1
-	options.aosSPI = 0x10000
-	if err := options.validate(); err == nil {
-		t.Fatal("SPI above 0xFFFF was accepted")
-	}
-}
-
-func TestProvisioningRejectsOverlappingSPIs(t *testing.T) {
-	options := provisionOptions{tenantID: defaultTenant, currentSPI: 1,
-		recoverySPI: 2, aosSPI: 3, epoch: 1, replayWindow: 32}
-	if err := options.validate(); err == nil {
-		t.Fatal("overlapping Next and Recovery SPI was accepted")
-	}
-}
-
-func TestNoncePrefixesAreDeterministicAndDomainSeparated(t *testing.T) {
-	tc := noncePrefix(defaultTenant, "TC-ORDINARY")
-	if len(tc) != ccsds.TCNoncePrefixLength || !bytes.Equal(tc, noncePrefix(defaultTenant, "TC-ORDINARY")) {
-		t.Fatalf("unexpected TC prefix %x", tc)
-	}
-	if bytes.Equal(tc, noncePrefix(defaultTenant, "TC-RECOVERY")) {
-		t.Fatal("ordinary and Recovery nonce prefixes are not separated")
+	if value, _ := os.ReadFile(filepath.Join(directory, "flight-tcsec.nvm")); string(value) != "replacement" {
+		t.Fatalf("value=%q", value)
 	}
 }

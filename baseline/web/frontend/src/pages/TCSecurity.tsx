@@ -37,7 +37,7 @@ export function TCSecurityPage() {
         <div className="ops-dashboard-grid tc-continuity-grid">
           <Panel title="Automatic Epoch Continuity">
             <div className="ops-continuity-flow">
-              <div className={snapshot.tc.current ? "available" : "missing"}><span>1</span><strong>Current</strong><small>Protect ordinary TC data</small></div>
+              <div className={snapshot.tc.current ? "available" : "missing"}><span>1</span><strong>Current</strong><small>Protect complete TC frames</small></div>
               <ArrowRight size={17} />
               <div className={snapshot.tc.next ? "available" : "missing"}><span>2</span><strong>Next staged</strong><small>Ground promotion target</small></div>
               <ArrowRight size={17} />
@@ -50,6 +50,7 @@ export function TCSecurityPage() {
               <div><Satellite size={15} /><span>Current ordinary frames remaining</span><strong>{remaining(snapshot.tc.current?.next_iv_counter)}</strong></div>
               <div><ShieldCheck size={15} /><span>Recovery frames remaining</span><strong>{remaining(snapshot.tc.recovery?.next_iv_counter)}</strong></div>
             </div>
+            <p className="ops-panel-note">Rotation: <strong>{snapshot.tc_rotation?.phase ?? "NOT PREPARED"}</strong> · {snapshot.tc_rotation?.evidence ?? "NO GROUND EVIDENCE"}</p>
           </Panel>
         </div>
 

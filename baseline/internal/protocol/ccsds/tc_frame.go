@@ -36,6 +36,38 @@ func validateTCFrame(frame []byte) error {
 	return nil
 }
 
+func splitPlainTCFrame(frame []byte, maxFrameLength int) (primaryHeader, data []byte, err error) {
+	if validateTCFrame(frame) != nil || len(frame)+TCSecurityHeaderLength > TCMaxFrameLength ||
+		len(frame)+TCSecurityHeaderLength > maxFrameLength {
+		return nil, nil, ErrFrameInvalid
+	}
+	dataLength := len(frame) - TCPrimaryHeaderLength - TCFECFLength
+	if dataLength < 16 {
+		return nil, nil, ErrFrameInvalid
+	}
+	return append([]byte(nil), frame[:TCPrimaryHeaderLength]...),
+		append([]byte(nil), frame[TCPrimaryHeaderLength:len(frame)-TCFECFLength]...), nil
+}
+
+func prepareTCPrimaryHeader(template []byte, payloadLength, maxFrameLength int) ([]byte, error) {
+	frameLength := TCPrimaryHeaderLength + payloadLength + TCFECFLength
+	if len(template) != TCPrimaryHeaderLength || payloadLength < 1 ||
+		frameLength > TCMaxFrameLength || frameLength > maxFrameLength {
+		return nil, ErrFrameInvalid
+	}
+	header := append([]byte(nil), template...)
+	setTCFrameLength(header, frameLength)
+	return header, nil
+}
+
+func assembleTCFrame(primaryHeader, payload []byte, maxFrameLength int) ([]byte, error) {
+	header, err := prepareTCPrimaryHeader(primaryHeader, len(payload), maxFrameLength)
+	if err != nil {
+		return nil, err
+	}
+	return appendTCFECF(join(header, payload)), nil
+}
+
 func setTCFrameLength(primaryHeader []byte, frameLength int) {
 	encoded := frameLength - 1
 	primaryHeader[2] = primaryHeader[2]&0xfc | byte(encoded>>8)&0x03
