@@ -1,12 +1,12 @@
 # CCSDS 链路安全当前契约
 
-本系统当前只实现 CCSDS TC 上行加密和 AOS 下行解密，不提供通用协议插件或旧格式兼容层。普通 TC 固定使用 CTR，仅 Root Prepare 使用带 16 字节 Tag 的 GCM；AOS 仍按安全关联配置使用 CMAC、CTR 或 GCM。
+本系统当前只实现 CCSDS TC 上行加密和 AOS 下行解密，不提供通用协议插件或旧格式兼容层。普通 TC 固定使用 SM4-HCTR，仅 Root Prepare 使用带 16 字节 Tag 的 SM4-GCM；AOS 仍按安全关联配置使用 CMAC、CTR 或 GCM。
 
 ## TC 线格式
 
 ```text
-普通 TC：Primary Header(5) | SPI(2) | IV Counter(4) | CTR Ciphertext(N) | FECF(2)
-恢复 TC：Primary Header(5) | Recovery SPI(2) | IV Counter(4) | GCM Ciphertext(41/57) | Tag(16) | FECF(2)
+普通 TC：Primary Header(5) | SPI(2) | IV Counter(4) | HCTR Ciphertext(N, N>=16) | FECF(2)
+恢复 TC：Primary Header(5) | Recovery SPI(2) | IV Counter(4) | GCM Ciphertext(41) | Tag(16) | FECF(2)
 ```
 
 地面密码系统 API 只接收 TC 数据域，返回：
@@ -16,7 +16,7 @@
 恢复：SPI | IV | Ciphertext | Tag
 ```
 
-测控系统拥有主导头和 FECF，不传入密钥、SPI、IV、模式、Security Epoch 或关联 ID。恢复 GCM 的 nonce 为 `prefix(6) | SPI(2) | IV(4)`，AAD 仅为线上安全头 `SPI | IV`。主导头不属于 AAD；星载模块仍独立校验帧长和 FECF。
+测控系统拥有主导头和 FECF，不传入密钥、SPI、IV、模式、Security Epoch 或关联 ID。普通 HCTR 的 16 字节 tweak 固定为 `prefix(6) | SPI(2) | IV(4) | 0x00000000`，不在线增加字段。恢复 GCM 的 nonce 为 `prefix(6) | SPI(2) | IV(4)`，AAD 仅为线上安全头 `SPI | IV`。主导头不属于 AAD；星载模块仍独立校验帧长和 FECF。
 
 ## 密钥派生
 
@@ -36,7 +36,7 @@ K_RECOVERY = KDF-CMAC(
 )
 ```
 
-AES-256 系列使用 AES-CMAC，SM4 系列使用 SM4-CMAC。Root 和派生密钥长度必须与目标套件一致。
+普通 Operational Root 固定 16 字节。SM4-CMAC KDF 派生 32 字节 HCTR 工作材料：前 16 字节为 SM4 分组密钥，后 16 字节为通用哈希密钥。Recovery Root 和派生 GCM 密钥均为 16 字节。工作材料不持久化。
 
 ## 普通 TC 自动切换
 
@@ -48,13 +48,13 @@ SPI 使用完整无符号 16 位范围 `0x0000..0xFFFF`。Next 的唯一规则�
 
 星载模块只识别当前 SPI、按上述模 65536 规则相邻的 Next SPI 和独立 Recovery SPI。收到 next SPI 后：
 
-1. 用预派生的 Next 工作密钥做 CTR 解密；
-2. 执行测控团队提供的完整明文格式校验；
+1. 用预派生的 Next 工作材料做 SM4-HCTR 解密；
+2. 调用星务实现的完整明文校验深模块；规则来源、必选字段与发布门禁以 [`TC_PLAINTEXT_VALIDATION_DESIGN.md`](TC_PLAINTEXT_VALIDATION_DESIGN.md) 为唯一开发合同；
 3. 原子持久化新 epoch、SPI、root version 和 replay state；
 4. 才向星务释放明文，并立即拒绝旧 SPI；
 5. 派生新的 Next 工作密钥。
 
-没有 Previous、Grace、UTC、固定确认帧或额外切换指令。CTR 不提供密码学认证；明文格式校验只用于提前过滤，不能等价替代 Tag。
+没有 Previous、Grace、UTC、固定确认帧或额外切换指令。HCTR 是宽块可调加密，能消除 CTR 的可控逐位翻转，但仍不提供密码学认证；明文格式校验只用于提前过滤，不能等价替代 Tag。
 
 ## 抗重放
 
@@ -73,8 +73,8 @@ AOS 先做只读 replay 检查，再完成认证/解密；只有成功后才提�
 安全关联只允许通过本机离线命令 `bash start.sh provision-ccsds` 初始化，不能从
 HTTP 或运维前端写入。默认 profile 为：
 
-- TC Current：`SPI=0x1001`、`SM4_CTR`、`epoch=1`；
-- TC Next：`SPI=0x1002`、`SM4_CTR`、`epoch=2`，与 Current 共用当前 Operational Root；
+- TC Current：`SPI=0x1001`、`SM4_HCTR`、`epoch=1`；
+- TC Next：`SPI=0x1002`、`SM4_HCTR`、`epoch=2`，与 Current 共用当前 Operational Root；
 - Recovery：`SPI=0x7001`、`SM4_GCM`、16 字节 Tag；
 - AOS Receive：`SPI=0x2001`、`SM4_GCM`、4 字节序号、12 字节 IV、16 字节 Tag、32 帧 replay window。
 

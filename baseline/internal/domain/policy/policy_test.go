@@ -1,6 +1,12 @@
 package policy
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	cryptosuite "github.com/kvlt/key-vault/internal/crypto/suite"
+)
 
 func TestDefaultPolicyIncludesAllProtectionServices(t *testing.T) {
 	p := DefaultPolicy()
@@ -12,6 +18,7 @@ func TestDefaultPolicyIncludesAllProtectionServices(t *testing.T) {
 		"SM4_GCM":      {ModeGCM, "AUTH_ENCRYPT"},
 		"AES_256_CTR":  {ModeCTR, "ENCRYPT_ONLY"},
 		"SM4_CTR":      {ModeCTR, "ENCRYPT_ONLY"},
+		"SM4_HCTR":     {ModeHCTR, "ENCRYPT_ONLY"},
 		"AES_256_CMAC": {ModeCMAC, "AUTH_ONLY"},
 		"SM4_CMAC":     {ModeCMAC, "AUTH_ONLY"},
 	}
@@ -168,4 +175,95 @@ func TestEngineRejectsCandidateWithoutChangingCurrentPolicy(t *testing.T) {
 	if _, err := engine.GetVersion(v1.PolicyID, 2); err == nil {
 		t.Fatal("rejected policy version was retained")
 	}
+}
+
+func TestPolicyValidationAndLookupRejections(t *testing.T) {
+	engine := NewEngine()
+	if err := engine.Load(nil); err == nil {
+		t.Fatal("nil policy accepted")
+	}
+	for _, mutate := range []func(*Policy){
+		func(p *Policy) { p.PolicyID = "" },
+		func(p *Policy) { p.DefaultSuite = "" },
+		func(p *Policy) { p.DefaultSuite = "UNKNOWN" },
+		func(p *Policy) { p.Suites[0].Status = SuiteStatusDisabled },
+		func(p *Policy) { p.Suites = append(p.Suites, p.Suites[0]) },
+		func(p *Policy) { p.Suites[0].SuiteID = "UNKNOWN" },
+	} {
+		p := DefaultPolicy()
+		mutate(p)
+		if err := engine.Load(p); err == nil {
+			t.Fatalf("invalid policy accepted: %+v", p)
+		}
+	}
+	if _, err := engine.Get("missing"); err == nil {
+		t.Fatal("missing current policy returned")
+	}
+	if _, err := engine.GetVersion("missing", 1); err == nil {
+		t.Fatal("missing historical policy returned")
+	}
+	p := DefaultPolicy()
+	if err := engine.Load(p); err != nil || engine.Load(p) != nil {
+		t.Fatalf("idempotent load failed: %v", err)
+	}
+	if _, err := engine.GetVersion(p.PolicyID, 99); err == nil {
+		t.Fatal("missing version returned")
+	}
+	if _, err := p.SuiteByID("missing"); err == nil {
+		t.Fatal("missing suite returned")
+	}
+	if clonePolicy(nil) != nil || validateSuiteDefinition(nil) == nil {
+		t.Fatal("nil helpers did not fail closed")
+	}
+}
+
+func TestSuiteStatusRules(t *testing.T) {
+	for _, tt := range []struct {
+		status  SuiteStatus
+		create  bool
+		consume bool
+	}{
+		{SuiteStatusActive, true, true},
+		{SuiteStatusDeprecated, false, true},
+		{SuiteStatusDisabled, false, false},
+		{SuiteStatusBlocked, false, false},
+		{SuiteStatus("unknown"), false, false},
+	} {
+		if CanCreate(tt.status) != tt.create || CanConsume(tt.status) != tt.consume {
+			t.Fatalf("status %s rules mismatch", tt.status)
+		}
+	}
+}
+
+func TestLoadFromFileAndDefaultSuiteFailure(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadFromFile(filepath.Join(dir, "missing.yaml")); err == nil {
+		t.Fatal("missing policy file accepted")
+	}
+	bad := filepath.Join(dir, "bad.yaml")
+	if err := os.WriteFile(bad, []byte("policy_id: ["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFromFile(bad); err == nil {
+		t.Fatal("invalid YAML accepted")
+	}
+	good := filepath.Join(dir, "good.yaml")
+	data := []byte("policy_id: p\nversion: 1\ndefault_suite: SM4_GCM\nsuites:\n" +
+		"  - suite_id: SM4_GCM\n    algorithm: SM4\n    key_bits: 128\n    mode: GCM\n" +
+		"    service_type: AUTH_ENCRYPT\n    nonce: lease_counter\n    status: active\n" +
+		"  - suite_id: AES_256_GCM\n    algorithm: AES\n    key_bits: 256\n    mode: GCM\n" +
+		"    service_type: AUTH_ENCRYPT\n    nonce: lease_counter\n    status: active\n")
+	if err := os.WriteFile(good, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := LoadFromFile(good)
+	if err != nil || len(p.Suites) != 2 || p.Suites[0].SuiteID != "AES_256_GCM" {
+		t.Fatalf("LoadFromFile = %+v/%v", p, err)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("defaultSuite accepted unknown ID")
+		}
+	}()
+	_ = defaultSuite(cryptosuite.ID(0xffff), SuiteStatusActive, nil)
 }

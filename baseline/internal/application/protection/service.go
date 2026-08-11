@@ -144,6 +144,9 @@ func (s *Service) protect(ctx context.Context, req ProtectRequest, derivation *D
 	if err != nil || suiteID.KeyPurpose() != k.Purpose {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "key purpose does not match suite", false)
 	}
+	if suiteID == suite.SM4HCTR && derivation == nil {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "SM4_HCTR requires protocol-bound key derivation", false)
+	}
 	kv, err := s.store.GetKeyVersionByNo(ctx, k.ID, req.KeyVersion)
 	if err != nil || kv.SuiteID != k.SuiteID {
 		return nil, errorsx.Wrap(errorsx.CodeInternal, "key version fetch failed", false, err)
@@ -217,6 +220,9 @@ func (s *Service) Unprotect(ctx context.Context, req UnprotectRequest) (*Unprote
 	if err != nil || suiteID.KeyPurpose() != k.Purpose {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "key purpose does not match suite", false)
 	}
+	if suiteID == suite.SM4HCTR {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "SM4_HCTR receive is owned by the protocol module", false)
+	}
 	if err := validateInputs(suiteID, req.Nonce, req.AAD, req.AuthenticationInput); err != nil {
 		return nil, err
 	}
@@ -280,7 +286,7 @@ func validateInputs(suiteID suite.ID, nonceBytes, aad, authenticationInput []byt
 		}
 	case suite.ServiceEncryptOnly:
 		if len(aad) != 0 || len(authenticationInput) != 0 {
-			return errorsx.New(errorsx.CodeInvalidArgument, "CTR does not authenticate data", false)
+			return errorsx.New(errorsx.CodeInvalidArgument, "confidentiality-only suites do not authenticate data", false)
 		}
 	case suite.ServiceAuthEncrypt:
 		if len(authenticationInput) != 0 {

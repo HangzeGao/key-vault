@@ -58,8 +58,7 @@ func (vectorCore) Unprotect(context.Context, protection.UnprotectRequest) (*prot
 
 func TestGroundOrdinaryTCMatchesFlightCVectors(t *testing.T) {
 	for _, test := range []struct{ name, path string }{
-		{name: "aes-256-ctr", path: "../../../testdata/ccsds_tc_aes256_ctr.txt"},
-		{name: "sm4-ctr", path: "../../../testdata/ccsds_tc_sm4_ctr.txt"},
+		{name: "sm4-hctr", path: "../../../testdata/ccsds_tc_sm4_hctr.txt"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			vector := loadTCVector(t, test.path)
@@ -90,7 +89,6 @@ func TestGroundOrdinaryTCMatchesFlightCVectors(t *testing.T) {
 
 func TestGroundRootPrepareMatchesFlightCVectors(t *testing.T) {
 	for _, test := range []struct{ name, path string }{
-		{name: "aes-256-gcm", path: "../../../testdata/ccsds_tc_aes256_gcm_recovery.txt"},
 		{name: "sm4-gcm", path: "../../../testdata/ccsds_tc_sm4_gcm_recovery.txt"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

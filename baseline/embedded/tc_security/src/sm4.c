@@ -92,8 +92,8 @@ static void expand_key(const uint8_t key[16], uint32_t round_keys[32]) {
     zero_memory(state, sizeof(state));
 }
 
-static void encrypt_block(const uint8_t input[16], uint8_t output[16],
-                          const uint32_t round_keys[32]) {
+static void crypt_block(const uint8_t input[16], uint8_t output[16],
+                        const uint32_t round_keys[32], int decrypt) {
     uint32_t state[36];
     uint32_t round;
     state[0] = read_u32_be(&input[0]);
@@ -102,7 +102,8 @@ static void encrypt_block(const uint8_t input[16], uint8_t output[16],
     state[3] = read_u32_be(&input[12]);
     for (round = 0u; round < 32u; ++round) {
         state[round + 4u] = state[round] ^ round_transform(
-            state[round + 1u] ^ state[round + 2u] ^ state[round + 3u] ^ round_keys[round]);
+            state[round + 1u] ^ state[round + 2u] ^ state[round + 3u] ^
+            round_keys[decrypt != 0 ? 31u - round : round]);
     }
     write_u32_be(&output[0], state[35]);
     write_u32_be(&output[4], state[34]);
@@ -111,15 +112,24 @@ static void encrypt_block(const uint8_t input[16], uint8_t output[16],
     zero_memory(state, sizeof(state));
 }
 
-static int increment_counter32(uint8_t counter[16]) {
-    int index;
-    for (index = 15; index >= 12; --index) {
-        counter[index] = (uint8_t)(counter[index] + 1u);
-        if (counter[index] != 0u) {
-            return 0;
-        }
-    }
-    return -1;
+int tcsec_sm4_key_init(tcsec_sm4_key_t *context, const uint8_t key[16]) {
+    if (context == NULL || key == NULL) return -1;
+    expand_key(key, context->round_keys);
+    return 0;
+}
+
+void tcsec_sm4_key_clear(tcsec_sm4_key_t *context) {
+    if (context != NULL) zero_memory(context, sizeof(*context));
+}
+
+void tcsec_sm4_encrypt_with_key(const tcsec_sm4_key_t *context,
+                                const uint8_t input[16], uint8_t output[16]) {
+    crypt_block(input, output, context->round_keys, 0);
+}
+
+void tcsec_sm4_decrypt_with_key(const tcsec_sm4_key_t *context,
+                                const uint8_t input[16], uint8_t output[16]) {
+    crypt_block(input, output, context->round_keys, 1);
 }
 
 int tcsec_sm4_encrypt_block(const uint8_t key[16],
@@ -130,47 +140,7 @@ int tcsec_sm4_encrypt_block(const uint8_t key[16],
         return -1;
     }
     expand_key(key, round_keys);
-    encrypt_block(input, output, round_keys);
+    crypt_block(input, output, round_keys, 0);
     zero_memory(round_keys, sizeof(round_keys));
-    return 0;
-}
-
-int tcsec_sm4_ctr_xor(const uint8_t key[16],
-                      const uint8_t initial_counter[16],
-                      const uint8_t *input,
-                      uint8_t *output,
-                      size_t length) {
-    uint32_t round_keys[32];
-    uint8_t counter[16];
-    uint8_t stream[16];
-    size_t offset = 0u;
-
-    if (key == NULL || initial_counter == NULL ||
-        (length != 0u && (input == NULL || output == NULL))) {
-        return -1;
-    }
-    expand_key(key, round_keys);
-    memcpy(counter, initial_counter, sizeof(counter));
-    while (offset < length) {
-        size_t block_length = length - offset;
-        size_t index;
-        if (block_length > 16u) {
-            block_length = 16u;
-        }
-        encrypt_block(counter, stream, round_keys);
-        for (index = 0u; index < block_length; ++index) {
-            output[offset + index] = (uint8_t)(input[offset + index] ^ stream[index]);
-        }
-        offset += block_length;
-        if (offset < length && increment_counter32(counter) != 0) {
-            zero_memory(round_keys, sizeof(round_keys));
-            zero_memory(counter, sizeof(counter));
-            zero_memory(stream, sizeof(stream));
-            return -2;
-        }
-    }
-    zero_memory(round_keys, sizeof(round_keys));
-    zero_memory(counter, sizeof(counter));
-    zero_memory(stream, sizeof(stream));
     return 0;
 }

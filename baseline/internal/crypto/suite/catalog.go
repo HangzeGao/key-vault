@@ -35,24 +35,26 @@ const (
 	SM4GCM     ID = 0x0002
 	AES256CTR  ID = 0x0011
 	SM4CTR     ID = 0x0012
+	SM4HCTR    ID = 0x0013
 	AES256CMAC ID = 0x0021
 	SM4CMAC    ID = 0x0022
 )
 
 // Descriptor contains immutable suite semantics.
 type Descriptor struct {
-	ID            ID
-	Name          string
-	Algorithm     string
-	KeyBits       int
-	Mode          string
-	ServiceType   ServiceType
-	KeyPurpose    string
-	NonceStrategy string
-	NonceBytes    int
-	TagBytes      int
-	MAC           string
-	Composition   string
+	ID             ID
+	Name           string
+	Algorithm      string
+	KeyBits        int
+	WorkingKeyBits int
+	Mode           string
+	ServiceType    ServiceType
+	KeyPurpose     string
+	NonceStrategy  string
+	NonceBytes     int
+	TagBytes       int
+	MAC            string
+	Composition    string
 }
 
 var catalog = [...]Descriptor{
@@ -60,6 +62,7 @@ var catalog = [...]Descriptor{
 	{ID: SM4GCM, Name: "SM4_GCM", Algorithm: "SM4", KeyBits: 128, Mode: "GCM", ServiceType: ServiceAuthEncrypt, KeyPurpose: "encrypt_decrypt", NonceStrategy: "lease_counter", NonceBytes: 12, TagBytes: 16},
 	{ID: AES256CTR, Name: "AES_256_CTR", Algorithm: "AES", KeyBits: 256, Mode: "CTR", ServiceType: ServiceEncryptOnly, KeyPurpose: "encrypt_decrypt", NonceStrategy: "lease_counter", NonceBytes: 16},
 	{ID: SM4CTR, Name: "SM4_CTR", Algorithm: "SM4", KeyBits: 128, Mode: "CTR", ServiceType: ServiceEncryptOnly, KeyPurpose: "encrypt_decrypt", NonceStrategy: "lease_counter", NonceBytes: 16},
+	{ID: SM4HCTR, Name: "SM4_HCTR", Algorithm: "SM4", KeyBits: 128, WorkingKeyBits: 256, Mode: "HCTR", ServiceType: ServiceEncryptOnly, KeyPurpose: "encrypt_decrypt", NonceStrategy: "protocol_tweak", NonceBytes: 16},
 	{ID: AES256CMAC, Name: "AES_256_CMAC", Algorithm: "AES", KeyBits: 256, Mode: "CMAC", ServiceType: ServiceAuthOnly, KeyPurpose: "authenticate_verify", NonceStrategy: "none", TagBytes: 16, MAC: "CMAC", Composition: "MAC_ONLY"},
 	{ID: SM4CMAC, Name: "SM4_CMAC", Algorithm: "SM4", KeyBits: 128, Mode: "CMAC", ServiceType: ServiceAuthOnly, KeyPurpose: "authenticate_verify", NonceStrategy: "none", TagBytes: 16, MAC: "CMAC", Composition: "MAC_ONLY"},
 }
@@ -105,6 +108,17 @@ func (id ID) KeyBits() int {
 }
 
 func (id ID) KeyBytes() int { return id.KeyBits() / 8 }
+
+// WorkingKeyBytes is the key material consumed by the primitive after any
+// protocol-owned derivation. It differs from KeyBytes only for constructions
+// such as HCTR that use independent block-cipher and universal-hash keys.
+func (id ID) WorkingKeyBytes() int {
+	descriptor, _ := Describe(id)
+	if descriptor.WorkingKeyBits != 0 {
+		return descriptor.WorkingKeyBits / 8
+	}
+	return descriptor.KeyBits / 8
+}
 
 func (id ID) NonceLen() int {
 	descriptor, _ := Describe(id)

@@ -18,7 +18,7 @@ HTTP API -> 地面 CCSDS 应用服务 -> SQLite SecurityState/测试 TPM
 
 ## 2. 当前协议契约
 
-普通 TC 使用 SM4-CTR：
+普通 TC 使用 SM4-HCTR：
 
 ```text
 TC Primary Header(5) | SPI(2) | IV Counter(4) | Ciphertext(N) | FECF(2)
@@ -28,7 +28,7 @@ Recovery TC 使用 SM4-GCM：
 
 ```text
 TC Primary Header(5) | Recovery SPI(2) | IV Counter(4)
-| Recovery Ciphertext(41/57) | Tag(16) | FECF(2)
+| Recovery Ciphertext(41) | Tag(16) | FECF(2)
 ```
 
 职责固定如下：
@@ -43,7 +43,7 @@ TC Primary Header(5) | Recovery SPI(2) | IV Counter(4)
 | 星务适配器 | 解密明文 | 按测控团队提供的规则校验包格式和允许范围 |
 | 星载 NVM 适配器 | 待提交状态 | 原子持久化；失败时不得释放明文或推进重放状态 |
 
-普通 TC 的安全性依赖“CTR 解密后严格校验，再持久化，最后释放”。CTR 本身不提供完整性认证，所以明文校验器不是可选组件。
+普通 TC 的安全性依赖“HCTR 解密后严格校验，再持久化，最后释放”。HCTR 提供宽块扩散但不提供完整性认证，所以明文校验器不是可选组件。
 
 ## 3. 测试架构
 
@@ -97,7 +97,7 @@ Harness 内部只保留以下适配器：
 
 | 项目 | 测试值 |
 | --- | --- |
-| 普通算法 | SM4-CTR |
+| 普通算法 | SM4-HCTR |
 | Current | SPI `0x1001`，epoch 1，operational root v1 |
 | Next | SPI `0x1002`，epoch 2，初始使用 operational root v1 |
 | Recovery | SPI `0x7001`，SM4-GCM，recovery root v1，Tag 16 字节 |
@@ -118,7 +118,7 @@ Harness 内部只保留以下适配器：
 目的：快速验证 Go 与 C 对同一根密钥、SPI、IV、派生上下文和帧字节得到一致结果。
 
 - 每次提交运行。
-- 使用现有 AES/SM4 CTR 与 Recovery GCM 共享向量。
+- 使用当前 SM4-HCTR 与 SM4-GCM Recovery 共享向量，并单独校验 HCTR 整块和非整块标准向量。
 - 覆盖 C 模块的 replay、FECF、持久化失败、Next promotion 和 Recovery authentication。
 - 不声称覆盖 HTTP、数据库、TPM、并发 IV 分配或进程重启。
 
@@ -181,13 +181,13 @@ Harness 内部只保留以下适配器：
 3. 断言内存和持久化 replay 状态均未推进。
 4. 取消故障后重发同一帧，期望成功；这证明失败不会造成不可恢复失步。
 
-### 6.6 CTR 篡改必须被明文规则拦截
+### 6.6 HCTR 篡改必须被明文规则拦截
 
-1. 修改普通 CTR 密文中的一位，并重新计算正确 FECF。
+1. 修改普通 HCTR 密文中的一位，并重新计算正确 FECF。
 2. 期望 FECF 通过，但明文校验失败并返回 `PLAINTEXT_REJECTED`。
 3. 断言不释放明文、不提交 replay 状态。
 
-这条用例必须使用测控团队提供的正式明文校验规则。它验证的是 CTR 场景最后一道安全边界，不能只用“前两个字节固定”作为最终验收。
+这条用例必须使用测控团队提供的正式明文校验规则。HCTR 会把篡改扩散为整段不可控变化，但不能代替认证；该用例验证的是关闭式拒绝边界，不能只用“前两个字节固定”作为最终验收。
 
 ## 7. P0 拒绝矩阵
 
@@ -214,6 +214,7 @@ Harness 内部只保留以下适配器：
 - IV 接近 `uint32` 上限：达到耗尽边界后 fail closed，不环回。仅夹具初始化阶段可设置边界状态，业务断言仍必须走公开 API。
 - 最小数据域、最大合法数据域和大一字节的数据域。
 - Current、Next、Recovery 三条 replay 状态互不污染。
+- 在一个 context 的校验回调中嵌套调用另一个 context，验证无可变全局状态；同一 context 并发由星务串行化，不作为库内锁语义。
 - Recovery 密文、Tag、SPI、IV 和事务字段逐项单点篡改。
 - C harness 使用 AddressSanitizer/UndefinedBehaviorSanitizer 运行全场景。
 - 连续长稳测试记录内存峰值、每帧耗时和状态写次数。
@@ -264,7 +265,9 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 
 ### 11.4 正式明文校验规则
 
-密码系统无法判断一条业务指令是否危险，但星载端必须在 CTR 解密后识别“结构上合法的遥控包”。测控团队需提供字段、长度、版本、APID/服务类型等严格规则及正反样例。未拿到这些规则前，CTR 篡改防护只能算机制测试，不能算安全验收完成。
+密码系统无法判断一条业务指令是否危险，但星载端必须在 HCTR 解密后识别“结构上合法的遥控包”。必选校验合同、星务适配 seam、规则表输入和反例矩阵统一定义在 [`TC_PLAINTEXT_VALIDATION_DESIGN.md`](TC_PLAINTEXT_VALIDATION_DESIGN.md)，本测试设计不复制另一套字段规则。
+
+端到端测试必须链接星务生产校验实现，并至少覆盖固定 TC 主导头、唯一未分段 Space Packet、长度精确一致、`VCID -> APID -> 指令码` 白名单、参数范围、保留位和填充。测试桩中的 `CA FE` 魔数只能用于底层 C 模块机制测试，不能进入 L2/L3 或发布验收。任务级规则表及其正反样例未冻结前，HCTR 篡改用例不得标记为安全验收完成。
 
 ### 11.5 真实板载适配器
 
@@ -278,6 +281,6 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 - 任意校验、认证、重放或持久化失败均不会释放明文或推进状态；
 - 地面并发与重启不会造成 IV 重用；
 - 星载重启不会遗忘已接受帧或 pending root；
-- CTR 篡改能被正式遥控包规则拒绝；
-- SM4-CTR 普通链路和 SM4-GCM Recovery 链路均使用真实生产代码；
+- HCTR 篡改能被正式遥控包规则拒绝；
+- SM4-HCTR 普通链路和 SM4-GCM Recovery 链路均使用真实生产代码；
 - 物理 TPM 与目标星载板卡的硬件在环测试满足已分配的执行时间和资源预算。

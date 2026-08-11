@@ -1,6 +1,6 @@
 # Ground-to-flight fixed interoperability vector.
-# TC profile: primary(5) || SPI(2) || IV_COUNTER(4) || SM4-CTR data || FECF(2)
-suite_id=SM4_CTR
+# TC profile: primary(5) || SPI(2) || IV_COUNTER(4) || SM4-HCTR data || FECF(2)
+suite_id=SM4_HCTR
 root=0123456789abcdeffedcba9876543210
 nonce_prefix=a1a2a3a4a5a6
 spi=2002
@@ -9,4 +9,4 @@ spacecraft_id=1234
 root_version=9
 security_epoch=7
 plaintext=cafe0102030405060708090a0b0c0d0e0f10111213
-protected_frame=2001042107200200000009182baff77197681d65e62ee5c22c856666796bb5f0ddc2
+protected_frame=2001042107200200000009263d342e86dc6eff820c59dbf9f1a94fcb9de464c1d136

@@ -48,7 +48,7 @@ func (s *FrameSecurity) AdvanceTCTransmitEpoch(ctx context.Context, tenantID str
 // tenant's unique CURRENT association and owns SPI, IV, KDF, and ciphertext.
 // The transport caller prepends its primary header and appends FECF.
 func (s *FrameSecurity) ProtectTCData(ctx context.Context, tenantID string, data []byte) (*ProtectedTCData, error) {
-	if len(data) == 0 || TCPrimaryHeaderLength+TCSecurityHeaderLength+len(data)+TCFECFLength > TCMaxFrameLength ||
+	if len(data) < 16 || TCPrimaryHeaderLength+TCSecurityHeaderLength+len(data)+TCFECFLength > TCMaxFrameLength ||
 		TCPrimaryHeaderLength+TCSecurityHeaderLength+len(data)+TCFECFLength > s.options.MaxFrameLength {
 		return nil, ErrFrameInvalid
 	}
@@ -68,7 +68,7 @@ func (s *FrameSecurity) ProtectTCData(ctx context.Context, tenantID string, data
 	}
 	suiteID, _ := suite.Parse(sa.SuiteID)
 	securityHeader := encodeTCSecurityHeader(sa.SPI, counter)
-	initialCounter := tcInitialCounter(sa.Parameters.NoncePrefix, sa.SPI, counter)
+	tweak := tcHCTRTweak(sa.Parameters.NoncePrefix, sa.SPI, counter)
 	result, err := s.core.ProtectDerived(ctx, protection.ProtectRequest{
 		TenantID:      tenantID,
 		KeyID:         sa.KeyID,
@@ -76,15 +76,16 @@ func (s *FrameSecurity) ProtectTCData(ctx context.Context, tenantID string, data
 		KeyVersion:    sa.KeyVersion,
 		PolicyVersion: sa.PolicyVersion,
 		Data:          data,
-		Nonce:         initialCounter,
+		Nonce:         tweak,
 		NodeID:        s.options.NodeID,
 	}, protection.Derivation{Label: ordinaryKDFLabel,
 		Context: ordinaryKDFContext(s.options.TCSpacecraftID, suiteID, sa.SPI, sa.SecurityEpoch, sa.KeyVersion)})
 	if err != nil {
 		return nil, err
 	}
-	if result.SuiteID != suiteID || result.KeyVersion != sa.KeyVersion || result.PolicyVersion != sa.PolicyVersion ||
-		len(result.Tag) != 0 || !equalBytes(result.Nonce, initialCounter) {
+	if result == nil || result.SuiteID != suiteID || result.ServiceType != suite.ServiceEncryptOnly ||
+		result.KeyVersion != sa.KeyVersion || result.PolicyVersion != sa.PolicyVersion ||
+		len(result.Data) != len(data) || len(result.Tag) != 0 || !equalBytes(result.Nonce, tweak) {
 		return nil, fmt.Errorf("%w: protection result does not match association binding", ErrFrameInvalid)
 	}
 	return &ProtectedTCData{Data: join(securityHeader, result.Data),
@@ -146,7 +147,7 @@ func (s *FrameSecurity) ProtectRootPrepareData(ctx context.Context, tenantID str
 	if err != nil {
 		return nil, err
 	}
-	if result.SuiteID != suiteID || result.ServiceType != suite.ServiceAuthEncrypt ||
+	if result == nil || result.SuiteID != suiteID || result.ServiceType != suite.ServiceAuthEncrypt ||
 		result.KeyVersion != sa.KeyVersion || result.PolicyVersion != sa.PolicyVersion ||
 		len(result.Tag) != TCRecoveryTagLength || !equalBytes(result.Nonce, nonce) || len(result.Data) != len(plaintext) {
 		return nil, fmt.Errorf("%w: recovery protection result does not match association binding", ErrFrameInvalid)
@@ -211,7 +212,7 @@ func (s *FrameSecurity) UnprotectAOS(ctx context.Context, tenantID string, frame
 	if err != nil {
 		return nil, err
 	}
-	if result.SuiteID != suiteID || result.ServiceType != suiteID.ServiceType() {
+	if result == nil || result.SuiteID != suiteID || result.ServiceType != suiteID.ServiceType() {
 		return nil, fmt.Errorf("%w: unprotection result does not match association binding", ErrFrameInvalid)
 	}
 	if err := s.store.CommitReplay(ctx, sa.ID, sequence, sa.Parameters.ReplayWindow); err != nil {

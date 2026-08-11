@@ -7,13 +7,10 @@ import (
 	"github.com/kvlt/key-vault/internal/protocol/ccsds"
 )
 
-func TestSM4ProvisioningProfile(t *testing.T) {
-	options := provisionOptions{tenantID: defaultTenant, family: "sm4", currentSPI: defaultCurrentSPI,
+func TestProvisioningUsesTheSingleTCProfile(t *testing.T) {
+	options := provisionOptions{tenantID: defaultTenant, currentSPI: defaultCurrentSPI,
 		recoverySPI: defaultRecoverySPI, aosSPI: defaultAOSSPI, epoch: defaultEpoch, replayWindow: defaultReplay}
-	profile, err := profileFor(options.family)
-	if err != nil {
-		t.Fatal(err)
-	}
+	profile := tcProfile()
 	associations := desiredAssociations(options, profile, provisionIDs(options.tenantID))
 	if len(associations) != 4 {
 		t.Fatalf("association count = %d", len(associations))
@@ -24,7 +21,7 @@ func TestSM4ProvisioningProfile(t *testing.T) {
 		}
 	}
 	current, next, recovery, aos := associations[0], associations[1], associations[2], associations[3]
-	if current.SuiteID != "SM4_CTR" || current.State != ccsds.AssociationCurrent ||
+	if current.SuiteID != "SM4_HCTR" || current.State != ccsds.AssociationCurrent ||
 		next.SPI != ccsds.NextSPI(current.SPI) || next.SecurityEpoch != current.SecurityEpoch+1 ||
 		next.KeyID != current.KeyID || next.KeyVersion != current.KeyVersion ||
 		!bytes.Equal(next.Parameters.NoncePrefix, current.Parameters.NoncePrefix) {
@@ -39,12 +36,12 @@ func TestSM4ProvisioningProfile(t *testing.T) {
 }
 
 func TestProvisioningAcceptsComplete16BitSPIRange(t *testing.T) {
-	options := provisionOptions{tenantID: defaultTenant, family: "sm4", currentSPI: 0xffff,
+	options := provisionOptions{tenantID: defaultTenant, currentSPI: 0xffff,
 		recoverySPI: 1, aosSPI: 2, epoch: 1, replayWindow: 32}
 	if err := options.validate(); err != nil {
 		t.Fatalf("full-range SPI profile rejected: %v", err)
 	}
-	associations := desiredAssociations(options, profile{ordinarySuite: "SM4_CTR", recoverySuite: "SM4_GCM", aosSuite: "SM4_GCM"}, provisionIDs(options.tenantID))
+	associations := desiredAssociations(options, tcProfile(), provisionIDs(options.tenantID))
 	if associations[0].SPI != 0xffff || associations[1].SPI != 0x0000 {
 		t.Fatalf("SPI boundary transition = 0x%04X -> 0x%04X", associations[0].SPI, associations[1].SPI)
 	}
@@ -61,7 +58,7 @@ func TestProvisioningAcceptsComplete16BitSPIRange(t *testing.T) {
 }
 
 func TestProvisioningRejectsOverlappingSPIs(t *testing.T) {
-	options := provisionOptions{tenantID: defaultTenant, family: "sm4", currentSPI: 1,
+	options := provisionOptions{tenantID: defaultTenant, currentSPI: 1,
 		recoverySPI: 2, aosSPI: 3, epoch: 1, replayWindow: 32}
 	if err := options.validate(); err == nil {
 		t.Fatal("overlapping Next and Recovery SPI was accepted")

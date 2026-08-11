@@ -17,8 +17,8 @@ var (
 
 func DeriveOrdinaryTrafficKey(root []byte, spacecraftID uint16, ordinarySuite suite.ID,
 	spi uint16, securityEpoch, keyVersion uint32) ([]byte, error) {
-	if ordinarySuite != suite.AES256CTR && ordinarySuite != suite.SM4CTR {
-		return nil, fmt.Errorf("%w: ordinary KDF requires a CTR suite", ErrFrameInvalid)
+	if ordinarySuite != suite.SM4HCTR {
+		return nil, fmt.Errorf("%w: ordinary KDF requires SM4_HCTR", ErrFrameInvalid)
 	}
 	context := ordinaryKDFContext(spacecraftID, ordinarySuite, spi, securityEpoch, keyVersion)
 	return kdf.CMACCounter(root, ordinarySuite, ordinaryKDFLabel, context)
@@ -38,8 +38,8 @@ func ordinaryKDFContext(spacecraftID uint16, ordinarySuite suite.ID, spi uint16,
 
 func DeriveRecoveryGCMKey(root []byte, spacecraftID uint16, recoverySuite suite.ID,
 	spi uint16, recoveryKeyVersion uint32) ([]byte, error) {
-	if recoverySuite != suite.AES256GCM && recoverySuite != suite.SM4GCM {
-		return nil, fmt.Errorf("%w: recovery KDF requires a GCM suite", ErrFrameInvalid)
+	if recoverySuite != suite.SM4GCM {
+		return nil, fmt.Errorf("%w: recovery KDF requires SM4_GCM", ErrFrameInvalid)
 	}
 	context := recoveryKDFContext(spacecraftID, recoverySuite, spi, recoveryKeyVersion)
 	return kdf.CMACCounter(root, recoverySuite, recoveryKDFLabel, context)

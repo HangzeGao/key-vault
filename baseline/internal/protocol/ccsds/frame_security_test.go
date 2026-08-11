@@ -13,6 +13,12 @@ import (
 type fakeCore struct {
 	aosNonce       []byte
 	lastDerivation protection.Derivation
+	protectErr     error
+	unprotectErr   error
+	nilProtect     bool
+	nilUnprotect   bool
+	wrongBinding   bool
+	mutateProtect  func(*protection.ProtectResult)
 }
 
 func (f *fakeCore) ProtectDerived(_ context.Context, req protection.ProtectRequest,
@@ -20,7 +26,20 @@ func (f *fakeCore) ProtectDerived(_ context.Context, req protection.ProtectReque
 	f.lastDerivation = protection.Derivation{
 		Label: append([]byte(nil), derivation.Label...), Context: append([]byte(nil), derivation.Context...),
 	}
-	return f.protect(req)
+	if f.protectErr != nil {
+		return nil, f.protectErr
+	}
+	if f.nilProtect {
+		return nil, nil
+	}
+	result, err := f.protect(req)
+	if err == nil && f.wrongBinding {
+		result.SuiteID = suite.AES256GCM
+	}
+	if err == nil && f.mutateProtect != nil {
+		f.mutateProtect(result)
+	}
+	return result, err
 }
 
 func (f *fakeCore) protect(req protection.ProtectRequest) (*protection.ProtectResult, error) {
@@ -31,7 +50,7 @@ func (f *fakeCore) protect(req protection.ProtectRequest) (*protection.ProtectRe
 	if len(req.Nonce) == 12 && len(req.AAD) == TCRecoveryAADLength && len(req.AuthenticationInput) == 0 {
 		return &protection.ProtectResult{
 			Data: data, Nonce: append([]byte(nil), req.Nonce...), Tag: bytes.Repeat([]byte{0xa5}, 16),
-			KeyVersion: req.KeyVersion, PolicyVersion: req.PolicyVersion, SuiteID: suite.AES256GCM,
+			KeyVersion: req.KeyVersion, PolicyVersion: req.PolicyVersion, SuiteID: suite.SM4GCM,
 			ServiceType: suite.ServiceAuthEncrypt,
 		}, nil
 	}
@@ -40,12 +59,18 @@ func (f *fakeCore) protect(req protection.ProtectRequest) (*protection.ProtectRe
 	}
 	return &protection.ProtectResult{
 		Data: data, Nonce: append([]byte(nil), req.Nonce...),
-		KeyVersion: req.KeyVersion, PolicyVersion: req.PolicyVersion, SuiteID: suite.AES256CTR,
+		KeyVersion: req.KeyVersion, PolicyVersion: req.PolicyVersion, SuiteID: suite.SM4HCTR,
 		ServiceType: suite.ServiceEncryptOnly,
 	}, nil
 }
 
 func (f *fakeCore) Unprotect(_ context.Context, req protection.UnprotectRequest) (*protection.UnprotectResult, error) {
+	if f.unprotectErr != nil {
+		return nil, f.unprotectErr
+	}
+	if f.nilUnprotect {
+		return nil, nil
+	}
 	if !bytes.Equal(req.Tag, bytes.Repeat([]byte{0xa5}, 16)) || len(req.AAD) == 0 {
 		return nil, errors.New("authentication failed")
 	}
@@ -53,14 +78,18 @@ func (f *fakeCore) Unprotect(_ context.Context, req protection.UnprotectRequest)
 	for i := range data {
 		data[i] ^= 0x5a
 	}
-	return &protection.UnprotectResult{Data: data, SuiteID: suite.AES256GCM, ServiceType: suite.ServiceAuthEncrypt}, nil
+	result := &protection.UnprotectResult{Data: data, SuiteID: suite.AES256GCM, ServiceType: suite.ServiceAuthEncrypt}
+	if f.wrongBinding {
+		result.SuiteID = suite.SM4GCM
+	}
+	return result, nil
 }
 
 func recoveryAssociation() SecurityAssociation {
 	return SecurityAssociation{
 		ID: "recovery", TenantID: "tenant-1", SPI: 0x7001, Direction: DirectionTCRecoveryTx,
 		KeyID: "key-recovery", KeyVersion: 3, PolicyVersion: 1,
-		SuiteID: suite.AES256GCM.String(), State: AssociationActive,
+		SuiteID: suite.SM4GCM.String(), State: AssociationActive,
 		Parameters: ManagedParameters{TransmittedIVLength: TCIVCounterLength, TagLength: TCRecoveryTagLength,
 			NoncePrefix: []byte{0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5}},
 	}
@@ -70,7 +99,7 @@ func tcAssociation() SecurityAssociation {
 	return SecurityAssociation{
 		ID: "tx-current", TenantID: "tenant-1", SPI: 0x1001, Direction: DirectionTCTx,
 		KeyID: "operational-root", KeyVersion: 7, SecurityEpoch: 9, PolicyVersion: 1,
-		SuiteID: suite.AES256CTR.String(), State: AssociationCurrent,
+		SuiteID: suite.SM4HCTR.String(), State: AssociationCurrent,
 		Parameters: ManagedParameters{TransmittedIVLength: TCIVCounterLength,
 			NoncePrefix: []byte{0x10, 0x20, 0x30, 0x40, 0x50, 0x60}},
 	}
@@ -113,7 +142,7 @@ func newTestSecurity(t *testing.T, core ProtectionCore, associations ...Security
 func TestProtectTCDataOwnsSecurityHeaderAndSelectsCurrent(t *testing.T) {
 	core := &fakeCore{}
 	security, _ := newTestSecurity(t, core, nextTCAssociation(), tcAssociation())
-	plain := []byte("command")
+	plain := []byte("command-16-bytes")
 	protected, err := security.ProtectTCData(context.Background(), "tenant-1", plain)
 	if err != nil {
 		t.Fatal(err)
@@ -138,7 +167,7 @@ func TestAdvanceTCTransmitEpochIsLocalAndAtomic(t *testing.T) {
 	if err := security.AdvanceTCTransmitEpoch(context.Background(), "tenant-1"); err != nil {
 		t.Fatal(err)
 	}
-	protected, err := security.ProtectTCData(context.Background(), "tenant-1", []byte{1})
+	protected, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +202,7 @@ func TestAdvanceTCTransmitEpochWrapsCompleteSPISpace(t *testing.T) {
 	if err := security.AdvanceTCTransmitEpoch(context.Background(), "tenant-1"); err != nil {
 		t.Fatalf("0xFFFF -> 0x0000 promotion failed: %v", err)
 	}
-	protected, err := security.ProtectTCData(context.Background(), "tenant-1", []byte{1})
+	protected, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,14 +219,14 @@ func TestProtectRootPrepareDataUsesRecoveryOnlyAndAADIsSecurityHeader(t *testing
 	security, _ := newTestSecurity(t, core, recoveryAssociation(), current, next)
 	command := RootPrepareCommand{
 		TransactionID: 9, ExpectedCurrentRootVersion: 7, NewRootVersion: 8,
-		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.AES256CTR,
-		NewOperationalRoot: bytes.Repeat([]byte{0x44}, 32),
+		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4HCTR,
+		NewOperationalRoot: bytes.Repeat([]byte{0x44}, 16),
 	}
 	protected, err := security.ProtectRootPrepareData(context.Background(), "tenant-1", command)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantLength := TCSecurityHeaderLength + rootPrepareFixedLength + 32 + TCRecoveryTagLength
+	wantLength := TCSecurityHeaderLength + rootPrepareFixedLength + 16 + TCRecoveryTagLength
 	if len(protected.Data) != wantLength || protected.Metadata.ServiceType != suite.ServiceAuthEncrypt {
 		t.Fatalf("unexpected recovery result: len=%d metadata=%+v", len(protected.Data), protected.Metadata)
 	}
@@ -216,8 +245,8 @@ func TestRootPrepareMustMatchProvisionedCurrentAndNext(t *testing.T) {
 	next.KeyVersion = 8
 	security, _ := newTestSecurity(t, &fakeCore{}, recoveryAssociation(), current, next)
 	command := RootPrepareCommand{TransactionID: 1, ExpectedCurrentRootVersion: 7, NewRootVersion: 8,
-		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.AES256CTR,
-		NewOperationalRoot: bytes.Repeat([]byte{1}, 32)}
+		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4HCTR,
+		NewOperationalRoot: bytes.Repeat([]byte{1}, 16)}
 	command.NextSecurityEpoch++
 	if _, err := security.ProtectRootPrepareData(context.Background(), "tenant-1", command); !errors.Is(err, ErrAssociationState) {
 		t.Fatalf("mismatched next epoch error = %v", err)
@@ -226,7 +255,7 @@ func TestRootPrepareMustMatchProvisionedCurrentAndNext(t *testing.T) {
 
 func TestRootPrepareTransactionIsStrict(t *testing.T) {
 	command := RootPrepareCommand{TransactionID: 1, ExpectedCurrentRootVersion: 1, NewRootVersion: 2,
-		NextSecurityEpoch: 3, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4CTR,
+		NextSecurityEpoch: 3, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4HCTR,
 		NewOperationalRoot: bytes.Repeat([]byte{7}, 16)}
 	raw, err := command.MarshalBinary()
 	if err != nil {
@@ -283,17 +312,20 @@ func TestFailedAuthenticationDoesNotAdvanceAOSReplayWindow(t *testing.T) {
 	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", good); err != nil {
 		t.Fatalf("sequence was consumed by failed authentication: %v", err)
 	}
+	nilSecurity, _ := newTestSecurity(t, &fakeCore{nilUnprotect: true}, rx)
+	nilHeader, _ := encodeAOSSecurityHeader(rx.SPI, 10, 4, bytes.Repeat([]byte{0x11}, 12))
+	nilResultFrame := join(header, nilHeader, []byte("cipher"), bytes.Repeat([]byte{0xa5}, 16))
+	if _, err := nilSecurity.UnprotectAOS(context.Background(), "tenant-1", nilResultFrame); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("nil AOS result error = %v", err)
+	}
 }
 
 func TestTCProfilesAndStatesAreStrict(t *testing.T) {
-	for _, suiteID := range []suite.ID{suite.AES256CTR, suite.SM4CTR} {
-		sa := tcAssociation()
-		sa.SuiteID = suiteID.String()
-		if err := sa.Validate(); err != nil {
-			t.Fatalf("TC profile rejected %s: %v", suiteID, err)
-		}
+	sa := tcAssociation()
+	if err := sa.Validate(); err != nil {
+		t.Fatalf("TC profile rejected %s: %v", suite.SM4HCTR, err)
 	}
-	for _, suiteID := range []suite.ID{suite.AES256GCM, suite.SM4GCM, suite.AES256CMAC, suite.SM4CMAC} {
+	for _, suiteID := range []suite.ID{suite.AES256CTR, suite.SM4CTR, suite.AES256GCM, suite.SM4GCM, suite.AES256CMAC, suite.SM4CMAC} {
 		sa := tcAssociation()
 		sa.SuiteID = suiteID.String()
 		if err := sa.Validate(); err == nil {
@@ -308,17 +340,16 @@ func TestTCProfilesAndStatesAreStrict(t *testing.T) {
 }
 
 func TestRecoveryAssociationAllowsOnlyGCM(t *testing.T) {
-	for _, suiteID := range []suite.ID{suite.AES256GCM, suite.SM4GCM} {
+	sa := recoveryAssociation()
+	if err := sa.Validate(); err != nil {
+		t.Fatalf("recovery profile rejected %s: %v", suite.SM4GCM, err)
+	}
+	for _, suiteID := range []suite.ID{suite.AES256GCM, suite.AES256CTR, suite.SM4HCTR} {
 		sa := recoveryAssociation()
 		sa.SuiteID = suiteID.String()
-		if err := sa.Validate(); err != nil {
-			t.Fatalf("recovery profile rejected %s: %v", suiteID, err)
+		if err := sa.Validate(); err == nil {
+			t.Fatalf("recovery profile accepted %s", suiteID)
 		}
-	}
-	sa := recoveryAssociation()
-	sa.SuiteID = suite.AES256CTR.String()
-	if err := sa.Validate(); err == nil {
-		t.Fatal("recovery profile accepted CTR")
 	}
 }
 
@@ -329,5 +360,228 @@ func TestProtectTCDataRejectsEmptyOrOversizedInput(t *testing.T) {
 	}
 	if _, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, TCMaxFrameLength)); !errors.Is(err, ErrFrameInvalid) {
 		t.Fatalf("oversized data error = %v", err)
+	}
+}
+
+func TestFrameSecurityPropagatesCoreAndBindingFailures(t *testing.T) {
+	coreFailure := errors.New("core failure")
+	security, _ := newTestSecurity(t, &fakeCore{protectErr: coreFailure}, tcAssociation())
+	if _, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16)); !errors.Is(err, coreFailure) {
+		t.Fatalf("TC core error = %v", err)
+	}
+	security, _ = newTestSecurity(t, &fakeCore{wrongBinding: true}, tcAssociation())
+	if _, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16)); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("TC binding error = %v", err)
+	}
+	security, _ = newTestSecurity(t, &fakeCore{nilProtect: true}, tcAssociation())
+	if _, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16)); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("nil TC result error = %v", err)
+	}
+	for name, mutate := range map[string]func(*protection.ProtectResult){
+		"wrong service": func(result *protection.ProtectResult) { result.ServiceType = suite.ServiceAuthEncrypt },
+		"wrong length":  func(result *protection.ProtectResult) { result.Data = result.Data[:len(result.Data)-1] },
+	} {
+		t.Run(name, func(t *testing.T) {
+			security, _ := newTestSecurity(t, &fakeCore{mutateProtect: mutate}, tcAssociation())
+			if _, err := security.ProtectTCData(context.Background(), "tenant-1", make([]byte, 16)); !errors.Is(err, ErrFrameInvalid) {
+				t.Fatalf("TC result binding error = %v", err)
+			}
+		})
+	}
+	security, _ = newTestSecurity(t, &fakeCore{}, tcAssociation())
+	if _, err := security.ProtectTCData(context.Background(), "missing", make([]byte, 16)); !errors.Is(err, ErrAssociationNotFound) {
+		t.Fatalf("missing TC association = %v", err)
+	}
+
+	current := tcAssociation()
+	next := nextTCAssociation()
+	next.KeyVersion = 8
+	command := RootPrepareCommand{
+		TransactionID: 1, ExpectedCurrentRootVersion: 7, NewRootVersion: 8,
+		NextSecurityEpoch: 10, NextSPI: next.SPI, OrdinarySuiteID: suite.SM4HCTR,
+		NewOperationalRoot: bytes.Repeat([]byte{1}, 16),
+	}
+	security, _ = newTestSecurity(t, &fakeCore{protectErr: coreFailure},
+		current, next, recoveryAssociation())
+	if _, err := security.ProtectRootPrepareData(context.Background(), "tenant-1", command); !errors.Is(err, coreFailure) {
+		t.Fatalf("recovery core error = %v", err)
+	}
+	security, _ = newTestSecurity(t, &fakeCore{wrongBinding: true},
+		current, next, recoveryAssociation())
+	if _, err := security.ProtectRootPrepareData(context.Background(), "tenant-1", command); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("recovery binding error = %v", err)
+	}
+	security, _ = newTestSecurity(t, &fakeCore{nilProtect: true},
+		current, next, recoveryAssociation())
+	if _, err := security.ProtectRootPrepareData(context.Background(), "tenant-1", command); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("nil recovery result error = %v", err)
+	}
+}
+
+func TestUnprotectAOSBoundaryFailures(t *testing.T) {
+	security, store := newTestSecurity(t, &fakeCore{})
+	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", nil); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("empty AOS frame = %v", err)
+	}
+	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", make([]byte, 2049)); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("oversized AOS frame = %v", err)
+	}
+	unknown := []byte{0, 0, 0, 0, 0, 0, 0x77, 0x77, 0}
+	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", unknown); !errors.Is(err, ErrAssociationNotFound) {
+		t.Fatalf("unknown AOS SPI = %v", err)
+	}
+	if _, err := New(&fakeCore{}, store, Options{}); err == nil {
+		t.Fatal("New accepted invalid options")
+	}
+
+	disabled := aosAssociation()
+	disabled.State = AssociationDisabled
+	security, _ = newTestSecurity(t, &fakeCore{}, disabled)
+	short := []byte{0, 0, 0, 0, 0, 0, 0x10, 0x02, 0}
+	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", short); !errors.Is(err, ErrAssociationState) {
+		t.Fatalf("disabled AOS association = %v", err)
+	}
+	security, _ = newTestSecurity(t, &fakeCore{}, aosAssociation())
+	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", short); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("short AOS security fields = %v", err)
+	}
+}
+
+func TestTCFrameValidationAndSequenceBoundaries(t *testing.T) {
+	frame := appendTCFECF([]byte{0x20, 0x01, 0, 0, 0x07, 0xaa})
+	setTCFrameLength(frame, len(frame))
+	// FECF must be regenerated after writing the encoded frame length.
+	frame = appendTCFECF(frame[:len(frame)-TCFECFLength])
+	if err := validateTCFrame(frame); err != nil {
+		t.Fatalf("valid frame rejected: %v", err)
+	}
+	badLength := append([]byte(nil), frame...)
+	badLength[3] ^= 1
+	badCRC := append([]byte(nil), frame...)
+	badCRC[len(badCRC)-1] ^= 1
+	for _, invalid := range [][]byte{
+		nil,
+		make([]byte, TCMaxFrameLength+1),
+		badLength,
+		badCRC,
+	} {
+		if err := validateTCFrame(invalid); err == nil {
+			t.Fatalf("invalid frame accepted: %x", invalid)
+		}
+	}
+	if _, err := encodeAOSSecurityHeader(1, 1, 0, nil); !errors.Is(err, ErrSequenceExhausted) {
+		t.Fatalf("zero sequence width = %v", err)
+	}
+	if _, err := encodeAOSSecurityHeader(1, 256, 1, nil); !errors.Is(err, ErrSequenceExhausted) {
+		t.Fatalf("overflow sequence = %v", err)
+	}
+	if got, err := decodeSequence([]byte{1, 2, 3, 4, 5, 6, 7, 8}); err != nil || got != 0x0102030405060708 {
+		t.Fatalf("decodeSequence = %x/%v", got, err)
+	}
+	if _, err := decodeSequence(nil); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("empty sequence = %v", err)
+	}
+	if _, err := decodeSequence(make([]byte, 9)); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("long sequence = %v", err)
+	}
+}
+
+func TestAssociationAndOptionsValidationMatrix(t *testing.T) {
+	expectInvalid := func(sa SecurityAssociation) {
+		t.Helper()
+		if err := sa.Validate(); err == nil {
+			t.Fatalf("invalid association accepted: %+v", sa)
+		}
+	}
+	mutateTC := []func(*SecurityAssociation){
+		func(sa *SecurityAssociation) { sa.ID = "" },
+		func(sa *SecurityAssociation) { sa.Direction = Direction("BAD") },
+		func(sa *SecurityAssociation) { sa.SecurityEpoch = 0 },
+		func(sa *SecurityAssociation) { sa.State = AssociationActive },
+		func(sa *SecurityAssociation) { sa.SuiteID = "UNKNOWN" },
+		func(sa *SecurityAssociation) { sa.Parameters.SequenceNumberLength = 1 },
+		func(sa *SecurityAssociation) { sa.Parameters.NoncePrefix = nil },
+	}
+	for _, mutate := range mutateTC {
+		sa := tcAssociation()
+		mutate(&sa)
+		expectInvalid(sa)
+	}
+	mutateRecovery := []func(*SecurityAssociation){
+		func(sa *SecurityAssociation) { sa.State = AssociationCurrent },
+		func(sa *SecurityAssociation) { sa.SecurityEpoch = 1 },
+		func(sa *SecurityAssociation) { sa.Parameters.TagLength = 0 },
+		func(sa *SecurityAssociation) { sa.Parameters.NoncePrefix = nil },
+	}
+	for _, mutate := range mutateRecovery {
+		sa := recoveryAssociation()
+		mutate(&sa)
+		expectInvalid(sa)
+	}
+	aos := aosAssociation()
+	if err := aos.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*SecurityAssociation){
+		func(sa *SecurityAssociation) { sa.Parameters.SequenceNumberLength = 0 },
+		func(sa *SecurityAssociation) { sa.Parameters.SequenceNumberLength = 9 },
+		func(sa *SecurityAssociation) { sa.Parameters.TransmittedIVLength = 11 },
+		func(sa *SecurityAssociation) { sa.Parameters.NoncePrefix = []byte{1} },
+		func(sa *SecurityAssociation) { sa.Parameters.TagLength = 15 },
+		func(sa *SecurityAssociation) { sa.Parameters.ReplayWindow = 0 },
+		func(sa *SecurityAssociation) { sa.Parameters.ReplayWindow = 65 },
+	} {
+		candidate := aos
+		mutate(&candidate)
+		expectInvalid(candidate)
+	}
+	if (Options{}).validate() == nil ||
+		(Options{AOSPrimaryHeaderLength: 6, MaxFrameLength: 100, NodeID: "n"}).validate() != nil {
+		t.Fatal("options validation mismatch")
+	}
+	if _, err := New(nil, nil, Options{}); err == nil {
+		t.Fatal("New accepted nil dependencies")
+	}
+}
+
+func TestRootPrepareAndKDFRejections(t *testing.T) {
+	base := RootPrepareCommand{
+		TransactionID: 1, ExpectedCurrentRootVersion: 1, NewRootVersion: 2,
+		NextSecurityEpoch: 2, NextSPI: 2, OrdinarySuiteID: suite.SM4HCTR,
+		NewOperationalRoot: bytes.Repeat([]byte{1}, 16),
+	}
+	for _, mutate := range []func(*RootPrepareCommand){
+		func(c *RootPrepareCommand) { c.TransactionID = 0 },
+		func(c *RootPrepareCommand) { c.ExpectedCurrentRootVersion = 0 },
+		func(c *RootPrepareCommand) { c.NewRootVersion = c.ExpectedCurrentRootVersion },
+		func(c *RootPrepareCommand) { c.NextSecurityEpoch = 0 },
+		func(c *RootPrepareCommand) { c.OrdinarySuiteID = suite.SM4GCM },
+		func(c *RootPrepareCommand) { c.NewOperationalRoot = nil },
+	} {
+		candidate := base
+		mutate(&candidate)
+		if candidate.Validate() == nil {
+			t.Fatalf("invalid root prepare accepted: %+v", candidate)
+		}
+	}
+	raw, err := base.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[0] = 2
+	if _, err := ParseRootPrepareCommand(raw); !errors.Is(err, ErrFrameInvalid) {
+		t.Fatalf("invalid format version = %v", err)
+	}
+	if _, err := DeriveOrdinaryTrafficKey(make([]byte, 16), 1, suite.SM4GCM, 1, 1, 1); err == nil {
+		t.Fatal("ordinary KDF accepted wrong suite")
+	}
+	if _, err := DeriveOrdinaryTrafficKey(make([]byte, 15), 1, suite.SM4HCTR, 1, 1, 1); err == nil {
+		t.Fatal("ordinary KDF accepted short root")
+	}
+	if _, err := DeriveRecoveryGCMKey(make([]byte, 16), 1, suite.SM4HCTR, 1, 1); err == nil {
+		t.Fatal("recovery KDF accepted wrong suite")
+	}
+	if _, err := DeriveRecoveryGCMKey(make([]byte, 15), 1, suite.SM4GCM, 1, 1); err == nil {
+		t.Fatal("recovery KDF accepted short root")
 	}
 }

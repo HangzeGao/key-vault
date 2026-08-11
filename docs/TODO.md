@@ -16,6 +16,7 @@
 
 ## 生产发布阻塞项
 
+- [ ] 冻结任务级 TC `VCID -> APID -> 指令码` 映射、各指令精确长度、参数范围、保留位、填充、包内校验和与正反样例；通用必选合同与发布门禁已固化在 `baseline/docs/TC_PLAINTEXT_VALIDATION_DESIGN.md`，ADR 0005 仅记录线协议决策。
 - [ ] 使用任务选定的 CCSDS 355.0-B-2 profile 与权威互操作向量验收 TC 保护、AOS 解保护、帧边界、截断字段及 SA rollover。
 - [ ] 增加 CCSDS Security Association 的受控管理面、双人审批、审计与应急防重放状态重置流程。
 - [ ] 将 Key Plane 作为独立部署边界，通过 mTLS RPC 向公共平面提供最小能力。

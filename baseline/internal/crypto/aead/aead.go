@@ -1,6 +1,6 @@
 // Package aead implements the confidentiality capabilities of supported
-// symmetric suites. GCM provides authenticated encryption while CTR provides
-// confidentiality only. Authentication-only CMAC lives in crypto/mac so a
+// symmetric suites. GCM provides authenticated encryption while CTR and HCTR
+// provide confidentiality only. Authentication-only CMAC lives in crypto/mac so a
 // caller cannot accidentally treat a MAC as encryption.
 package aead
 
@@ -9,6 +9,7 @@ import (
 	"crypto/cipher"
 	"fmt"
 
+	smcipher "github.com/emmansun/gmsm/cipher"
 	"github.com/emmansun/gmsm/sm4"
 	"github.com/kvlt/key-vault/internal/crypto/suite"
 )
@@ -24,9 +25,9 @@ type Cipher interface {
 
 // New constructs an encryption primitive for the given suite and key.
 func New(suiteID suite.ID, key []byte) (Cipher, error) {
-	if len(key) != suiteID.KeyBytes() {
+	if len(key) != suiteID.WorkingKeyBytes() {
 		return nil, fmt.Errorf("aead: key length %d does not match suite %s (%d)",
-			len(key), suiteID, suiteID.KeyBytes())
+			len(key), suiteID, suiteID.WorkingKeyBytes())
 	}
 	switch suiteID {
 	case suite.AES256GCM:
@@ -61,6 +62,12 @@ func New(suiteID suite.ID, key []byte) (Cipher, error) {
 			return nil, fmt.Errorf("aead: sm4 new: %w", err)
 		}
 		return &ctrCipher{block: b}, nil
+	case suite.SM4HCTR:
+		b, err := sm4.NewCipher(key[:suite.SM4HCTR.KeyBytes()])
+		if err != nil {
+			return nil, fmt.Errorf("aead: sm4 new: %w", err)
+		}
+		return &hctrCipher{block: b, hashKey: append([]byte(nil), key[suite.SM4HCTR.KeyBytes():]...)}, nil
 	case suite.AES256CMAC, suite.SM4CMAC:
 		return nil, fmt.Errorf("aead: suite %s is authentication-only", suiteID)
 	default:
@@ -127,3 +134,53 @@ func (c *ctrCipher) Decrypt(ciphertext, tag, nonce, aad []byte) ([]byte, error) 
 
 func (c *ctrCipher) NonceSize() int { return c.block.BlockSize() }
 func (c *ctrCipher) TagSize() int   { return 0 }
+
+type hctrCipher struct {
+	block   cipher.Block
+	hashKey []byte
+}
+
+func (c *hctrCipher) mode(tweak []byte) (smcipher.LengthPreservingMode, error) {
+	if len(tweak) != c.block.BlockSize() {
+		return nil, fmt.Errorf("aead: HCTR tweak length mismatch")
+	}
+	return smcipher.NewHCTR(c.block, tweak, c.hashKey)
+}
+
+func (c *hctrCipher) Encrypt(plaintext, tweak, aad []byte) (ciphertext, tag []byte) {
+	if len(aad) != 0 {
+		panic("aead: HCTR does not accept AAD")
+	}
+	if len(plaintext) < c.block.BlockSize() {
+		panic("aead: HCTR input is shorter than one block")
+	}
+	mode, err := c.mode(tweak)
+	if err != nil {
+		panic(err)
+	}
+	out := make([]byte, len(plaintext))
+	mode.EncryptBytes(out, plaintext)
+	return out, nil
+}
+
+func (c *hctrCipher) Decrypt(ciphertext, tag, tweak, aad []byte) ([]byte, error) {
+	if len(aad) != 0 {
+		return nil, fmt.Errorf("aead: HCTR does not accept AAD")
+	}
+	if len(tag) != 0 {
+		return nil, fmt.Errorf("aead: HCTR tag must be empty")
+	}
+	if len(ciphertext) < c.block.BlockSize() {
+		return nil, fmt.Errorf("aead: HCTR input is shorter than one block")
+	}
+	mode, err := c.mode(tweak)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, len(ciphertext))
+	mode.DecryptBytes(out, ciphertext)
+	return out, nil
+}
+
+func (c *hctrCipher) NonceSize() int { return c.block.BlockSize() }
+func (c *hctrCipher) TagSize() int   { return 0 }

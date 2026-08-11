@@ -108,8 +108,8 @@ func (sa SecurityAssociation) Validate() error {
 	}
 	p := sa.Parameters
 	if sa.Direction == DirectionTCTx {
-		if suiteID != suite.AES256CTR && suiteID != suite.SM4CTR {
-			return fmt.Errorf("%w: TC transmit profile requires AES_256_CTR or SM4_CTR", ErrFrameInvalid)
+		if suiteID != suite.SM4HCTR {
+			return fmt.Errorf("%w: TC transmit profile requires SM4_HCTR", ErrFrameInvalid)
 		}
 		if p.SequenceNumberLength != 0 || p.TransmittedIVLength != TCIVCounterLength || p.TagLength != 0 || p.ReplayWindow != 0 {
 			return fmt.Errorf("%w: TC transmit parameters must be sequence=0, IV=4, tag=0, replay=0", ErrFrameInvalid)
@@ -120,8 +120,8 @@ func (sa SecurityAssociation) Validate() error {
 		return nil
 	}
 	if sa.Direction == DirectionTCRecoveryTx {
-		if suiteID != suite.AES256GCM && suiteID != suite.SM4GCM {
-			return fmt.Errorf("%w: TC recovery profile requires AES_256_GCM or SM4_GCM", ErrFrameInvalid)
+		if suiteID != suite.SM4GCM {
+			return fmt.Errorf("%w: TC recovery profile requires SM4_GCM", ErrFrameInvalid)
 		}
 		if p.SequenceNumberLength != 0 || p.TransmittedIVLength != TCIVCounterLength || p.TagLength != TCRecoveryTagLength || p.ReplayWindow != 0 {
 			return fmt.Errorf("%w: TC recovery parameters must be sequence=0, IV=4, tag=16, replay=0", ErrFrameInvalid)

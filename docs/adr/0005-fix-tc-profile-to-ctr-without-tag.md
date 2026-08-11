@@ -1,6 +1,6 @@
 # ADR 0005: Fix the TC flight profile to CTR without a tag
 
-- Status: Accepted
+- Status: Superseded by ADR 0006
 - Date: 2026-08-07
 - Supersedes: ADR 0004 for TC transmit wire layout only
 
@@ -41,6 +41,12 @@ validates transfer-frame length and FECF, resolves SPI to a fixed SA/key slot,
 decrypts, invokes the mission plaintext validator, persists replay state, and
 only then returns plaintext. Ground and flight consume shared AES and SM4 fixed
 vectors.
+
+The mission plaintext validator is a flight-software deep module behind the
+existing callback interface. Its mandatory closed parsing contract is maintained
+in `baseline/docs/TC_PLAINTEXT_VALIDATION_DESIGN.md`; this ADR does not define a
+second copy. A release build must reject unknown or ambiguous packet formats and
+must not contain the test-only `CA FE` validator.
 
 ## Consequences
 

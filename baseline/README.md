@@ -37,14 +37,18 @@ These static tokens, plain HTTP, and shell TPM access are development-only.
 ## Verify
 
 ```powershell
-$env:GOCACHE="$PWD/.cache/go-build"
-go test ./...
+bash scripts/coverage_gate.sh
 
 cd web/frontend
 npm ci
 npm run test
 npm run build
 ```
+
+`coverage_gate.sh` is the release gate for the current TC delivery boundary. It
+fails unless the fixed flight C module has at least 95% aggregate line coverage
+and the ground TC core packages have at least 95% aggregate Go statement
+coverage. Ordinary test success without this gate is not release evidence.
 
 ## HTTP Contract
 

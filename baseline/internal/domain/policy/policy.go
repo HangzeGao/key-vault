@@ -30,6 +30,7 @@ type Mode string
 const (
 	ModeGCM  Mode = "GCM"
 	ModeCTR  Mode = "CTR"
+	ModeHCTR Mode = "HCTR"
 	ModeCMAC Mode = "CMAC"
 )
 
@@ -273,6 +274,7 @@ func DefaultPolicy() *Policy {
 			defaultSuite(cryptosuite.SM4GCM, SuiteStatusActive, []string{"GM_T_0054"}),
 			defaultSuite(cryptosuite.AES256CTR, SuiteStatusActive, nil),
 			defaultSuite(cryptosuite.SM4CTR, SuiteStatusActive, []string{"GM_T_0054"}),
+			defaultSuite(cryptosuite.SM4HCTR, SuiteStatusActive, []string{"GB_T_17964_2021"}),
 			defaultSuite(cryptosuite.AES256CMAC, SuiteStatusActive, nil),
 			defaultSuite(cryptosuite.SM4CMAC, SuiteStatusActive, []string{"GB_T_15821_1"}),
 		},

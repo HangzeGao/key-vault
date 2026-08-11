@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/kvlt/key-vault/internal/auditchain"
@@ -45,7 +44,6 @@ type profile struct {
 func main() {
 	configPath := flag.String("config", "", "path to YAML config file")
 	tenantID := flag.String("tenant", defaultTenant, "tenant to provision")
-	family := flag.String("family", "sm4", "algorithm family: sm4 or aes")
 	currentSPI := flag.Uint("tc-current-spi", defaultCurrentSPI, "ordinary TC Current SPI")
 	recoverySPI := flag.Uint("tc-recovery-spi", defaultRecoverySPI, "Recovery GCM SPI")
 	aosSPI := flag.Uint("aos-spi", defaultAOSSPI, "AOS receive SPI")
@@ -54,7 +52,7 @@ func main() {
 	flag.Parse()
 
 	if err := run(context.Background(), provisionOptions{
-		configPath: *configPath, tenantID: *tenantID, family: *family,
+		configPath: *configPath, tenantID: *tenantID,
 		currentSPI: *currentSPI, recoverySPI: *recoverySPI, aosSPI: *aosSPI,
 		epoch: *epoch, replayWindow: *replayWindow,
 	}); err != nil {
@@ -66,7 +64,6 @@ func main() {
 type provisionOptions struct {
 	configPath   string
 	tenantID     string
-	family       string
 	currentSPI   uint
 	recoverySPI  uint
 	aosSPI       uint
@@ -78,10 +75,7 @@ func run(ctx context.Context, options provisionOptions) error {
 	if err := options.validate(); err != nil {
 		return err
 	}
-	profile, err := profileFor(options.family)
-	if err != nil {
-		return err
-	}
+	profile := tcProfile()
 	cfg, err := config.Load(options.configPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -119,7 +113,7 @@ func run(ctx context.Context, options provisionOptions) error {
 			"spi", fmt.Sprintf("0x%04X", association.SPI), "result", state)
 	}
 	slog.Info("CCSDS provisioning complete", "tenant_id", options.tenantID,
-		"family", strings.ToUpper(options.family), "associations", len(associations))
+		"TC_profile", profile.ordinarySuite, "associations", len(associations))
 	return nil
 }
 
@@ -144,15 +138,8 @@ func (options provisionOptions) validate() error {
 	return nil
 }
 
-func profileFor(family string) (profile, error) {
-	switch strings.ToLower(strings.TrimSpace(family)) {
-	case "sm4":
-		return profile{ordinarySuite: "SM4_CTR", recoverySuite: "SM4_GCM", aosSuite: "SM4_GCM"}, nil
-	case "aes":
-		return profile{ordinarySuite: "AES_256_CTR", recoverySuite: "AES_256_GCM", aosSuite: "AES_256_GCM"}, nil
-	default:
-		return profile{}, fmt.Errorf("unsupported algorithm family %q", family)
-	}
+func tcProfile() profile {
+	return profile{ordinarySuite: "SM4_HCTR", recoverySuite: "SM4_GCM", aosSuite: "SM4_GCM"}
 }
 
 type keySpec struct {

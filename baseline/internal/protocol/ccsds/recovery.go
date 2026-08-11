@@ -30,8 +30,8 @@ func (command RootPrepareCommand) Validate() error {
 		command.NewRootVersion <= command.ExpectedCurrentRootVersion || command.NextSecurityEpoch == 0 {
 		return fmt.Errorf("%w: invalid recovery transaction versions or identifier", ErrFrameInvalid)
 	}
-	if command.OrdinarySuiteID != suite.AES256CTR && command.OrdinarySuiteID != suite.SM4CTR {
-		return fmt.Errorf("%w: recovery transaction requires an ordinary CTR suite", ErrFrameInvalid)
+	if command.OrdinarySuiteID != suite.SM4HCTR {
+		return fmt.Errorf("%w: recovery transaction requires SM4_HCTR", ErrFrameInvalid)
 	}
 	if len(command.NewOperationalRoot) != command.OrdinarySuiteID.KeyBytes() {
 		return fmt.Errorf("%w: operational root length does not match ordinary suite", ErrFrameInvalid)
@@ -57,9 +57,8 @@ func (command RootPrepareCommand) MarshalBinary() ([]byte, error) {
 
 func ParseRootPrepareCommand(raw []byte) (RootPrepareCommand, error) {
 	var command RootPrepareCommand
-	if len(raw) != rootPrepareFixedLength+suite.AES256CTR.KeyBytes() &&
-		len(raw) != rootPrepareFixedLength+suite.SM4CTR.KeyBytes() {
-		return command, fmt.Errorf("%w: root prepare transaction length must be 41 or 57 bytes", ErrFrameInvalid)
+	if len(raw) != rootPrepareFixedLength+suite.SM4HCTR.KeyBytes() {
+		return command, fmt.Errorf("%w: root prepare transaction length must be 41 bytes", ErrFrameInvalid)
 	}
 	if raw[0] != RootPrepareFormatVersion {
 		return command, fmt.Errorf("%w: unsupported recovery transaction version", ErrFrameInvalid)

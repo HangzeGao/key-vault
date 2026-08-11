@@ -13,9 +13,9 @@ func TestCMACCounterKDFCanonicalVectors(t *testing.T) {
 		derive func() ([]byte, error)
 		want   string
 	}{
-		{"aes ordinary", func() ([]byte, error) {
-			return DeriveOrdinaryTrafficKey(kdfHex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"), 0x1234, suite.AES256CTR, 0x2001, 7, 9)
-		}, "6d02d7a848796331e9b466bae9121c92a8c6757767e18c6a1c633a23bc0e5ceb"},
+		{"sm4 hctr ordinary", func() ([]byte, error) {
+			return DeriveOrdinaryTrafficKey(kdfHex("0123456789abcdeffedcba9876543210"), 0x1234, suite.SM4HCTR, 0x2001, 7, 9)
+		}, "d077e6052e64fa4b35b2465d3250dcb7055fa70d4d1de6807b5a2497d5c703e6"},
 		{"sm4 recovery", func() ([]byte, error) {
 			return DeriveRecoveryGCMKey(kdfHex("0123456789abcdeffedcba9876543210"), 0x1234, suite.SM4GCM, 0x7002, 3)
 		}, "173537c63f1e50ad3629cfdc49118d2b"},

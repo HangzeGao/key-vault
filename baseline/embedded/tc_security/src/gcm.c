@@ -1,6 +1,5 @@
 #include "gcm.h"
 
-#include "aes256.h"
 #include "sm4.h"
 
 #include <string.h>
@@ -12,9 +11,6 @@ static void zeroize(void *memory, size_t length) {
 
 static int encrypt_block(tcsec_suite_t suite, const uint8_t *key,
                          const uint8_t input[16], uint8_t output[16]) {
-    if (suite == TCSEC_SUITE_AES_256_GCM) {
-        return tcsec_aes256_encrypt_block(key, input, output);
-    }
     if (suite == TCSEC_SUITE_SM4_GCM) {
         return tcsec_sm4_encrypt_block(key, input, output);
     }
@@ -83,13 +79,12 @@ static void write_u64_be(uint8_t output[8], uint64_t value) {
     }
 }
 
-static int increment_counter32(uint8_t counter[16]) {
+static void increment_counter32(uint8_t counter[16]) {
     int index;
     for (index = 15; index >= 12; --index) {
         counter[index] = (uint8_t)(counter[index] + 1u);
-        if (counter[index] != 0u) return 0;
+        if (counter[index] != 0u) return;
     }
-    return -1;
 }
 
 static int constant_time_equal(const uint8_t left[16], const uint8_t right[16]) {
@@ -115,7 +110,8 @@ int tcsec_gcm_open(tcsec_suite_t suite, const uint8_t *key,
     if (key == NULL || nonce == NULL || tag == NULL ||
         (aad_length != 0u && aad == NULL) ||
         (ciphertext_length != 0u && (ciphertext == NULL || plaintext == NULL)) ||
-        aad_length > UINT64_MAX / 8u || ciphertext_length > UINT64_MAX / 8u) return -1;
+        aad_length > UINT64_MAX / 8u || ciphertext_length > UINT64_MAX / 8u ||
+        ciphertext_length > ((uint64_t)UINT32_MAX - 1u) * 16u) return -1;
     if (encrypt_block(suite, key, hash_key, hash_key) != 0) goto done;
     ghash_bytes(state, hash_key, aad, aad_length);
     ghash_bytes(state, hash_key, ciphertext, ciphertext_length);
@@ -137,10 +133,8 @@ int tcsec_gcm_open(tcsec_suite_t suite, const uint8_t *key,
         size_t count = ciphertext_length - offset;
         size_t index;
         if (count > 16u) count = 16u;
-        if (increment_counter32(mask) != 0 || encrypt_block(suite, key, mask, stream) != 0) {
-            zeroize(stream, sizeof(stream));
-            goto done;
-        }
+        increment_counter32(mask);
+        (void)encrypt_block(suite, key, mask, stream);
         for (index = 0u; index < count; ++index) plaintext[offset + index] = (uint8_t)(ciphertext[offset + index] ^ stream[index]);
         zeroize(stream, sizeof(stream));
         offset += count;

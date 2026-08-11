@@ -11,14 +11,14 @@ func encodeTCSecurityHeader(spi uint16, counter uint32) []byte {
 	return header
 }
 
-func tcInitialCounter(prefix []byte, spi uint16, counter uint32) []byte {
-	initial := make([]byte, 16)
-	copy(initial[0:TCNoncePrefixLength], prefix)
-	binary.BigEndian.PutUint16(initial[6:8], spi)
-	binary.BigEndian.PutUint32(initial[8:12], counter)
-	// The final four bytes are the AES/SM4-CTR per-frame block counter and
-	// start at zero, matching Go's cipher.NewCTR and the embedded C implementation.
-	return initial
+func tcHCTRTweak(prefix []byte, spi uint16, counter uint32) []byte {
+	tweak := make([]byte, 16)
+	copy(tweak[0:TCNoncePrefixLength], prefix)
+	binary.BigEndian.PutUint16(tweak[6:8], spi)
+	binary.BigEndian.PutUint32(tweak[8:12], counter)
+	// The final four bytes are a fixed domain-reserved field. They are zero in
+	// the sole current TC profile and are not a per-block CTR counter.
+	return tweak
 }
 
 func validateTCFrame(frame []byte) error {

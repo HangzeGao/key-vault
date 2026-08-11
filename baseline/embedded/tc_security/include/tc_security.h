@@ -13,7 +13,8 @@ extern "C" {
 #define TCSEC_FECF_LENGTH 2u
 #define TCSEC_MAX_FRAME_LENGTH 1024u
 #define TCSEC_SM4_KEY_LENGTH 16u
-#define TCSEC_MAX_KEY_LENGTH 32u
+#define TCSEC_ROOT_KEY_LENGTH 16u
+#define TCSEC_HCTR_WORKING_KEY_LENGTH 32u
 #define TCSEC_NONCE_PREFIX_LENGTH 6u
 #define TCSEC_GCM_NONCE_LENGTH 12u
 #define TCSEC_GCM_TAG_LENGTH 16u
@@ -22,7 +23,6 @@ extern "C" {
 #define TCSEC_ROOT_PREPARE_FORMAT_VERSION 1u
 #define TCSEC_ROOT_PREPARE_FIXED_LENGTH 25u
 #define TCSEC_ROOT_PREPARE_SM4_LENGTH 41u
-#define TCSEC_ROOT_PREPARE_AES_LENGTH 57u
 
 typedef enum {
     TCSEC_OK = 0,
@@ -38,15 +38,14 @@ typedef enum {
     TCSEC_PLAINTEXT_REJECTED,
     TCSEC_ROOT_PREPARE_REJECTED,
     TCSEC_PERSISTENCE_FAILED,
+    TCSEC_STATE_INTEGRITY_FAILED,
     TCSEC_EPOCH_PROMOTED,
     TCSEC_ROOT_PREPARED,
     TCSEC_ROOT_ALREADY_PREPARED
 } tcsec_status_t;
 
 typedef enum {
-    TCSEC_SUITE_AES_256_CTR = 0x0011,
-    TCSEC_SUITE_SM4_CTR = 0x0012,
-    TCSEC_SUITE_AES_256_GCM = 0x0001,
+    TCSEC_SUITE_SM4_HCTR = 0x0013,
     TCSEC_SUITE_SM4_GCM = 0x0002
 } tcsec_suite_t;
 
@@ -65,7 +64,7 @@ typedef struct {
 typedef struct {
     uint16_t spacecraft_id;
     tcsec_suite_t suite;
-    uint8_t operational_root[TCSEC_MAX_KEY_LENGTH];
+    uint8_t operational_root[TCSEC_ROOT_KEY_LENGTH];
     size_t operational_root_length;
     uint32_t root_version;
     uint32_t current_epoch;
@@ -76,7 +75,7 @@ typedef struct {
      * every other pending_* field to be zero. */
     uint8_t pending_root_present;
     tcsec_suite_t pending_suite;
-    uint8_t pending_operational_root[TCSEC_MAX_KEY_LENGTH];
+    uint8_t pending_operational_root[TCSEC_ROOT_KEY_LENGTH];
     size_t pending_operational_root_length;
     uint32_t pending_root_version;
     uint64_t pending_transaction_id;
@@ -84,7 +83,7 @@ typedef struct {
 
 typedef struct {
     tcsec_suite_t suite;
-    uint8_t recovery_root[TCSEC_MAX_KEY_LENGTH];
+    uint8_t recovery_root[TCSEC_ROOT_KEY_LENGTH];
     size_t recovery_root_length;
     uint32_t root_version;
     uint16_t spi;
@@ -104,7 +103,7 @@ typedef struct {
     uint32_t next_security_epoch;
     uint16_t next_spi;
     tcsec_suite_t ordinary_suite;
-    uint8_t new_operational_root[TCSEC_MAX_KEY_LENGTH];
+    uint8_t new_operational_root[TCSEC_ROOT_KEY_LENGTH];
     size_t new_operational_root_length;
 } tcsec_root_prepare_t;
 
@@ -141,6 +140,15 @@ typedef int (*tcsec_plaintext_validator_fn)(void *user_context,
 typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(void *user_context,
                                                        const tcsec_commit_t *commit);
 
+/* Runtime dependencies supplied by flight software. tcsec_init copies this
+ * value; the struct itself need not outlive the call, while user_context and
+ * everything it references must remain valid until tcsec_deinit. */
+typedef struct {
+    tcsec_plaintext_validator_fn validate_plaintext;
+    tcsec_state_commit_fn commit_state;
+    void *user_context;
+} tcsec_callbacks_t;
+
 typedef struct {
     uint16_t spi;
     uint32_t iv_counter;
@@ -157,11 +165,11 @@ typedef struct {
     tcsec_suite_t current_suite;
     tcsec_suite_t next_suite;
     tcsec_suite_t recovery_suite;
-    uint8_t current_root[TCSEC_MAX_KEY_LENGTH];
-    uint8_t pending_root[TCSEC_MAX_KEY_LENGTH];
-    uint8_t current_key[TCSEC_MAX_KEY_LENGTH];
-    uint8_t next_key[TCSEC_MAX_KEY_LENGTH];
-    uint8_t recovery_key[TCSEC_MAX_KEY_LENGTH];
+    uint8_t current_root[TCSEC_ROOT_KEY_LENGTH];
+    uint8_t pending_root[TCSEC_ROOT_KEY_LENGTH];
+    uint8_t current_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t next_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t recovery_key[TCSEC_SM4_KEY_LENGTH];
     size_t current_root_length;
     size_t pending_root_length;
     uint32_t current_root_version;
@@ -176,21 +184,32 @@ typedef struct {
     uint16_t recovery_spi;
     uint8_t recovery_nonce_prefix[TCSEC_NONCE_PREFIX_LENGTH];
     tcsec_replay_state_t recovery_replay;
-    tcsec_plaintext_validator_fn validate_plaintext;
-    tcsec_state_commit_fn commit_state;
-    void *user_context;
+    tcsec_callbacks_t callbacks;
     uint8_t initialized;
+    uint32_t context_integrity;
+    uint32_t context_integrity_inverse;
 } tcsec_context_t;
 
 tcsec_status_t tcsec_init(tcsec_context_t *context,
                           const tcsec_config_t *config,
-                          tcsec_plaintext_validator_fn validate_plaintext,
-                          tcsec_state_commit_fn commit_state,
-                          void *user_context);
+                          const tcsec_callbacks_t *callbacks);
+
+/* Transactionally reloads all roots, derived keys, replay state, and rotation
+ * state from a complete durable configuration while preserving the callbacks
+ * and user_context bound by tcsec_init. If validation or derivation fails, the
+ * original initialized context remains unchanged. The caller must serialize
+ * this operation with tcsec_receive on the same context. */
+tcsec_status_t tcsec_reset(tcsec_context_t *context,
+                           const tcsec_config_t *config);
 
 /* Receives one complete TC transfer frame. Ordinary plaintext is released only
  * after validation and durable replay/promotion commit. Root-prepare plaintext
- * is consumed internally and never copied to the output buffer. */
+ * is consumed internally and never copied to the output buffer.
+ *
+ * Reentrancy contract: the implementation has no mutable global state, so calls
+ * using distinct tcsec_context_t objects may execute concurrently or from nested
+ * callbacks. A single context owns one replay/rotation state machine and must be
+ * serialized by its caller; callbacks must not re-enter that same context. */
 tcsec_status_t tcsec_receive(tcsec_context_t *context,
                              const uint8_t *frame,
                              size_t frame_length,
@@ -198,7 +217,9 @@ tcsec_status_t tcsec_receive(tcsec_context_t *context,
                              size_t plaintext_capacity,
                              tcsec_result_t *result);
 
-void tcsec_clear(tcsec_context_t *context);
+/* Deinitializes and zeroizes all roots, derived working keys, replay state,
+ * callbacks, and caller binding in the context. */
+void tcsec_deinit(tcsec_context_t *context);
 const char *tcsec_status_string(tcsec_status_t status);
 
 #ifdef __cplusplus

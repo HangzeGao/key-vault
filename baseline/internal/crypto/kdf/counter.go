@@ -15,10 +15,14 @@ func CMACCounter(root []byte, targetSuite suite.ID, label, context []byte) ([]by
 		return nil, errors.New("kdf: root, label, or context is invalid")
 	}
 	cmacSuite := suite.AES256CMAC
-	if targetSuite == suite.SM4CTR || targetSuite == suite.SM4GCM || targetSuite == suite.SM4CMAC {
+	descriptor, err := suite.Describe(targetSuite)
+	if err != nil {
+		return nil, err
+	}
+	if descriptor.Algorithm == "SM4" {
 		cmacSuite = suite.SM4CMAC
 	}
-	outputLength := targetSuite.KeyBytes()
+	outputLength := targetSuite.WorkingKeyBytes()
 	output := make([]byte, 0, outputLength)
 	for counter := uint32(1); len(output) < outputLength; counter++ {
 		input := make([]byte, 0, 4+len(label)+1+len(context)+4)

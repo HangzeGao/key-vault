@@ -30,7 +30,7 @@ func TestProtocolKeyCRKAndDiagnosticsSurviveRestart(t *testing.T) {
 	if err := store.EnsureTenant(ctx, "tenant-1", "Mission 1"); err != nil {
 		t.Fatal(err)
 	}
-	key, version := testKey("tenant-1", "operational-root", "SM4_CTR")
+	key, version := testKey("tenant-1", "operational-root", "SM4_HCTR")
 	if err := store.CreateProtocolKey(ctx, key, version); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func provisionTestAssociations(t *testing.T, store *Store) {
 	if err := store.EnsureTenant(ctx, "tenant-1", "Mission 1"); err != nil {
 		t.Fatal(err)
 	}
-	for _, spec := range []struct{ id, suite string }{{"operational", "SM4_CTR"}, {"recovery-root", "SM4_GCM"}, {"aos-root", "SM4_GCM"}} {
+	for _, spec := range []struct{ id, suite string }{{"operational", "SM4_HCTR"}, {"recovery-root", "SM4_GCM"}, {"aos-root", "SM4_GCM"}} {
 		key, version := testKey("tenant-1", spec.id, spec.suite)
 		if err := store.CreateProtocolKey(ctx, key, version); err != nil {
 			t.Fatal(err)
@@ -262,10 +262,10 @@ func provisionTestAssociations(t *testing.T, store *Store) {
 	prefix := []byte{1, 2, 3, 4, 5, 6}
 	associations := []ccsds.SecurityAssociation{
 		{ID: "current", TenantID: "tenant-1", SPI: 0x1001, Direction: ccsds.DirectionTCTx,
-			KeyID: "operational", KeyVersion: 1, SecurityEpoch: 1, PolicyVersion: 1, SuiteID: "SM4_CTR",
+			KeyID: "operational", KeyVersion: 1, SecurityEpoch: 1, PolicyVersion: 1, SuiteID: "SM4_HCTR",
 			State: ccsds.AssociationCurrent, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: prefix}},
 		{ID: "next", TenantID: "tenant-1", SPI: 0x1002, Direction: ccsds.DirectionTCTx,
-			KeyID: "operational", KeyVersion: 1, SecurityEpoch: 2, PolicyVersion: 1, SuiteID: "SM4_CTR",
+			KeyID: "operational", KeyVersion: 1, SecurityEpoch: 2, PolicyVersion: 1, SuiteID: "SM4_HCTR",
 			State: ccsds.AssociationNext, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: prefix}},
 		{ID: "recovery", TenantID: "tenant-1", SPI: 0x7001, Direction: ccsds.DirectionTCRecoveryTx,
 			KeyID: "recovery-root", KeyVersion: 1, PolicyVersion: 1, SuiteID: "SM4_GCM",
@@ -399,9 +399,9 @@ func TestDatabaseFailuresAreReturnedByEverySecurityStateBoundary(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	key, version := testKey("tenant-1", "root", "SM4_CTR")
+	key, version := testKey("tenant-1", "root", "SM4_HCTR")
 	association := ccsds.SecurityAssociation{ID: "sa", TenantID: "tenant-1", SPI: 1, Direction: ccsds.DirectionTCTx,
-		KeyID: "root", KeyVersion: 1, SecurityEpoch: 1, PolicyVersion: 1, SuiteID: "SM4_CTR",
+		KeyID: "root", KeyVersion: 1, SecurityEpoch: 1, PolicyVersion: 1, SuiteID: "SM4_HCTR",
 		State: ccsds.AssociationCurrent, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: []byte{1, 2, 3, 4, 5, 6}}}
 	crk := &models.CRKVersion{ID: "crk", Version: 1, Status: "active"}
 	envelope := &models.CRKNodeEnvelope{ID: "env", CRKVersionID: "crk", NodeID: "node", Envelope: []byte("sealed")}
@@ -466,7 +466,7 @@ func TestTransactionalWriteFailuresRollBack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	key, version := testKey("tenant-1", "extra-root", "SM4_CTR")
+	key, version := testKey("tenant-1", "extra-root", "SM4_HCTR")
 	if err := store.CreateProtocolKey(ctx, key, version); err != nil {
 		t.Fatal(err)
 	}
@@ -474,7 +474,7 @@ func TestTransactionalWriteFailuresRollBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	association := ccsds.SecurityAssociation{ID: "extra", TenantID: "tenant-1", SPI: 0x3001, Direction: ccsds.DirectionTCTx,
-		KeyID: key.ID, KeyVersion: 1, SecurityEpoch: 9, PolicyVersion: 1, SuiteID: "SM4_CTR",
+		KeyID: key.ID, KeyVersion: 1, SecurityEpoch: 9, PolicyVersion: 1, SuiteID: "SM4_HCTR",
 		State: ccsds.AssociationNext, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: []byte{1, 2, 3, 4, 5, 6}}}
 	if err := store.CreateAssociation(ctx, association); err == nil {
 		t.Fatal("runtime-state trigger failure was ignored")
@@ -491,7 +491,7 @@ func TestSchemaAndPersistedKeyCorruptionAreRejected(t *testing.T) {
 	if err := store.EnsureTenant(ctx, "tenant-1", "mission"); err != nil {
 		t.Fatal(err)
 	}
-	key, version := testKey("tenant-1", "root", "SM4_CTR")
+	key, version := testKey("tenant-1", "root", "SM4_HCTR")
 	if err := store.CreateProtocolKey(ctx, key, version); err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +662,7 @@ func TestKeyAndAuditInnerTransactionFailures(t *testing.T) {
 	if _, err := store.db.ExecContext(ctx, `CREATE TRIGGER reject_key_version BEFORE INSERT ON protocol_key_versions BEGIN SELECT RAISE(ABORT,'reject version'); END`); err != nil {
 		t.Fatal(err)
 	}
-	key, version := testKey("tenant-1", "rejected-root", "SM4_CTR")
+	key, version := testKey("tenant-1", "rejected-root", "SM4_HCTR")
 	if err := store.CreateProtocolKey(ctx, key, version); !errors.Is(err, ErrConflict) {
 		t.Fatalf("key-version trigger error=%v", err)
 	}
