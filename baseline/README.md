@@ -78,5 +78,6 @@ record below `build/release/`. Ordinary test success alone is not release eviden
 | `GET /ui/api/v1/ops/ccsds/status` | Security Association and counter state |
 
 See [CCSDS Link Security](docs/CCSDS_LINK_SECURITY.md),
-[Ground/Flight Architecture](docs/TC_GROUND_FLIGHT_ARCHITECTURE.md), and
+[Ground/Flight Architecture](docs/TC_GROUND_FLIGHT_ARCHITECTURE.md),
+[Cryptographic Test Design](docs/CRYPTOGRAPHIC_TEST_DESIGN.md), and
 [Production Security Gate](docs/PRODUCTION_SECURITY.md).

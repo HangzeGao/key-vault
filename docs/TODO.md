@@ -16,6 +16,8 @@
 
 ## 生产发布阻塞项
 
+- [ ] 按 `baseline/docs/CRYPTOGRAPHIC_TEST_DESIGN.md` 补齐密码算法 P0 验证：GB/T/GM/T SM4 单分组 KAT、RFC 8998 SM4-GCM KAT、OpenSSL 独立差分、无共享实现的 HCTR 参考模型、ASan/UBSan 与有界 fuzz、星载启动 KAT 及失败锁定。
+- [ ] 完成密码实现 P1/发布加固：可复现 bit-flip campaign、目标板 WCET/栈/代码尺寸、实际飞行编译器交叉验证、目标 CPU timing leakage，以及威胁模型要求时的功耗/电磁 TVLA。
 - [ ] 冻结任务级 TC `VCID -> APID -> 指令码` 映射、各指令精确长度、参数范围、保留位、填充、包内校验和与正反样例；通用必选合同与发布门禁已固化在 `baseline/docs/TC_PLAINTEXT_VALIDATION_DESIGN.md`，ADR 0005 仅记录线协议决策。
 - [ ] 使用任务选定的 CCSDS 355.0-B-2 profile 与权威互操作向量验收 TC 保护、AOS 解保护、帧边界、截断字段及 SA rollover。
 - [ ] 增加 CCSDS Security Association 的受控管理面、双人审批、审计与应急防重放状态重置流程。

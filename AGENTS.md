@@ -13,6 +13,7 @@
 
 ## Large-change regression and hardening gate
 
+- `baseline/docs/CRYPTOGRAPHIC_TEST_DESIGN.md` is the mandatory and authoritative test contract for cryptography, KDF, CCSDS TC, replay, rotation, recovery, NVM, and ground/flight changes. Read it before modifying those paths, apply its change-trigger matrix, and treat missing required runners as implementation work rather than a reason to skip the test.
 - Treat a change as large when it modifies 10 or more implementation/test files, changes 500 or more implementation lines, crosses two or more runtime boundaries, or changes cryptography, protocol framing, key lifecycle, persistence/schema, replay/state transitions, authentication/authorization, audit, or recovery behavior. Security-critical changes are large regardless of line count.
 - Before committing a large change, run the repository's complete regression gate (`make release-gate` when available), not only focused unit tests. The gate must include all language test suites, the 95% coverage requirements, frontend tests/build when affected, and the ground-to-flight end-to-end vectors when TC behavior is affected.
 - Add or update hardening tests proportional to the change: invalid and boundary inputs, fail-closed behavior, rollback/replay/state corruption, interrupted persistence, authorization failures, secret non-disclosure and zeroization, as applicable. A passing old test suite alone is not sufficient evidence for new security-sensitive behavior.
