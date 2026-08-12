@@ -62,9 +62,7 @@ func main() {
 		CCSDSHandler: ccsdsH,
 		AuditHandler: auditH,
 		OpsHandler:   opsH,
-		JWTVerifier:  app.JWTVerifier,
-		HMACVerifier: app.HMACVerifier,
-		StaticTokens: app.StaticTokens,
+		AccessTokens: app.AccessTokens,
 	})
 	if err != nil {
 		slog.Error("server initialization failed", "error", err)
@@ -83,11 +81,8 @@ func main() {
 		cancel()
 	}()
 
-	listenAddr := cfg.Server.HTTPListenAddr
-	if cfg.Server.TLSCertFile != "" {
-		listenAddr = cfg.Server.HTTPSListenAddr
-	}
-	slog.Info("key-vault starting", "addr", listenAddr, "plane", cfg.Server.ActivePlane, "tls", cfg.Server.TLSCertFile != "")
+	slog.Info("key-vault starting", "data_addr", cfg.Server.DataListenAddr,
+		"ops_addr", cfg.Server.OpsListenAddr, "tls", cfg.Server.TLSCertFile != "")
 	if err := srv.Start(); err != nil {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)

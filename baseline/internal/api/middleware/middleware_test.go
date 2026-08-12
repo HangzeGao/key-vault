@@ -18,14 +18,14 @@ func TestAPIAccessStrictCCSDSMatrix(t *testing.T) {
 		{"TC protect", http.MethodPost, "/ui/api/v1/ccsds/tc:protect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:tc:protect"}}, 204},
 		{"AOS unprotect", http.MethodPost, "/ui/api/v1/ccsds/aos:unprotect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:aos:unprotect"}}, 204},
 		{"wrong data scope", http.MethodPost, "/ui/api/v1/ccsds/tc:protect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:aos:unprotect"}}, 403},
-		{"wrong plane", http.MethodPost, "/ui/api/v1/ccsds/tc:protect", &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"ccsds:tc:protect"}}, 403},
-		{"audit read", http.MethodGet, "/ui/api/v1/audit/events", &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"audit:read"}}, 204},
-		{"audit delete removed", http.MethodDelete, "/ui/api/v1/audit/events", &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"audit:read"}}, 403},
+		{"wrong plane", http.MethodPost, "/ui/api/v1/ccsds/tc:protect", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ccsds:tc:protect"}}, 403},
+		{"audit read", http.MethodGet, "/ui/api/v1/audit/events", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"audit:read"}}, 204},
+		{"audit delete removed", http.MethodDelete, "/ui/api/v1/audit/events", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"audit:read"}}, 403},
 		{"ops health", http.MethodGet, "/ui/api/v1/ops/health", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ops:read"}}, 204},
 		{"ops database", http.MethodGet, "/ui/api/v1/ops/db/status", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ops:read"}}, 204},
 		{"ops CCSDS", http.MethodGet, "/ui/api/v1/ops/ccsds/status", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ops:read"}}, 204},
 		{"old crypto removed", http.MethodPost, "/ui/api/v1/crypto/encrypt", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"crypto:encrypt"}}, 403},
-		{"old keys removed", http.MethodGet, "/ui/api/v1/keys", &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"keys:read"}}, 403},
+		{"old keys removed", http.MethodGet, "/ui/api/v1/keys", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"keys:read"}}, 403},
 		{"old repair removed", http.MethodPost, "/ui/api/v1/ops/crk/envelope:repair-aad-digest", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ops:repair"}}, 403},
 	}
 
@@ -46,7 +46,7 @@ func TestAPIAccessStrictCCSDSMatrix(t *testing.T) {
 func TestAPIAccessRejectsUnassignedAPIRoute(t *testing.T) {
 	next := APIAccess(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("next called") }))
 	req := httptest.NewRequest(http.MethodGet, "/ui/api/v1/unassigned", nil)
-	req = req.WithContext(context.WithValue(req.Context(), ctxKeyPrincipal, &principal.Principal{Plane: principal.PlaneManagement, Scopes: []string{"audit:read"}}))
+	req = req.WithContext(context.WithValue(req.Context(), ctxKeyPrincipal, &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"audit:read"}}))
 	rec := httptest.NewRecorder()
 	next.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {

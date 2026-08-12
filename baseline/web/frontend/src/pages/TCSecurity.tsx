@@ -16,7 +16,7 @@ export function TCSecurityPage() {
       <div className="page-header operations-header">
         <div>
           <div className="operations-kicker"><Satellite size={13} />UPLINK CONTINUITY</div>
-          <h1 className="section-title">TC Uplink Operations</h1>
+          <h1 className="section-title">TC Uplink</h1>
           <p className="section-subtitle">Live ordinary and recovery transmit associations, epoch staging, and durable 32-bit IV allocation.</p>
         </div>
         <button className="operations-refresh" type="button" onClick={() => query.refetch()} disabled={query.isFetching}>

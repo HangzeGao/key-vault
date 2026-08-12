@@ -3,24 +3,12 @@ package principal
 
 import "strings"
 
-// Plane enumerates the API planes a principal may access.
+// Plane is the fixed remote entry point assigned to one access token.
 type Plane string
 
 const (
-	PlaneManagement Plane = "management"
-	PlaneData       Plane = "data"
-	PlaneOps        Plane = "ops"
-)
-
-// Role enumerates service roles.
-type Role string
-
-const (
-	RoleAdmin     Role = "admin"
-	RoleKeyPlane  Role = "key"
-	RoleDataPlane Role = "data"
-	RoleOps       Role = "ops"
-	RoleNode      Role = "node"
+	PlaneData Plane = "data"
+	PlaneOps  Plane = "ops"
 )
 
 // Principal is the authenticated caller. Constructed by auth middleware.
@@ -28,11 +16,8 @@ type Principal struct {
 	ID         string   // stable principal ID (sub or service ID)
 	TenantID   string   // tenant scope
 	Scopes     []string // e.g. "ccsds:tc:protect", "ops:read"
-	Roles      []string
-	Plane      Plane   // primary plane this principal may access
-	Planes     []Plane // optional explicit multi-plane test/development access
-	NodeID     string  // if role=node
-	AuthMethod string  // "jwt" | "hmac" | "static_token"
+	Plane      Plane    // exactly one of data or ops
+	AuthMethod string   // "access_token"
 }
 
 // HasScope returns whether the principal holds a given scope.
@@ -55,33 +40,9 @@ func (p *Principal) HasAnyScope(scopes ...string) bool {
 	return false
 }
 
-// HasRole returns whether the principal has a given role.
-func (p *Principal) HasRole(r string) bool {
-	for _, x := range p.Roles {
-		if x == r {
-			return true
-		}
-	}
-	return false
-}
-
 // CanAccessPlane returns whether the principal may access the given plane.
-// Plane access is intentionally strict: cross-plane access requires a separate
-// principal/token for the target plane unless a development static token
-// explicitly lists multiple planes.
 func (p *Principal) CanAccessPlane(plane Plane) bool {
-	if p == nil {
-		return false
-	}
-	if p.Plane == plane {
-		return true
-	}
-	for _, candidate := range p.Planes {
-		if candidate == plane {
-			return true
-		}
-	}
-	return false
+	return p != nil && p.Plane == plane
 }
 
 // ScopesString returns scopes as a space-joined string.

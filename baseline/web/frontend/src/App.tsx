@@ -5,8 +5,7 @@ import { ToastContainer } from "./components/ui";
 import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
 import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
-import { DatabaseOperationsPage } from "./pages/DatabaseOperations";
-import { AuditPage } from "./pages/Audit";
+import { SystemAuditPage } from "./pages/SystemAudit";
 import { TCSecurityPage } from "./pages/TCSecurity";
 import { AOSSecurityPage } from "./pages/AOSSecurity";
 
@@ -23,10 +22,9 @@ function ProtectedRoutes() {
   return (
     <Routes>
       <Route path="dashboard" element={<RouteErrorBoundary><DashboardPage /></RouteErrorBoundary>} />
-      <Route path="database" element={<RouteErrorBoundary><DatabaseOperationsPage /></RouteErrorBoundary>} />
       <Route path="tc-security" element={<RouteErrorBoundary><TCSecurityPage /></RouteErrorBoundary>} />
       <Route path="aos-security" element={<RouteErrorBoundary><AOSSecurityPage /></RouteErrorBoundary>} />
-      <Route path="audit" element={<RouteErrorBoundary><AuditPage /></RouteErrorBoundary>} />
+      <Route path="system" element={<RouteErrorBoundary><SystemAuditPage /></RouteErrorBoundary>} />
       <Route path="*" element={<Navigate to="dashboard" replace />} />
     </Routes>
   );

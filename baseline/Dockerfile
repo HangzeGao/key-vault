@@ -19,6 +19,6 @@ RUN apk add --no-cache ca-certificates tpm2-tools
 WORKDIR /app
 COPY --from=backend-build /out/key-vault /app/key-vault
 RUN mkdir -p /tmp/kvlt-tpm /tmp/kvlt-wal
-EXPOSE 8080
+EXPOSE 8080 8081
 HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=6 CMD wget -q -O - http://127.0.0.1:8080/healthz | grep -q '"status":"ok"' || exit 1
 ENTRYPOINT ["/app/key-vault"]

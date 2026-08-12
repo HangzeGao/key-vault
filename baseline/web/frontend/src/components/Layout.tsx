@@ -2,11 +2,10 @@ import { useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import {
   LayoutDashboard,
-  ScrollText,
   LogOut,
   Sun,
   Moon,
-  Database,
+  ShieldCheck,
   Satellite,
   RadioTower,
   Menu,
@@ -27,8 +26,7 @@ const missionNav: NavEntry[] = [
 ];
 
 const assuranceNav: NavEntry[] = [
-  { to: "/ui/audit", label: "Security Audit", icon: <ScrollText /> },
-  { to: "/ui/database", label: "Ground Persistence", icon: <Database /> },
+  { to: "/ui/system", label: "System & Audit", icon: <ShieldCheck /> },
 ];
 
 function NavGroup({ label, entries, onNavigate }: { label: string; entries: NavEntry[]; onNavigate?: () => void }) {

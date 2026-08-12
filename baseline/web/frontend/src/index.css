@@ -1224,6 +1224,12 @@ input[type="range"]::-moz-range-thumb {
 .ops-metric-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--border); background: var(--border); gap: 1px; }
 .ops-metric-strip > div { display: grid; grid-template-columns: auto 1fr; gap: 4px 9px; padding: 14px 15px; background: var(--bg-inset); }
 .ops-metric-strip svg { grid-row: 1 / 3; color: var(--info); }
+.ops-format-notice { display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: center; margin-bottom: 14px; padding: 13px 15px; border: 1px solid rgba(251, 191, 36, .35); background: var(--warning-dim); }
+.ops-format-notice div { min-width: 150px; }
+.ops-format-notice strong, .ops-format-notice span { display: block; font-family: var(--font-mono); }
+.ops-format-notice strong { color: var(--text-tertiary); font-size: 8px; letter-spacing: .12em; }
+.ops-format-notice span { margin-top: 4px; color: var(--warning); font-size: 11px; }
+.ops-format-notice p { color: var(--text-secondary); font-size: 10px; }
 .ops-metric-strip span { color: var(--text-tertiary); font: 8px var(--font-mono); text-transform: uppercase; }
 .ops-metric-strip strong { font: 11px var(--font-mono); }
 .ops-release-rules { display: grid; gap: 1px; background: var(--border); }

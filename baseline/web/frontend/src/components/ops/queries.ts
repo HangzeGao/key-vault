@@ -56,6 +56,7 @@ export interface CCSDSOperationsStatus {
     evidence: "RECOVERY_FRAME_PRODUCED" | "GROUND_PROMOTED" | "FIRST_NEXT_FRAME_PRODUCED";
   } | null;
   aos: CCSDSAssociationStatus[];
+  aos_format: "NOT_FROZEN" | "FROZEN";
   warnings: string[];
 }
 
@@ -74,6 +75,9 @@ export function useCCSDSStatus(refetchInterval = 5_000) {
       const status = await api.get<CCSDSOperationsStatus>(apiPaths.ops.ccsdsStatus);
       if (!Array.isArray(status.warnings) || !Array.isArray(status.aos)) {
         throw new Error("invalid CCSDS operations response: warnings and aos must be arrays");
+      }
+      if (status.aos_format !== "NOT_FROZEN" && status.aos_format !== "FROZEN") {
+        throw new Error("invalid CCSDS operations response: aos_format is required");
       }
       return status;
     },

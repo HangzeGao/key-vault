@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -17,8 +16,6 @@ import (
 	ccsdsapi "github.com/kvlt/key-vault/internal/api/ccsds"
 	"github.com/kvlt/key-vault/internal/api/middleware"
 	"github.com/kvlt/key-vault/internal/api/ops"
-	"github.com/kvlt/key-vault/internal/auth/hmacsign"
-	"github.com/kvlt/key-vault/internal/auth/jwt"
 	"github.com/kvlt/key-vault/internal/auth/principal"
 	"github.com/kvlt/key-vault/internal/config"
 	"github.com/kvlt/key-vault/internal/web"
@@ -26,7 +23,8 @@ import (
 
 // Server is the HTTP server.
 type Server struct {
-	http       *http.Server
+	data       *http.Server
+	ops        *http.Server
 	tlsEnabled bool
 }
 
@@ -36,89 +34,20 @@ type Deps struct {
 	CCSDSHandler *ccsdsapi.Handler
 	AuditHandler *auditapi.Handler
 	OpsHandler   *ops.Handler
-	JWTVerifier  *jwt.Verifier
-	HMACVerifier *hmacsign.Verifier
-	StaticTokens map[string]*principal.Principal
+	AccessTokens map[string]*principal.Principal
 }
 
-// New constructs one plane-scoped server with all transport and request
-// protections applied.
+// New constructs one process with separate data and read-only operations
+// listeners. Both listeners share one application core and SecurityState.
 func New(deps Deps) (*Server, error) {
 	if deps.Cfg == nil {
 		return nil, fmt.Errorf("server: missing config")
 	}
-	mux := http.NewServeMux()
-
-	switch deps.Cfg.Server.ActivePlane {
-	case "management":
-		registerManagementRoutes(mux, deps)
-	case "data":
-		registerDataRoutes(mux, deps)
-	case "ops":
-		registerOpsRoutes(mux, deps)
-	case "all":
-		if deps.Cfg.Environment == "production" {
-			return nil, fmt.Errorf("server: all-plane listener is forbidden in production")
-		}
-		registerManagementRoutes(mux, deps)
-		registerDataRoutes(mux, deps)
-		registerOpsRoutes(mux, deps)
-	default:
-		return nil, fmt.Errorf("server: unsupported active plane %q", deps.Cfg.Server.ActivePlane)
-	}
-
-	// Health check.
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-
-	// Auth config.
-	authCfg := middleware.AuthConfig{
-		JWTVerifier:  deps.JWTVerifier,
-		HMACVerifier: deps.HMACVerifier,
-		HMACEnabled:  deps.Cfg.Auth.HMACEnabled,
-		StaticTokens: deps.StaticTokens,
-	}
-
-	// Build the middleware chain. Order (outer -> inner):
-	//   CORS -> RequestID -> BodyLimit -> ReadBody -> Auth -> mux
-	// ReadBody MUST run before Auth so the body is in context for HMAC verification.
-	var handler http.Handler = mux
-	authMiddleware := middleware.Auth(authCfg)
-	admitted := middleware.CapacityGuard(middleware.CapacityConfig{
-		Window: deps.Cfg.TrafficGuard.RateWindow, SigmaThreshold: deps.Cfg.TrafficGuard.RateSigmaThreshold,
-	})(handler)
-	// Wrap auth so healthz and /ui/ static assets bypass authentication.
-	// /ui/api/ paths must still go through auth.
-	authWrapper := func(h http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/healthz" || (strings.HasPrefix(r.URL.Path, "/ui/") && !strings.HasPrefix(r.URL.Path, "/ui/api/")) {
-				h.ServeHTTP(w, r)
-				return
-			}
-			authMiddleware(middleware.APIAccess(admitted)).ServeHTTP(w, r)
-		})
-	}
-	handler = authWrapper(handler)
-	handler = middleware.ReadBody(handler)
-	handler = middleware.BodyLimit(deps.Cfg.Server.MaxRequestBody)(handler)
-	handler = middleware.RequestID(handler)
-	handler = browserSecurity(deps.Cfg.Server.AllowedOrigins, handler)
-
-	addr := deps.Cfg.Server.HTTPListenAddr
-	tlsConfig, err := serverTLSConfig(deps.Cfg.Server.TLSClientCAFile)
-	if err != nil {
-		return nil, err
-	}
+	tlsConfig := serverTLSConfig()
+	tlsEnabled := deps.Cfg.Server.TLSCertFile != "" || deps.Cfg.Server.TLSKeyFile != ""
 	if deps.Cfg.Server.TLSCertFile != "" || deps.Cfg.Server.TLSKeyFile != "" {
 		if deps.Cfg.Server.TLSCertFile == "" || deps.Cfg.Server.TLSKeyFile == "" {
 			return nil, fmt.Errorf("server: both TLS certificate and key are required")
-		}
-		addr = deps.Cfg.Server.HTTPSListenAddr
-		if addr == "" {
-			return nil, fmt.Errorf("server: https listen address is required when TLS is configured")
 		}
 		certificate, err := tls.LoadX509KeyPair(deps.Cfg.Server.TLSCertFile, deps.Cfg.Server.TLSKeyFile)
 		if err != nil {
@@ -135,27 +64,58 @@ func New(deps Deps) (*Server, error) {
 		certificate.Leaf = leaf
 		tlsConfig.Certificates = []tls.Certificate{certificate}
 	}
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadHeaderTimeout: deps.Cfg.Server.ReadHeaderTimeout,
-		ReadTimeout:       deps.Cfg.Server.ReadTimeout,
-		WriteTimeout:      deps.Cfg.Server.WriteTimeout,
-		IdleTimeout:       deps.Cfg.Server.IdleTimeout,
-		MaxHeaderBytes:    deps.Cfg.Server.MaxHeaderBytes,
-		TLSConfig:         tlsConfig,
-	}
-	return &Server{
-		http:       srv,
-		tlsEnabled: deps.Cfg.Server.TLSCertFile != "",
-	}, nil
+	dataMux := http.NewServeMux()
+	registerDataRoutes(dataMux, deps)
+	dataServer := buildHTTPServer(deps.Cfg, deps.Cfg.Server.DataListenAddr,
+		listenerHandler(dataMux, deps, principal.PlaneData, false), tlsConfig)
+	opsMux := http.NewServeMux()
+	registerOpsRoutes(opsMux, deps)
+	registerConsoleRoutes(opsMux, deps)
+	opsServer := buildHTTPServer(deps.Cfg, deps.Cfg.Server.OpsListenAddr,
+		listenerHandler(opsMux, deps, principal.PlaneOps, true), tlsConfig.Clone())
+	return &Server{data: dataServer, ops: opsServer, tlsEnabled: tlsEnabled}, nil
 }
 
-func registerManagementRoutes(mux *http.ServeMux, deps Deps) {
+func buildHTTPServer(cfg *config.Config, addr string, handler http.Handler, tlsConfig *tls.Config) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		IdleTimeout:       cfg.Server.IdleTimeout,
+		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
+		TLSConfig:         tlsConfig,
+	}
+}
+
+func registerConsoleRoutes(mux *http.ServeMux, deps Deps) {
 	if deps.AuditHandler != nil {
 		deps.AuditHandler.Routes(mux)
 	}
 	mux.Handle("GET /ui/", http.StripPrefix("/ui", web.Handler()))
+}
+
+func listenerHandler(mux *http.ServeMux, deps Deps, plane principal.Plane, console bool) http.Handler {
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	auth := middleware.Auth(middleware.AuthConfig{AccessTokens: deps.AccessTokens})
+	admitted := middleware.CapacityGuard(middleware.CapacityConfig{Window: deps.Cfg.TrafficGuard.RateWindow,
+		SigmaThreshold: deps.Cfg.TrafficGuard.RateSigmaThreshold})(mux)
+	protected := middleware.APIAccess(middleware.RequirePlane(plane)(admitted))
+	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" || (console && strings.HasPrefix(r.URL.Path, "/ui/") && !strings.HasPrefix(r.URL.Path, "/ui/api/")) {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		auth(protected).ServeHTTP(w, r)
+	})
+	handler = middleware.ReadBody(handler)
+	handler = middleware.BodyLimit(deps.Cfg.Server.MaxRequestBody)(handler)
+	handler = middleware.RequestID(handler)
+	return browserSecurity(handler)
 }
 
 func registerDataRoutes(mux *http.ServeMux, deps Deps) {
@@ -175,55 +135,44 @@ func registerOpsRoutes(mux *http.ServeMux, deps Deps) {
 
 // Start begins listening.
 func (s *Server) Start() error {
-	var err error
-	if s.tlsEnabled {
-		// The key pair was parsed and pinned during New, so startup cannot race
-		// a file replacement between validation and listener creation.
-		err = s.http.ListenAndServeTLS("", "")
-	} else {
-		err = s.http.ListenAndServe()
+	errorsCh := make(chan error, 2)
+	start := func(value *http.Server) {
+		var err error
+		if s.tlsEnabled {
+			err = value.ListenAndServeTLS("", "")
+		} else {
+			err = value.ListenAndServe()
+		}
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		errorsCh <- err
 	}
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
-	}
-	return nil
+	go start(s.data)
+	go start(s.ops)
+	err := <-errorsCh
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.data.Shutdown(shutdownCtx)
+	_ = s.ops.Shutdown(shutdownCtx)
+	return err
 }
 
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) error {
-	return s.http.Shutdown(ctx)
+	return errors.Join(s.data.Shutdown(ctx), s.ops.Shutdown(ctx))
 }
 
-// HTTPServer returns the underlying *http.Server (for testing).
-func (s *Server) HTTPServer() *http.Server { return s.http }
+func (s *Server) DataHTTPServer() *http.Server { return s.data }
+func (s *Server) OpsHTTPServer() *http.Server  { return s.ops }
 
-func serverTLSConfig(clientCAFile string) (*tls.Config, error) {
-	cfg := &tls.Config{
-		MinVersion: tls.VersionTLS13,
-	}
-	if clientCAFile == "" {
-		return cfg, nil
-	}
-	pemBytes, err := os.ReadFile(clientCAFile)
-	if err != nil {
-		return nil, fmt.Errorf("server: read client CA: %w", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pemBytes) {
-		return nil, fmt.Errorf("server: client CA contains no certificates")
-	}
-	cfg.ClientCAs = pool
-	cfg.ClientAuth = tls.RequireAndVerifyClientCert
-	return cfg, nil
+func serverTLSConfig() *tls.Config {
+	return &tls.Config{MinVersion: tls.VersionTLS13}
 }
 
 // browserSecurity centralizes browser response hardening and implements
 // least-privilege CORS. An empty allowlist means same-origin only.
-func browserSecurity(allowedOrigins []string, next http.Handler) http.Handler {
-	allowed := make(map[string]struct{}, len(allowedOrigins))
-	for _, origin := range allowedOrigins {
-		allowed[origin] = struct{}{}
-	}
+func browserSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
@@ -239,19 +188,9 @@ func browserSecurity(allowedOrigins []string, next http.Handler) http.Handler {
 		}
 
 		origin := r.Header.Get("Origin")
-		if origin != "" {
-			_, explicitlyAllowed := allowed[origin]
-			if !explicitlyAllowed && !requestIsSameOrigin(r, origin) {
-				http.Error(w, "origin not allowed", http.StatusForbidden)
-				return
-			}
-			if explicitlyAllowed {
-				h.Set("Access-Control-Allow-Origin", origin)
-				h.Add("Vary", "Origin")
-				h.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
-				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key")
-				h.Set("Access-Control-Max-Age", "600")
-			}
+		if origin != "" && !requestIsSameOrigin(r, origin) {
+			http.Error(w, "origin not allowed", http.StatusForbidden)
+			return
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

@@ -58,7 +58,7 @@ func request(t *testing.T, handler *Handler, path string, authenticated bool) *h
 	handler.Routes(mux)
 	var target http.Handler = mux
 	if authenticated {
-		target = middleware.ReadBody(middleware.Auth(middleware.AuthConfig{StaticTokens: map[string]*principal.Principal{
+		target = middleware.ReadBody(middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{
 			"test-token": {ID: "ops", TenantID: "t-default", Plane: principal.PlaneOps, Scopes: []string{"ops:read"}},
 		}})(middleware.APIAccess(mux)))
 	}

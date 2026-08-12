@@ -9,12 +9,12 @@ Configuration fails closed unless production supplies:
 
 - an absolute `database.path` on a restricted, monitored filesystem;
 - native TPM access with an explicit TCTI and approved PCR policy;
-- TLS 1.3 server credentials and a client CA for mTLS;
-- OIDC/JWT issuer, audience, HTTPS JWKS, asymmetric algorithms, and short token lifetime;
+- TLS 1.3 server credentials whose public-key fingerprint is pinned by callers;
+- one controlled access-token file containing independent 256-bit Data and Ops tokens;
 - signed policy trust files, an audit-redaction pepper, and restore-drill evidence;
-- one selected listener plane per process and deployment-enforced interface isolation.
+- separate Data and Ops listener addresses in the single runtime process.
 
-Static tokens, HMAC, software/shell TPM providers, plain HTTP, wildcard CORS,
+Example tokens, software/shell TPM providers, plain HTTP, wildcard CORS,
 unknown configuration fields, and relative production state paths are rejected.
 
 ## Backup and restore rule
@@ -30,6 +30,6 @@ mission root-recovery material and signed provisioning evidence outside the host
 
 Before launch, verify native TPM PCR-change/restart behavior, SQLite corruption
 and disk-full failure, concurrent counter allocation, online backup/restore,
-forced new-SPI recovery, JWT/JWKS rotation, certificate rotation, and end-to-end
+forced new-SPI recovery, access-token rotation, certificate rotation, and end-to-end
 ground/flight vectors. Audit logs and crash artifacts must be scanned for
 tokens, plaintext frames, root keys, working keys, and wrapped-material blobs.

@@ -70,6 +70,7 @@ type operationsStatusResponse struct {
 	} `json:"tc"`
 	TCRotation *tcRotationStatusResponse   `json:"tc_rotation"`
 	AOS        []associationStatusResponse `json:"aos"`
+	AOSFormat  string                      `json:"aos_format"`
 	Warnings   []string                    `json:"warnings"`
 }
 
@@ -99,7 +100,7 @@ func (h *Handler) operationsStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	response := operationsStatusResponse{
 		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Status: status.Status,
-		Ready: status.Ready, AOS: make([]associationStatusResponse, 0, len(status.AOSActive)),
+		Ready: status.Ready, AOS: make([]associationStatusResponse, 0, len(status.AOSActive)), AOSFormat: status.AOSFormat,
 		Warnings: append([]string{}, status.Warnings...),
 	}
 	response.TC.Current = mapAssociationStatus(status.TCCurrent)

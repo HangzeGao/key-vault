@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -17,8 +18,6 @@ import (
 	"github.com/kvlt/key-vault/internal/application/protection"
 	"github.com/kvlt/key-vault/internal/audit/redaction"
 	"github.com/kvlt/key-vault/internal/auditchain"
-	"github.com/kvlt/key-vault/internal/auth/hmacsign"
-	"github.com/kvlt/key-vault/internal/auth/jwt"
 	"github.com/kvlt/key-vault/internal/auth/principal"
 	"github.com/kvlt/key-vault/internal/config"
 	"github.com/kvlt/key-vault/internal/crypto/aad"
@@ -47,9 +46,7 @@ type App struct {
 	PolicyMgr          *policysig.Manager
 	CCSDSFrameSecurity *ccsds.FrameSecurity
 	CCSDSStore         ccsds.Store
-	JWTVerifier        *jwt.Verifier
-	HMACVerifier       *hmacsign.Verifier
-	StaticTokens       map[string]*principal.Principal
+	AccessTokens       map[string]*principal.Principal
 	AuditChain         *auditchain.Service
 }
 
@@ -66,6 +63,10 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 		} else {
 			slog.Info("configuration posture", "code", finding.Code, "message", finding.Message)
 		}
+	}
+	accessTokens, err := loadAccessTokens(cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	store, err := securitystate.Open(ctx, cfg.Database.Path)
@@ -84,7 +85,7 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 	}
 	policies := policy.NewEngine()
 	resolver := keyresolver.New(tpm, nrwkName, 5*time.Minute)
-	if err := bootstrapRoot(ctx, cfg, store, tpm, resolver); err != nil {
+	if err := bootstrapRoot(ctx, cfg, store, tpm, resolver, accessTokens); err != nil {
 		return nil, fmt.Errorf("bootstrap: root: %w", err)
 	}
 	resolver.SetFetchDEKHook(func(ctx context.Context, keyVersionID string) ([]byte, []byte, error) {
@@ -112,21 +113,10 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 		return nil, fmt.Errorf("bootstrap: CCSDS frame security: %w", err)
 	}
 
-	jwtVerifier := jwt.NewVerifier(cfg.Auth.JWTIssuer, cfg.Auth.JWTAudience, cfg.Auth.JWTAlgWhite)
-	jwtVerifier.SetMaxTokenTTL(cfg.Auth.DefaultTokenTTL)
-	if cfg.Auth.JWKSetURL != "" {
-		keySet, err := jwt.NewRemoteKeySet(cfg.Auth.JWKSetURL, cfg.Auth.JWKCacheTTL, nil)
-		if err != nil {
-			return nil, fmt.Errorf("bootstrap: remote JWKS: %w", err)
-		}
-		jwtVerifier.SetPublicKeySet(keySet)
-	}
-
 	return &App{
 		Cfg: cfg, Store: store, TPM: tpm, Resolver: resolver, Policies: policies, PolicyMgr: policyMgr,
 		CCSDSFrameSecurity: frameSecurity, CCSDSStore: store,
-		JWTVerifier: jwtVerifier, HMACVerifier: hmacsign.NewVerifier(cfg.Auth.HMACMaxSkew),
-		StaticTokens: loadStaticTokens(), AuditChain: auditChain,
+		AccessTokens: accessTokens, AuditChain: auditChain,
 	}, nil
 }
 
@@ -158,14 +148,20 @@ func buildTPM(cfg *config.Config) (provider.Provider, error) {
 }
 
 func bootstrapRoot(ctx context.Context, cfg *config.Config, store *securitystate.Store,
-	tpm provider.Provider, resolver *keyresolver.Resolver) error {
+	tpm provider.Provider, resolver *keyresolver.Resolver, accessTokens map[string]*principal.Principal) error {
 	if err := store.EnsureTenant(ctx, "t-default", "default"); err != nil {
 		return err
 	}
-	for _, tenantID := range collectStaticTokenTenantIDs() {
+	seenTenants := make(map[string]bool)
+	for _, identity := range accessTokens {
+		tenantID := identity.TenantID
 		if tenantID == "" || tenantID == "t-default" {
 			continue
 		}
+		if seenTenants[tenantID] {
+			continue
+		}
+		seenTenants[tenantID] = true
 		if err := store.EnsureTenant(ctx, tenantID, strings.TrimPrefix(tenantID, "t-")); err != nil {
 			return err
 		}
@@ -281,82 +277,96 @@ func (adapter *policyAuditAdapter) RecordPolicyReload(ctx context.Context, polic
 		Metadata: map[string]string{"version": fmt.Sprintf("%d", version), "reason": reason}})
 }
 
-func loadStaticTokens() map[string]*principal.Principal {
+func loadAccessTokens(cfg *config.Config) (map[string]*principal.Principal, error) {
 	tokens := make(map[string]*principal.Principal)
-	raw := os.Getenv("KVLT_STATIC_TOKENS")
-	if raw == "" {
-		return tokens
+	raw := []byte(os.Getenv("KVLT_ACCESS_TOKENS"))
+	if cfg.Auth.AccessTokensFile != "" {
+		var err error
+		raw, err = os.ReadFile(cfg.Auth.AccessTokensFile)
+		if err != nil {
+			return nil, fmt.Errorf("bootstrap: read access token file: %w", err)
+		}
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		if cfg.Environment == "production" {
+			return nil, errors.New("bootstrap: production access tokens are not configured")
+		}
+		return tokens, nil
 	}
 	var entries []struct {
 		Token    string   `json:"token"`
 		TenantID string   `json:"tenant_id"`
 		Scopes   []string `json:"scopes"`
-		Roles    []string `json:"roles"`
 		Plane    string   `json:"plane"`
-		Planes   []string `json:"planes"`
-		NodeID   string   `json:"node_id"`
 	}
-	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
-		slog.Error("KVLT_STATIC_TOKENS parse failed; static authentication disabled", "error", err)
-		return tokens
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&entries); err != nil {
+		return nil, fmt.Errorf("bootstrap: parse access tokens: %w", err)
 	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return nil, errors.New("bootstrap: trailing or invalid access token data")
+	}
+	if len(entries) != 2 {
+		return nil, errors.New("bootstrap: exactly one Data token and one Ops token are required")
+	}
+	seenPlanes := make(map[principal.Plane]bool, 2)
 	for _, entry := range entries {
-		if len(entry.Token) < 8 || entry.TenantID == "" {
-			continue
+		if len(entry.Token) < 32 || entry.TenantID == "" {
+			return nil, errors.New("bootstrap: every access token must contain at least 32 characters and a tenant_id")
 		}
-		plane, planes := staticTokenPlanes(entry.Plane, entry.Planes)
-		tokens[entry.Token] = &principal.Principal{ID: "static:" + entry.Token[:8], TenantID: entry.TenantID,
-			Scopes: entry.Scopes, Roles: entry.Roles, Plane: plane, Planes: planes, NodeID: entry.NodeID,
-			AuthMethod: "static_token"}
-	}
-	return tokens
-}
-
-func collectStaticTokenTenantIDs() []string {
-	raw := os.Getenv("KVLT_STATIC_TOKENS")
-	if raw == "" {
-		return nil
-	}
-	var entries []struct {
-		TenantID string `json:"tenant_id"`
-	}
-	if json.Unmarshal([]byte(raw), &entries) != nil {
-		return nil
-	}
-	seen := make(map[string]bool)
-	var tenants []string
-	for _, entry := range entries {
-		if entry.TenantID != "" && !seen[entry.TenantID] {
-			seen[entry.TenantID] = true
-			tenants = append(tenants, entry.TenantID)
+		if cfg.Environment == "production" && len(entry.Token) < 43 {
+			return nil, errors.New("bootstrap: production access tokens must contain at least 43 characters")
 		}
-	}
-	return tenants
-}
-
-func staticTokenPlanes(rawPlane string, rawPlanes []string) (principal.Plane, []principal.Plane) {
-	var planes []principal.Plane
-	add := func(value string) {
-		switch value {
+		var plane principal.Plane
+		switch entry.Plane {
 		case "data":
-			planes = append(planes, principal.PlaneData)
+			plane = principal.PlaneData
 		case "ops":
-			planes = append(planes, principal.PlaneOps)
-		case "management", "":
-			planes = append(planes, principal.PlaneManagement)
+			plane = principal.PlaneOps
+		default:
+			return nil, fmt.Errorf("bootstrap: access token plane %q must be data or ops", entry.Plane)
+		}
+		if seenPlanes[plane] {
+			return nil, fmt.Errorf("bootstrap: duplicate %s plane access token", entry.Plane)
+		}
+		seenPlanes[plane] = true
+		if !exactScopes(entry.Scopes, requiredScopes(plane)) {
+			return nil, fmt.Errorf("bootstrap: %s token scopes do not match the fixed plane contract", entry.Plane)
+		}
+		if _, duplicate := tokens[entry.Token]; duplicate {
+			return nil, errors.New("bootstrap: duplicate access token")
+		}
+		tokens[entry.Token] = &principal.Principal{ID: "static:" + entry.Token[:8], TenantID: entry.TenantID,
+			Scopes: entry.Scopes, Plane: plane, AuthMethod: "access_token"}
+	}
+	return tokens, nil
+}
+
+func requiredScopes(plane principal.Plane) []string {
+	if plane == principal.PlaneData {
+		return []string{"ccsds:tc:protect", "ccsds:aos:unprotect"}
+	}
+	return []string{"audit:read", "ops:read"}
+}
+
+func exactScopes(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	seen := make(map[string]bool, len(got))
+	for _, scope := range got {
+		if seen[scope] {
+			return false
+		}
+		seen[scope] = true
+	}
+	for _, scope := range want {
+		if !seen[scope] {
+			return false
 		}
 	}
-	if len(rawPlanes) == 0 {
-		add(rawPlane)
-	} else {
-		for _, value := range rawPlanes {
-			add(value)
-		}
-	}
-	if len(planes) == 0 {
-		planes = []principal.Plane{principal.PlaneManagement}
-	}
-	return planes[0], planes
+	return true
 }
 
 func hashBaseline(value config.BaselineConfig) []byte {

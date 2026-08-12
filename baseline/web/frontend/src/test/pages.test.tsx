@@ -4,8 +4,7 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { api, HttpError } from "../lib/api";
 import { DashboardPage } from "../pages/Dashboard";
-import { DatabaseOperationsPage } from "../pages/DatabaseOperations";
-import { AuditPage } from "../pages/Audit";
+import { SystemAuditPage } from "../pages/SystemAudit";
 import { TCSecurityPage } from "../pages/TCSecurity";
 import { AOSSecurityPage } from "../pages/AOSSecurity";
 import { LoginPage } from "../pages/Login";
@@ -26,6 +25,7 @@ const emptyResponse = (path: string) => {
       recovery: { id: "tc-recovery", spi: 28673, direction: "TC_RECOVERY_TX", state: "ACTIVE", suite_id: "SM4_GCM", security_epoch: 0, key_version: 1, policy_version: 1, sequence_number_length: 0, transmitted_iv_length: 4, tag_length: 16, replay_window: 0, next_iv_counter: 3, replay_seen: false },
     },
     tc_rotation: { phase: "PREPARED", transaction_id: "9", current_spi: 4097, next_spi: 4098, current_root_version: 2, next_root_version: 3, evidence: "RECOVERY_FRAME_PRODUCED" },
+    aos_format: "NOT_FROZEN",
     aos: [{ id: "aos-active", spi: 8193, direction: "AOS_RX", state: "ACTIVE", suite_id: "SM4_GCM", security_epoch: 0, key_version: 4, policy_version: 1, sequence_number_length: 4, transmitted_iv_length: 12, tag_length: 16, replay_window: 32, replay_highest: 88, replay_seen: true }],
   };
   if (path.endsWith("/ops/db/status")) return {
@@ -57,10 +57,9 @@ beforeEach(() => {
 describe("operations console page contracts", () => {
   it.each([
     ["Mission Security Operations", <DashboardPage />],
-    ["Security State", <DatabaseOperationsPage />],
-    ["Security Audit", <AuditPage />],
-    ["TC Uplink Operations", <TCSecurityPage />],
-    ["AOS Downlink Operations", <AOSSecurityPage />],
+    ["System & Audit", <SystemAuditPage />],
+    ["TC Uplink", <TCSecurityPage />],
+    ["AOS Downlink", <AOSSecurityPage />],
   ])("renders %s", async (heading, page) => {
     renderPage(page);
     expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
@@ -78,10 +77,16 @@ describe("operations console page contracts", () => {
   });
 
   it("database diagnostics do not request or render key inventory", async () => {
-    renderPage(<DatabaseOperationsPage />);
+    renderPage(<SystemAuditPage />);
+    expect(await screen.findByText("Durability")).toBeInTheDocument();
     expect(get.mock.calls.map(([path]) => path)).toContain("/ui/api/v1/ops/db/status");
     expect(get.mock.calls.map(([path]) => path).some((path) => path.includes("/keys"))).toBe(false);
-    expect(await screen.findByText("Persistence Boundary")).toBeInTheDocument();
+  });
+
+  it("keeps AOS symmetric while marking its frame contract as not frozen", async () => {
+    renderPage(<AOSSecurityPage />);
+    expect(await screen.findByRole("heading", { name: "AOS Downlink" })).toBeInTheDocument();
+    expect(await screen.findByText("NOT FROZEN")).toBeInTheDocument();
   });
 
   it("validates console credentials before completing login", async () => {

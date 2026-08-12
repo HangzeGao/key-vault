@@ -13,8 +13,8 @@ export function AOSSecurityPage() {
       <div className="page-header operations-header">
         <div>
           <div className="operations-kicker"><RadioTower size={13} />DOWNLINK RECEIVE POSTURE</div>
-          <h1 className="section-title">AOS Downlink Operations</h1>
-          <p className="section-subtitle">Active receive associations, authenticated replay high-water marks, and fail-closed frame release posture.</p>
+          <h1 className="section-title">AOS Downlink</h1>
+          <p className="section-subtitle">Downlink receive associations, replay state, and fail-closed frame release posture.</p>
         </div>
         <button className="operations-refresh" type="button" onClick={() => query.refetch()} disabled={query.isFetching}>
           <RefreshCw size={14} className={query.isFetching ? "spinning" : ""} />Refresh status
@@ -23,6 +23,10 @@ export function AOSSecurityPage() {
       {query.isLoading && <Loading label="Loading AOS downlink state..." />}
       {query.isError && <ErrorState message="AOS downlink status is unavailable." />}
       {snapshot && <>
+        <section className="ops-format-notice" role="status">
+          <div><strong>FORMAT STATUS</strong><span>{snapshot.aos_format.replaceAll("_", " ")}</span></div>
+          <p>AOS remains visible for symmetric operations monitoring, but its complete-frame format is not yet a frozen release contract.</p>
+        </section>
         <div className="ops-metric-strip">
           <div><RadioTower size={17} /><span>Active associations</span><strong>{snapshot.aos.length}</strong></div>
           <div><ShieldCheck size={17} /><span>Replay tracking initialized</span><strong>{replayTracked}</strong></div>

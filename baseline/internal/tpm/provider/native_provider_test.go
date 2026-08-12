@@ -10,7 +10,7 @@ import (
 )
 
 func testPolicyContext() aad.CRKAAD {
-	return aad.CRKAAD{ClusterID: "cluster-a", NodeID: "node-a", PlaneRole: "management", CRKVersion: 1,
+	return aad.CRKAAD{ClusterID: "cluster-a", NodeID: "node-a", PlaneRole: "ground", CRKVersion: 1,
 		NRWKName: "nrwk-a", BaselineDigest: bytes.Repeat([]byte{1}, 32), PolicyDigest: bytes.Repeat([]byte{2}, 32)}
 }
 

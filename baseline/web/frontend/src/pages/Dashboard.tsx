@@ -15,7 +15,7 @@ export function DashboardPage() {
         <div>
           <div className="operations-kicker"><Activity size={13} />MISSION CONTROL / LIVE STATUS</div>
           <h1 className="section-title">Mission Security Operations</h1>
-          <p className="section-subtitle">Operational readiness for TC uplink protection, Recovery GCM, AOS downlink processing, and durable ground state.</p>
+          <p className="section-subtitle">Operational readiness for TC uplink, AOS downlink, Recovery GCM, and durable ground state.</p>
         </div>
         <button className="operations-refresh" type="button" onClick={() => query.refetch()} disabled={query.isFetching}>
           <RefreshCw size={14} className={query.isFetching ? "spinning" : ""} />Refresh status
@@ -46,7 +46,7 @@ export function DashboardPage() {
             <ShieldCheck size={18} /><span>RECOVERY GCM</span><strong>{formatSPI(snapshot.tc.recovery?.spi)}</strong><small>{snapshot.tc.recovery?.suite_id ?? "Not configured"}</small><ArrowUpRight className="ops-card-arrow" size={14} />
           </Link>
           <Link to="/ui/aos-security" className="operations-stat-card aos">
-            <RadioTower size={18} /><span>AOS RECEIVE</span><strong>{snapshot.aos.length}</strong><small>Active associations</small><ArrowUpRight className="ops-card-arrow" size={14} />
+            <RadioTower size={18} /><span>AOS DOWNLINK</span><strong>{snapshot.aos.length}</strong><small>{snapshot.aos_format.replaceAll("_", " ")}</small><ArrowUpRight className="ops-card-arrow" size={14} />
           </Link>
         </div>
 
@@ -57,7 +57,7 @@ export function DashboardPage() {
               <div><span>TC Current</span><strong>{snapshot.tc.current?.state ?? "MISSING"}</strong><small>{formatSPI(snapshot.tc.current?.spi)}</small></div>
               <div><span>TC Next</span><strong>{snapshot.tc.next?.state ?? "MISSING"}</strong><small>{formatSPI(snapshot.tc.next?.spi)}</small></div>
               <div><span>Recovery</span><strong>{snapshot.tc.recovery?.state ?? "MISSING"}</strong><small>{formatSPI(snapshot.tc.recovery?.spi)}</small></div>
-              <div><span>AOS Receive</span><strong>{snapshot.aos.length > 0 ? "ACTIVE" : "MISSING"}</strong><small>{snapshot.aos.length} associations</small></div>
+              <div><span>AOS Downlink</span><strong>{snapshot.aos.length > 0 ? "ACTIVE" : "MISSING"}</strong><small>{snapshot.aos_format.replaceAll("_", " ")} · {snapshot.aos.length} associations</small></div>
             </div>
           </Panel>
         </div>
@@ -65,7 +65,7 @@ export function DashboardPage() {
         <section className="ops-guardrail">
           <Database size={18} />
           <div><strong>Read-only operational projection</strong><span>This console cannot change roots, keys, SPIs, IV counters, replay windows, or switch state. Protocol state transitions remain inside the CCSDS module.</span></div>
-          <Link to="/ui/database">Inspect persistence <ArrowUpRight size={13} /></Link>
+          <Link to="/ui/system">Inspect system & audit <ArrowUpRight size={13} /></Link>
         </section>
       </>}
     </PageContainer>

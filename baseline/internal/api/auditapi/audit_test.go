@@ -57,8 +57,8 @@ func perform(handler *Handler, path string, authenticated bool) *httptest.Respon
 	handler.Routes(mux)
 	var target http.Handler = mux
 	if authenticated {
-		target = middleware.ReadBody(middleware.Auth(middleware.AuthConfig{StaticTokens: map[string]*principal.Principal{
-			"test-token": {ID: "auditor", TenantID: "t-default", Plane: principal.PlaneManagement, Scopes: []string{"audit:read"}},
+		target = middleware.ReadBody(middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{
+			"test-token": {ID: "auditor", TenantID: "t-default", Plane: principal.PlaneOps, Scopes: []string{"audit:read"}},
 		}})(middleware.APIAccess(mux)))
 	}
 	request := httptest.NewRequest(http.MethodGet, path, nil)

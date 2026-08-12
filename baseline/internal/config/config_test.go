@@ -35,6 +35,17 @@ func TestLegacyStorageAndLifecycleFieldsAreRejected(t *testing.T) {
 	}
 }
 
+func TestLegacyPlaneAndMTLSFieldsAreRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.yaml")
+	legacy := "server:\n  active_plane: management\n  plane_isolation_mode: physical\n  tls_client_ca_file: client-ca.pem\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("legacy plane or mTLS configuration was accepted")
+	}
+}
+
 func TestProductionRejectsNonDurableOrFallbackSecurityBoundaries(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -46,14 +57,8 @@ func TestProductionRejectsNonDurableOrFallbackSecurityBoundaries(t *testing.T) {
 		{"software TPM", func(c *Config) {
 			c.TPM.Provider = "software"
 		}},
-		{"logical isolation", func(c *Config) {
-			c.Server.PlaneIsolationMode = "logical"
-		}},
-		{"all planes in one process", func(c *Config) {
-			c.Server.ActivePlane = "all"
-		}},
-		{"HMAC enabled", func(c *Config) {
-			c.Auth.HMACEnabled = true
+		{"shared listener", func(c *Config) {
+			c.Server.DataListenAddr = c.Server.OpsListenAddr
 		}},
 	}
 	for _, tt := range tests {
@@ -82,18 +87,12 @@ func productionConfig(t *testing.T) *Config {
 	cfg.Environment = "production"
 	cfg.Database = DatabaseConfig{Path: filepath.Join(dir, "security-state.db")}
 	cfg.TPM = TPMConfig{Provider: "native", TCTI: "device:/dev/tpmrm0"}
-	cfg.Server.PlaneIsolationMode = "physical"
-	cfg.Server.ActivePlane = "management"
 	cfg.Server.NodeID = "node-01"
-	cfg.Server.HTTPSListenAddr = ":8443"
+	cfg.Server.DataListenAddr = ":8443"
+	cfg.Server.OpsListenAddr = ":8444"
 	cfg.Server.TLSCertFile = file
 	cfg.Server.TLSKeyFile = file
-	cfg.Server.TLSClientCAFile = file
-	cfg.Auth.JWTIssuer = "https://id.example.test"
-	cfg.Auth.JWTAudience = "key-vault"
-	cfg.Auth.JWKSetURL = "https://id.example.test/.well-known/jwks.json"
-	cfg.Auth.JWTAlgWhite = []string{"RS256", "ES256"}
-	cfg.Auth.HMACEnabled = false
+	cfg.Auth.AccessTokensFile = file
 	cfg.Policy.TrustedKeysPath = file
 	cfg.Policy.SignedPolicyPath = file
 	cfg.Audit.RedactionPepperFile = file
@@ -102,21 +101,19 @@ func productionConfig(t *testing.T) *Config {
 }
 
 func TestProductionFingerprintGuardRejectsAmbiguousConfig(t *testing.T) {
-	// A config that looks production-ready (native TPM + physical
-	// isolation) but is missing environment: production must fail-closed,
+	// A config that looks production-ready (native TPM) but is missing
+	// environment: production must fail-closed,
 	// preventing accidental deployment with development-mode safeguards off.
 	cfg := Default()
 	cfg.Environment = "development"
 	cfg.TPM.Provider = "native"
-	cfg.Server.PlaneIsolationMode = "physical"
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("production-like config with development environment was accepted")
 	}
-	// A software TPM with logical isolation remains a valid test setup.
+	// A software TPM remains a valid test setup.
 	cfg2 := Default()
 	cfg2.Environment = "test"
 	cfg2.TPM.Provider = "swtpm"
-	cfg2.Server.PlaneIsolationMode = "logical"
 	if err := cfg2.Validate(); err != nil {
 		t.Fatalf("partial production fingerprint wrongly rejected: %v", err)
 	}
@@ -124,13 +121,12 @@ func TestProductionFingerprintGuardRejectsAmbiguousConfig(t *testing.T) {
 
 func TestDiagnosticsDescribeDeploymentPosture(t *testing.T) {
 	dev := Default().Diagnostics()
-	if len(dev) < 3 {
+	if len(dev) != 2 {
 		t.Fatalf("development diagnostics = %v, want posture and fallback warnings", dev)
 	}
 	prod := Default()
 	prod.Environment = "production"
 	prod.TPM.Provider = "native"
-	prod.Server.PlaneIsolationMode = "physical"
 	findings := prod.Diagnostics()
 	if len(findings) != 1 || findings[0].Code != "production_hardening" {
 		t.Fatalf("production diagnostics = %v, want hardened posture only", findings)

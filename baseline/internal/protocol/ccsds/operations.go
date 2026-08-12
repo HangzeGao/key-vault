@@ -57,6 +57,7 @@ type OperationsStatus struct {
 	TCRecovery *AssociationRuntimeState
 	TCRotation *TCRotationState
 	AOSActive  []AssociationRuntimeState
+	AOSFormat  string
 	Warnings   []string
 }
 
@@ -67,7 +68,8 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 	if err != nil {
 		return nil, err
 	}
-	status := &OperationsStatus{Status: "UNCONFIGURED", AOSActive: make([]AssociationRuntimeState, 0), Warnings: make([]string, 0)}
+	status := &OperationsStatus{Status: "UNCONFIGURED", AOSActive: make([]AssociationRuntimeState, 0),
+		AOSFormat: "NOT_FROZEN", Warnings: make([]string, 0)}
 	rotation, rotationErr := s.store.ReadTCRotationState(ctx, tenantID)
 	if rotationErr == nil {
 		status.TCRotation = rotation

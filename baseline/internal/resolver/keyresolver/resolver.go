@@ -116,7 +116,7 @@ func (r *Resolver) Init(ctx context.Context, clusterID, nodeID, planeRole string
 }
 
 // SetCRKEnvelope caches the CRK envelope for the current node.
-// Called after the management plane distributes a CRK envelope.
+// Called after local bootstrap loads the TPM-sealed CRK envelope.
 func (r *Resolver) SetCRKEnvelope(env *provider.CRKEnvelope) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

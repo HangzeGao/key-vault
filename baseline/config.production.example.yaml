@@ -3,21 +3,17 @@
 environment: production
 
 server:
-  https_listen_addr: ":8443"
+  ops_listen_addr: ":8443"
+  data_listen_addr: ":8444"
   tls_cert_file: /run/kvlt/tls/server.crt
   tls_key_file: /run/kvlt/tls/server.key
-  tls_client_ca_file: /run/kvlt/tls/client-ca.crt
   read_header_timeout: 5s
   read_timeout: 15s
   write_timeout: 15s
   idle_timeout: 60s
   max_header_bytes: 16384
   max_request_body: 65536
-  plane_isolation_mode: physical
-  active_plane: management
-  node_id: kvlt-management-01
-  allowed_origins:
-    - https://vault-console.example.com
+  node_id: kvlt-ground-01
 
 database:
   path: /var/lib/key-vault/security-state.db
@@ -28,13 +24,8 @@ tpm:
   policy_pcrs: [7]
 
 auth:
-  jwt_issuer: https://identity.example.com
-  jwt_audience: key-vault
-  jwt_alg_whitelist: [RS256, ES256]
-  jwk_set_url: https://identity.example.com/.well-known/jwks.json
-  jwk_cache_ttl: 5m
-  default_token_ttl: 15m
-  hmac_enabled: false
+  # JSON array with exactly one Data token and one Ops token. Protect as 0600.
+  access_tokens_file: /run/kvlt/secrets/access-tokens.json
 
 policy:
   trusted_keys_path: /run/kvlt/policy/trusted-keys.json

@@ -39,7 +39,7 @@ func (service *fakeService) OperationsStatus(_ context.Context, tenantID string)
 	service.tenant = tenantID
 	counter := uint64(42)
 	return &protocol.OperationsStatus{
-		Status: "READY", Ready: true,
+		Status: "READY", Ready: true, AOSFormat: "NOT_FROZEN",
 		TCRotation: &protocol.TCRotationState{Phase: protocol.TCRotationPrepared, TransactionID: ^uint64(0),
 			CurrentSPI: 0x1001, NextSPI: 0x1002, CurrentRootVersion: 4, NextRootVersion: 5},
 		TCCurrent: &protocol.AssociationRuntimeState{ID: "tc-current", SPI: 0x1001, Direction: protocol.DirectionTCTx,
@@ -102,7 +102,7 @@ func TestOperationsStatusExposesOnlyNonSecretRuntimeState(t *testing.T) {
 	service := &fakeService{}
 	mux := http.NewServeMux()
 	ccsdsapi.New(service).OpsRoutes(mux)
-	auth := middleware.Auth(middleware.AuthConfig{StaticTokens: map[string]*principal.Principal{
+	auth := middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{
 		"test-token": {ID: "operator", TenantID: "tenant-1", Plane: principal.PlaneOps, Scopes: []string{"ops:read"}},
 	}})
 	handler := middleware.ReadBody(auth(middleware.APIAccess(mux)))
@@ -121,6 +121,9 @@ func TestOperationsStatusExposesOnlyNonSecretRuntimeState(t *testing.T) {
 	if !bytes.Contains([]byte(body), []byte(`"warnings":[]`)) || !bytes.Contains([]byte(body), []byte(`"aos":[]`)) {
 		t.Fatalf("empty collections must use the strict JSON array contract: %s", body)
 	}
+	if !bytes.Contains([]byte(body), []byte(`"aos_format":"NOT_FROZEN"`)) {
+		t.Fatalf("AOS format status missing: %s", body)
+	}
 	if !bytes.Contains([]byte(body), []byte(`"phase":"PREPARED"`)) ||
 		!bytes.Contains([]byte(body), []byte(`"evidence":"RECOVERY_FRAME_PRODUCED"`)) ||
 		!bytes.Contains([]byte(body), []byte(`"transaction_id":"18446744073709551615"`)) {
@@ -131,7 +134,7 @@ func TestOperationsStatusExposesOnlyNonSecretRuntimeState(t *testing.T) {
 func authenticatedHandler(service ccsdsapi.Service, scopes ...string) http.Handler {
 	mux := http.NewServeMux()
 	ccsdsapi.New(service).Routes(mux)
-	auth := middleware.Auth(middleware.AuthConfig{StaticTokens: map[string]*principal.Principal{
+	auth := middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{
 		"test-token": {ID: "measurement", TenantID: "tenant-1", Plane: principal.PlaneData, Scopes: scopes},
 	}})
 	return middleware.ReadBody(auth(middleware.APIAccess(mux)))

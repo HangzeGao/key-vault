@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,22 +27,17 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	HTTPListenAddr     string        `yaml:"http_listen_addr"`
-	HTTPSListenAddr    string        `yaml:"https_listen_addr"`
-	TLSCertFile        string        `yaml:"tls_cert_file"`
-	TLSKeyFile         string        `yaml:"tls_key_file"`
-	TLSClientCAFile    string        `yaml:"tls_client_ca_file"`
-	ReadTimeout        time.Duration `yaml:"read_timeout"`
-	ReadHeaderTimeout  time.Duration `yaml:"read_header_timeout"`
-	WriteTimeout       time.Duration `yaml:"write_timeout"`
-	IdleTimeout        time.Duration `yaml:"idle_timeout"`
-	MaxHeaderBytes     int           `yaml:"max_header_bytes"`
-	MaxRequestBody     int           `yaml:"max_request_body"`
-	PlaneIsolationMode string        `yaml:"plane_isolation_mode"`
-	ActivePlane        string        `yaml:"active_plane"`
-	NodeID             string        `yaml:"node_id"`
-	AllowedOrigins     []string      `yaml:"allowed_origins"`
-	IPAllowlist        []string      `yaml:"ip_allowlist"`
+	DataListenAddr    string        `yaml:"data_listen_addr"`
+	OpsListenAddr     string        `yaml:"ops_listen_addr"`
+	TLSCertFile       string        `yaml:"tls_cert_file"`
+	TLSKeyFile        string        `yaml:"tls_key_file"`
+	ReadTimeout       time.Duration `yaml:"read_timeout"`
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+	WriteTimeout      time.Duration `yaml:"write_timeout"`
+	IdleTimeout       time.Duration `yaml:"idle_timeout"`
+	MaxHeaderBytes    int           `yaml:"max_header_bytes"`
+	MaxRequestBody    int           `yaml:"max_request_body"`
+	NodeID            string        `yaml:"node_id"`
 }
 
 type DatabaseConfig struct {
@@ -59,16 +53,7 @@ type TPMConfig struct {
 }
 
 type AuthConfig struct {
-	JWTIssuer        string        `yaml:"jwt_issuer"`
-	JWTAudience      string        `yaml:"jwt_audience"`
-	JWTAlgWhite      []string      `yaml:"jwt_alg_whitelist"`
-	JWKSetURL        string        `yaml:"jwk_set_url"`
-	JWKCacheTTL      time.Duration `yaml:"jwk_cache_ttl"`
-	DefaultTokenTTL  time.Duration `yaml:"default_token_ttl"`
-	HMACEnabled      bool          `yaml:"hmac_enabled"`
-	HMACSecretB64    string        `yaml:"hmac_secret_b64"`
-	HMACMaxSkew      time.Duration `yaml:"hmac_max_skew"`
-	StaticTokensFile string        `yaml:"static_tokens_file"`
+	AccessTokensFile string `yaml:"access_tokens_file"`
 }
 
 type PolicyConfig struct {
@@ -129,9 +114,6 @@ func (c *Config) Diagnostics() []Diagnostic {
 	if c.TPM.Provider == "software" || c.TPM.Provider == "swtpm" || c.TPM.Provider == "tpm2-tools" || c.TPM.Provider == "hardware" {
 		findings = append(findings, Diagnostic{"warn", "tpm_fallback", "a non-native TPM provider is active; use native TSS/ESAPI for production"})
 	}
-	if c.Server.PlaneIsolationMode != "physical" {
-		findings = append(findings, Diagnostic{"warn", "logical_planes", "plane isolation is logical; use physical isolation for production"})
-	}
 	return findings
 }
 
@@ -141,26 +123,19 @@ func Default() *Config {
 	return &Config{
 		Environment: "development",
 		Server: ServerConfig{
-			HTTPListenAddr:     ":8080",
-			ReadHeaderTimeout:  5 * time.Second,
-			ReadTimeout:        15 * time.Second,
-			WriteTimeout:       15 * time.Second,
-			IdleTimeout:        60 * time.Second,
-			MaxHeaderBytes:     16 * 1024,
-			MaxRequestBody:     64 * 1024,
-			PlaneIsolationMode: "logical",
-			ActivePlane:        "all",
-			NodeID:             "node-development",
+			OpsListenAddr:     ":8080",
+			DataListenAddr:    ":8081",
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    16 * 1024,
+			MaxRequestBody:    64 * 1024,
+			NodeID:            "node-development",
 		},
 		Database: DatabaseConfig{Path: filepath.Join(tmpDir, "key-vault", "security-state.db")},
 		TPM:      TPMConfig{Provider: "swtpm", StateDir: filepath.Join(tmpDir, "kvlt-tpm"), PolicyPCRs: []int{7}},
-		Auth: AuthConfig{
-			JWTAlgWhite:     []string{"RS256", "ES256"},
-			JWKCacheTTL:     5 * time.Minute,
-			DefaultTokenTTL: 15 * time.Minute,
-			HMACEnabled:     true,
-			HMACMaxSkew:     5 * time.Minute,
-		},
+		Auth:     AuthConfig{},
 		TrafficGuard: TrafficGuardConfig{
 			RateWindow:         time.Minute,
 			RateSigmaThreshold: 3.0,
@@ -207,11 +182,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("KVLT_ENVIRONMENT"); v != "" {
 		c.Environment = strings.ToLower(v)
 	}
-	if v := os.Getenv("KVLT_HTTP_ADDR"); v != "" {
-		c.Server.HTTPListenAddr = v
+	if v := os.Getenv("KVLT_DATA_ADDR"); v != "" {
+		c.Server.DataListenAddr = v
 	}
-	if v := os.Getenv("KVLT_HTTPS_ADDR"); v != "" {
-		c.Server.HTTPSListenAddr = v
+	if v := os.Getenv("KVLT_OPS_ADDR"); v != "" {
+		c.Server.OpsListenAddr = v
 	}
 	if v := os.Getenv("KVLT_TLS_CERT_FILE"); v != "" {
 		c.Server.TLSCertFile = v
@@ -219,17 +194,8 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("KVLT_TLS_KEY_FILE"); v != "" {
 		c.Server.TLSKeyFile = v
 	}
-	if v := os.Getenv("KVLT_TLS_CLIENT_CA_FILE"); v != "" {
-		c.Server.TLSClientCAFile = v
-	}
-	if v := os.Getenv("KVLT_ACTIVE_PLANE"); v != "" {
-		c.Server.ActivePlane = strings.ToLower(strings.TrimSpace(v))
-	}
 	if v := os.Getenv("KVLT_NODE_ID"); v != "" {
 		c.Server.NodeID = strings.TrimSpace(v)
-	}
-	if v := os.Getenv("KVLT_ALLOWED_ORIGINS"); v != "" {
-		c.Server.AllowedOrigins = splitCSV(v)
 	}
 	if v := os.Getenv("KVLT_STATE_DB"); v != "" {
 		c.Database.Path = v
@@ -246,19 +212,8 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("KVLT_TPM_TCTI"); v != "" {
 		c.TPM.TCTI = v
 	}
-	if v := os.Getenv("KVLT_JWT_ISSUER"); v != "" {
-		c.Auth.JWTIssuer = v
-	}
-	if v := os.Getenv("KVLT_JWT_AUDIENCE"); v != "" {
-		c.Auth.JWTAudience = v
-	}
-	if v := os.Getenv("KVLT_JWKS_URL"); v != "" {
-		c.Auth.JWKSetURL = v
-	}
-	if v := os.Getenv("KVLT_JWKS_CACHE_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			c.Auth.JWKCacheTTL = d
-		}
+	if v := os.Getenv("KVLT_ACCESS_TOKENS_FILE"); v != "" {
+		c.Auth.AccessTokensFile = v
 	}
 	if v := os.Getenv("KVLT_POLICY_TRUSTED_KEYS_FILE"); v != "" {
 		c.Policy.TrustedKeysPath = v
@@ -275,16 +230,6 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("KVLT_LOG_LEVEL"); v != "" {
 		c.LogLevel = strings.ToUpper(v)
 	}
-}
-
-func splitCSV(raw string) []string {
-	var out []string
-	for _, value := range strings.Split(raw, ",") {
-		if value = strings.TrimSpace(value); value != "" {
-			out = append(out, value)
-		}
-	}
-	return out
 }
 
 // Validate enforces safe engineering baseline defaults.
@@ -313,8 +258,11 @@ func (c *Config) Validate() error {
 	if c.Server.MaxRequestBody <= 0 || c.Server.MaxRequestBody > 64*1024 {
 		c.Server.MaxRequestBody = 64 * 1024
 	}
-	if c.Server.ActivePlane == "" {
-		c.Server.ActivePlane = "all"
+	if strings.TrimSpace(c.Server.DataListenAddr) == "" || strings.TrimSpace(c.Server.OpsListenAddr) == "" {
+		return fmt.Errorf("config: data_listen_addr and ops_listen_addr are required")
+	}
+	if c.Server.DataListenAddr == c.Server.OpsListenAddr {
+		return fmt.Errorf("config: data and ops listeners must use different addresses")
 	}
 	if c.Server.NodeID == "" {
 		c.Server.NodeID = "node-development"
@@ -322,24 +270,15 @@ func (c *Config) Validate() error {
 	if !validNodeID(c.Server.NodeID) {
 		return fmt.Errorf("config: node_id must be 1-64 ASCII letters, digits, dots, underscores, or hyphens")
 	}
-	if !activePlane(c.Server.ActivePlane) {
-		return fmt.Errorf("config: active_plane must be all, management, data, or ops")
-	}
-	if c.Auth.JWKCacheTTL <= 0 {
-		c.Auth.JWKCacheTTL = 5 * time.Minute
-	}
 	if strings.TrimSpace(c.Database.Path) == "" {
 		return fmt.Errorf("config: database.path is required")
 	}
-	// Production-fingerprint guard: if the config looks like a production
-	// deployment (native TPM + physical isolation) but environment
-	// is not explicitly set to production, refuse to start. This prevents
-	// accidentally running with insecure development defaults in production.
+	// A native TPM configuration is a production fingerprint. Refuse to run it
+	// under development/test safeguards by accident.
 	if c.Environment != "production" {
 		nativeTPM := c.TPM.Provider == "native" || c.TPM.Provider == "tss" || c.TPM.Provider == "esapi"
-		physical := c.Server.PlaneIsolationMode == "physical"
-		if nativeTPM && physical {
-			return fmt.Errorf("config: production-like configuration detected (native TPM + physical isolation) but environment is %q; set environment: production explicitly to enable production hardening", c.Environment)
+		if nativeTPM {
+			return fmt.Errorf("config: native TPM configuration requires environment: production")
 		}
 	}
 	if c.Environment == "production" {
@@ -356,17 +295,8 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(c.TPM.TCTI) == "" {
 			return fmt.Errorf("config: production requires an explicit TPM TCTI")
 		}
-		if c.Server.PlaneIsolationMode != "physical" {
-			return fmt.Errorf("config: production requires physical plane isolation")
-		}
-		if !productionPlane(c.Server.ActivePlane) {
-			return fmt.Errorf("config: production active_plane must be management, data, or ops")
-		}
 		if c.Server.NodeID == "" || c.Server.NodeID == "node-development" {
 			return fmt.Errorf("config: production requires a unique node_id")
-		}
-		if strings.TrimSpace(c.Server.HTTPSListenAddr) == "" {
-			return fmt.Errorf("config: production requires https_listen_addr")
 		}
 		requiredFiles := []struct {
 			name string
@@ -374,7 +304,7 @@ func (c *Config) Validate() error {
 		}{
 			{"tls_cert_file", c.Server.TLSCertFile},
 			{"tls_key_file", c.Server.TLSKeyFile},
-			{"tls_client_ca_file", c.Server.TLSClientCAFile},
+			{"auth.access_tokens_file", c.Auth.AccessTokensFile},
 			{"policy.trusted_keys_path", c.Policy.TrustedKeysPath},
 			{"policy.signed_policy_path", c.Policy.SignedPolicyPath},
 			{"audit.redaction_pepper_file", c.Audit.RedactionPepperFile},
@@ -388,21 +318,6 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("config: production %s must reference a readable regular file: %w", required.name, err)
 			}
 		}
-		if err := validateProductionJWT(c.Auth); err != nil {
-			return err
-		}
-		if c.Auth.HMACEnabled || c.Auth.HMACSecretB64 != "" ||
-			c.Auth.StaticTokensFile != "" || os.Getenv("KVLT_STATIC_TOKENS") != "" {
-			return fmt.Errorf("config: production forbids HMAC and static token authentication")
-		}
-		for _, origin := range c.Server.AllowedOrigins {
-			if err := validateProductionOrigin(origin); err != nil {
-				return err
-			}
-		}
-	}
-	if c.Server.PlaneIsolationMode != "logical" && c.Server.PlaneIsolationMode != "physical" {
-		c.Server.PlaneIsolationMode = "logical"
 	}
 	if c.TrafficGuard.RateWindow <= 0 {
 		c.TrafficGuard.RateWindow = time.Minute
@@ -423,19 +338,6 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: ccsds.tc_spacecraft_id must fit the 10-bit TC spacecraft ID")
 	}
 	return nil
-}
-
-func productionPlane(plane string) bool {
-	switch plane {
-	case "management", "data", "ops":
-		return true
-	default:
-		return false
-	}
-}
-
-func activePlane(plane string) bool {
-	return plane == "all" || productionPlane(plane)
 }
 
 func validNodeID(value string) bool {
@@ -464,50 +366,6 @@ func validateReadableRegularFile(path string) error {
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("not a regular file")
-	}
-	return nil
-}
-
-func validateProductionJWT(auth AuthConfig) error {
-	if auth.JWTIssuer == "" || auth.JWTAudience == "" || auth.JWKSetURL == "" {
-		return fmt.Errorf("config: production requires jwt_issuer, jwt_audience, and jwk_set_url")
-	}
-	issuer, err := url.Parse(auth.JWTIssuer)
-	if err != nil || issuer.Scheme != "https" || issuer.Host == "" || issuer.User != nil {
-		return fmt.Errorf("config: production jwt_issuer must be an HTTPS URL without userinfo")
-	}
-	jwks, err := url.Parse(auth.JWKSetURL)
-	if err != nil || jwks.Scheme != "https" || jwks.Host == "" || jwks.User != nil || jwks.Fragment != "" {
-		return fmt.Errorf("config: production jwk_set_url must be an HTTPS URL without userinfo or fragment")
-	}
-	if !strings.EqualFold(issuer.Host, jwks.Host) {
-		return fmt.Errorf("config: production jwk_set_url must use the JWT issuer host")
-	}
-	if len(auth.JWTAlgWhite) == 0 {
-		return fmt.Errorf("config: production requires an asymmetric JWT algorithm allowlist")
-	}
-	for _, alg := range auth.JWTAlgWhite {
-		if alg != "RS256" && alg != "ES256" {
-			return fmt.Errorf("config: production JWT algorithms are limited to RS256 and ES256")
-		}
-	}
-	if auth.DefaultTokenTTL <= 0 || auth.DefaultTokenTTL > 15*time.Minute {
-		return fmt.Errorf("config: production default_token_ttl must be between 1ns and 15m")
-	}
-	if auth.JWKCacheTTL <= 0 || auth.JWKCacheTTL > time.Hour {
-		return fmt.Errorf("config: production jwk_cache_ttl must be between 1ns and 1h")
-	}
-	return nil
-}
-
-func validateProductionOrigin(raw string) error {
-	if raw == "*" {
-		return fmt.Errorf("config: wildcard CORS is forbidden in production")
-	}
-	origin, err := url.Parse(raw)
-	if err != nil || origin.Scheme != "https" || origin.Host == "" || origin.User != nil ||
-		origin.Path != "" || origin.RawQuery != "" || origin.Fragment != "" {
-		return fmt.Errorf("config: production allowed origin %q must be an HTTPS origin", raw)
 	}
 	return nil
 }

@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kvlt/key-vault/internal/auth/hmacsign"
-	"github.com/kvlt/key-vault/internal/auth/jwt"
 	"github.com/kvlt/key-vault/internal/auth/principal"
 	"github.com/kvlt/key-vault/internal/errorsx"
 	"github.com/kvlt/key-vault/internal/logging"
@@ -28,11 +26,7 @@ const (
 
 // AuthConfig configures the auth middleware.
 type AuthConfig struct {
-	JWTVerifier    *jwt.Verifier
-	HMACVerifier   *hmacsign.Verifier
-	HMACEnabled    bool
-	StaticTokens   map[string]*principal.Principal // token -> principal
-	RequiredScopes map[string][]string             // path pattern -> required scopes
+	AccessTokens map[string]*principal.Principal // token -> one data or ops identity
 }
 
 // RequestID middleware injects a request ID.
@@ -58,9 +52,7 @@ func BodyLimit(maxBytes int) func(http.Handler) http.Handler {
 	}
 }
 
-// ReadBody reads the request body into a byte slice and stores it in context.
-// This is needed because HMAC signing covers the body, and we need to verify
-// the signature before parsing JSON.
+// ReadBody reads the bounded request body once for strict downstream decoding.
 func ReadBody(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body == nil {
@@ -83,39 +75,13 @@ func Auth(cfg AuthConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var p *principal.Principal
-			// Try Bearer token first.
 			authz := r.Header.Get("Authorization")
 			if strings.HasPrefix(authz, "Bearer ") {
 				token := strings.TrimPrefix(authz, "Bearer ")
-				// Try static token first.
-				if cfg.StaticTokens != nil {
-					if sp, ok := cfg.StaticTokens[token]; ok {
+				if cfg.AccessTokens != nil {
+					if sp, ok := cfg.AccessTokens[token]; ok {
 						p = sp
 					}
-				}
-				if p == nil && cfg.JWTVerifier != nil {
-					claims, err := cfg.JWTVerifier.VerifyContext(r.Context(), token)
-					if err != nil {
-						writeError(w, errorsx.New(errorsx.CodeAuthFailed, "jwt invalid", false), requestID(r))
-						return
-					}
-					p = claimsToPrincipal(claims, "jwt")
-				}
-			} else if cfg.HMACEnabled && r.Header.Get(hmacsign.HeaderSignature) != "" {
-				body, _ := r.Context().Value(ctxKeyBody).([]byte)
-				_, err := cfg.HMACVerifier.VerifyRequest(r, body)
-				if err != nil {
-					writeError(w, errorsx.New(errorsx.CodeAuthFailed, "hmac invalid", false), requestID(r))
-					return
-				}
-				nodeID := r.Header.Get(hmacsign.HeaderNodeID)
-				p = &principal.Principal{
-					ID:         "node:" + nodeID,
-					AuthMethod: "hmac",
-					NodeID:     nodeID,
-					Plane:      principal.PlaneData,
-					Scopes:     []string{"ccsds:tc:protect", "ccsds:aos:unprotect"},
-					Roles:      []string{"data"},
 				}
 			}
 			if p == nil {
@@ -188,39 +154,31 @@ func APIAccess(next http.Handler) http.Handler {
 }
 
 type accessRule struct {
-	planes []principal.Plane
+	plane  principal.Plane
 	scopes []string
 }
 
 func (r accessRule) allowsPrincipal(p *principal.Principal) bool {
-	for _, plane := range r.planes {
-		if p.CanAccessPlane(plane) {
-			return true
-		}
-	}
-	return false
+	return p.CanAccessPlane(r.plane)
 }
 
 func accessRuleFor(method, path string) (accessRule, bool) {
-	management := []principal.Plane{principal.PlaneManagement}
-	data := []principal.Plane{principal.PlaneData}
-	ops := []principal.Plane{principal.PlaneOps}
 	if method == http.MethodPost {
 		switch path {
 		case "/ui/api/v1/ccsds/tc:protect":
-			return accessRule{planes: data, scopes: []string{"ccsds:tc:protect"}}, true
+			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:tc:protect"}}, true
 		case "/ui/api/v1/ccsds/aos:unprotect":
-			return accessRule{planes: data, scopes: []string{"ccsds:aos:unprotect"}}, true
+			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:aos:unprotect"}}, true
 		}
 	}
 
 	if strings.HasPrefix(path, "/ui/api/v1/audit/") && method == http.MethodGet {
-		return accessRule{planes: management, scopes: []string{"audit:read"}}, true
+		return accessRule{plane: principal.PlaneOps, scopes: []string{"audit:read"}}, true
 	}
 	if method == http.MethodGet {
 		switch path {
 		case "/ui/api/v1/ops/ccsds/status", "/ui/api/v1/ops/health", "/ui/api/v1/ops/db/status":
-			return accessRule{planes: ops, scopes: []string{"ops:read"}}, true
+			return accessRule{plane: principal.PlaneOps, scopes: []string{"ops:read"}}, true
 		}
 	}
 
@@ -250,32 +208,6 @@ func requestID(r *http.Request) string {
 		return v
 	}
 	return ""
-}
-
-func claimsToPrincipal(c *jwt.Claims, method string) *principal.Principal {
-	p := &principal.Principal{
-		ID:         c.Sub,
-		TenantID:   c.Tenant,
-		AuthMethod: method,
-	}
-	if c.Scope != "" {
-		p.Scopes = strings.Split(c.Scope, " ")
-	}
-	if c.Roles != "" {
-		p.Roles = strings.Split(c.Roles, " ")
-	}
-	switch c.Plane {
-	case "management":
-		p.Plane = principal.PlaneManagement
-	case "ops":
-		p.Plane = principal.PlaneOps
-	default:
-		p.Plane = principal.PlaneData
-	}
-	if c.NodeID != "" {
-		p.NodeID = c.NodeID
-	}
-	return p
 }
 
 // writeError writes a structured error response.

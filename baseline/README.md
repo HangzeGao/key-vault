@@ -41,14 +41,17 @@ successfully protected Next-SPI frame records `ACTIVE` ground evidence.
 default. Override the directory with `KVLT_STATE_DIR`, or only the database
 file with `KVLT_STATE_DB`. No runtime state is placed in `/tmp`.
 
-Open <http://localhost:8080/ui/login>. Development credentials are:
+Open <http://localhost:8080/ui/login>. The Data interface listens on port 8081.
+Development credentials are:
 
 | Purpose | Token |
 | --- | --- |
-| TC protect / AOS unprotect | `mission-data-token-baseline` |
-| Mission operations console | `mission-console-token-baseline` |
+| TC protect / AOS unprotect | `mission-data-token-baseline-000001` |
+| Mission operations console | `mission-console-token-baseline-0001` |
 
-These static tokens, plain HTTP, and shell TPM access are development-only.
+Production replaces these examples with independent 256-bit random tokens in a
+0600 file. HTTPS uses one server certificate; callers pin its public-key
+fingerprint. No client CA, client certificate, JWT issuer, or HMAC key is used.
 
 ## Verify
 
@@ -70,12 +73,12 @@ record below `build/release/`. Ordinary test success alone is not release eviden
 | Entry point | Purpose |
 | --- | --- |
 | `GET /healthz` | Process liveness |
-| `POST /ui/api/v1/ccsds/tc:protect` | Transform one complete plain TC frame into a complete protected frame |
-| `POST /ui/api/v1/ccsds/aos:unprotect` | Provisional AOS decrypt endpoint; not a frozen release contract |
-| `GET /ui/api/v1/audit/*` | Read and verify audit chains |
-| `GET /ui/api/v1/ops/health` | TPM, policy, and SQLite readiness |
-| `GET /ui/api/v1/ops/db/status` | Redacted local-state diagnostics |
-| `GET /ui/api/v1/ops/ccsds/status` | Security Association and counter state |
+| Data `POST /ui/api/v1/ccsds/tc:protect` | Transform one complete plain TC frame into a complete protected frame |
+| Data `POST /ui/api/v1/ccsds/aos:unprotect` | Provisional AOS decrypt endpoint; not a frozen release contract |
+| Ops `GET /ui/api/v1/audit/*` | Read and verify audit chains |
+| Ops `GET /ui/api/v1/ops/health` | TPM, policy, and SQLite readiness |
+| Ops `GET /ui/api/v1/ops/db/status` | Redacted local-state diagnostics |
+| Ops `GET /ui/api/v1/ops/ccsds/status` | Security Association and counter state |
 
 See [CCSDS Link Security](docs/CCSDS_LINK_SECURITY.md),
 [Ground/Flight Architecture](docs/TC_GROUND_FLIGHT_ARCHITECTURE.md),
