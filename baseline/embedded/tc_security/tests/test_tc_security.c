@@ -515,7 +515,8 @@ static int test_runtime_status(const char *path) {
     if (!load_vector(path, &vector) || !init_ordinary(&context, &vector, &callbacks) ||
         tcsec_get_runtime_status(&context, &status) != TCSEC_OK ||
         status.self_test != TCSEC_SELF_TEST_PASSED ||
-        status.crypto_backend != TCSEC_CRYPTO_BACKEND_SOFTWARE ||
+        (status.crypto_backend != TCSEC_CRYPTO_BACKEND_SOFTWARE &&
+         status.crypto_backend != TCSEC_CRYPTO_BACKEND_ARMV7_NEON) ||
         status.receive_count != 0u || status.current_spi != vector.spi ||
         status.next_spi != (uint16_t)(vector.spi + 1u) ||
         status.recovery_spi != 0x7002u ||

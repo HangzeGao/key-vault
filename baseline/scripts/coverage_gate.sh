@@ -35,6 +35,7 @@ mkdir -p -- "$COVERAGE_DIR"
 readonly C_SOURCES=(
   src/tc_security.c
   src/tc_security_nvm.c
+  src/selftest.c
   src/sm4.c
   src/hctr.c
   src/gcm.c

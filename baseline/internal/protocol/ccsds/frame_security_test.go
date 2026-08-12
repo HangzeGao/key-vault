@@ -300,6 +300,32 @@ func TestRootPrepareMustMatchProvisionedCurrentAndNext(t *testing.T) {
 	}
 }
 
+func TestRootPrepareFailsClosedOnMissingStateAndExhaustedRecoveryCounter(t *testing.T) {
+	command := RootPrepareCommand{TransactionID: 1, ExpectedCurrentRootVersion: 7, NewRootVersion: 8,
+		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4HCTR,
+		NewOperationalRoot: bytes.Repeat([]byte{1}, 16)}
+	header := []byte{0x20, 1, 0, 0, 1}
+	missingCurrent, _ := newTestSecurity(t, &fakeCore{}, recoveryAssociation(), nextTCAssociation())
+	if _, err := missingCurrent.ProtectRootPrepareFrame(context.Background(), "tenant-1", header, command); !errors.Is(err, ErrAssociationNotFound) {
+		t.Fatalf("missing current error=%v", err)
+	}
+	missingNext, _ := newTestSecurity(t, &fakeCore{}, recoveryAssociation(), tcAssociation())
+	if _, err := missingNext.ProtectRootPrepareFrame(context.Background(), "tenant-1", header, command); !errors.Is(err, ErrAssociationNotFound) {
+		t.Fatalf("missing next error=%v", err)
+	}
+	current, next := tcAssociation(), nextTCAssociation()
+	next.KeyVersion = 8
+	missingRecovery, _ := newTestSecurity(t, &fakeCore{}, current, next)
+	if _, err := missingRecovery.ProtectRootPrepareFrame(context.Background(), "tenant-1", header, command); !errors.Is(err, ErrAssociationNotFound) {
+		t.Fatalf("missing recovery error=%v", err)
+	}
+	exhausted, store := newTestSecurity(t, &fakeCore{}, recoveryAssociation(), current, next)
+	store.txNext[recoveryAssociation().ID] = uint64(1) << 32
+	if _, err := exhausted.ProtectRootPrepareFrame(context.Background(), "tenant-1", header, command); !errors.Is(err, ErrCounterExhausted) {
+		t.Fatalf("exhausted recovery error=%v", err)
+	}
+}
+
 func TestRootPrepareTransactionIsStrict(t *testing.T) {
 	command := RootPrepareCommand{TransactionID: 1, ExpectedCurrentRootVersion: 1, NewRootVersion: 2,
 		NextSecurityEpoch: 3, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4HCTR,

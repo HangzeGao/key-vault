@@ -23,6 +23,8 @@ cd "$ROOT_DIR"
 "$go_bin" test ./...
 "$go_bin" test -count=1 -run '^TestTCDataPlaneAPIProducesFlightAcceptedVector$' ./internal/api/ccsds
 
+GO_BIN="$go_bin" bash scripts/armv7_gate.sh
+
 coverage_output="$(bash scripts/coverage_gate.sh)"
 printf '%s\n' "$coverage_output"
 c_coverage="$(printf '%s\n' "$coverage_output" | awk '/Flight C line coverage gate passed/ {gsub(/%/,"",$7); print $7}')"
@@ -46,7 +48,7 @@ ordinary_hash="$(sha256sum testdata/ccsds_tc_sm4_hctr.txt | awk '{print $1}')"
 recovery_hash="$(sha256sum testdata/ccsds_tc_sm4_gcm_recovery.txt | awk '{print $1}')"
 cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
 {
-  "format_version": 1,
+  "format_version": 2,
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_commit": "$commit",
   "dirty_worktree": $dirty,
@@ -56,6 +58,9 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "ordinary_vector_sha256": "$ordinary_hash",
   "recovery_vector_sha256": "$recovery_hash",
   "api_to_flight_vector": "passed",
+  "armv7_cross_compile": "passed",
+  "armv7_qemu_neon": "passed",
+  "go_x86_armv7_differential_records": 256,
   "frontend_test": "passed",
   "frontend_build": "passed"
 }

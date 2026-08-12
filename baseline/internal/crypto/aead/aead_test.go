@@ -191,3 +191,15 @@ func TestCipherConstructionAndInputRejections(t *testing.T) {
 		t.Fatal("HCTR accepted short tweak")
 	}
 }
+
+func TestCipherConstructorsCoverEverySupportedEncryptionSuite(t *testing.T) {
+	for _, id := range []suite.ID{suite.AES256GCM, suite.SM4GCM, suite.AES256CTR, suite.SM4CTR, suite.SM4HCTR} {
+		primitive, err := New(id, make([]byte, id.WorkingKeyBytes()))
+		if err != nil || primitive.NonceSize() == 0 {
+			t.Fatalf("suite=%s primitive=%v err=%v", id, primitive, err)
+		}
+	}
+	if _, err := New(suite.SM4CMAC, make([]byte, suite.SM4CMAC.WorkingKeyBytes())); err == nil {
+		t.Fatal("SM4 CMAC constructed as cipher")
+	}
+}

@@ -98,6 +98,21 @@ func TestMissionProfileAndFlightStatusSurviveRestart(t *testing.T) {
 	if err := store.BindMissionProfile(ctx, "tenant-1", digest); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.BindMissionProfile(ctx, "tenant-1", digest); err != nil {
+		t.Fatalf("idempotent bind error=%v", err)
+	}
+	if err := store.BindMissionProfile(ctx, "", digest); !errors.Is(err, ccsds.ErrAssociationState) {
+		t.Fatalf("empty tenant bind error=%v", err)
+	}
+	if _, err := store.ReadMissionProfileDigest(ctx, "missing"); !errors.Is(err, ccsds.ErrAssociationNotFound) {
+		t.Fatalf("missing profile error=%v", err)
+	}
+	if err := store.ObserveFlightSecurityStatus(ctx, "", ccsds.FlightSecurityStatus{}); !errors.Is(err, ccsds.ErrAssociationState) {
+		t.Fatalf("invalid flight observation error=%v", err)
+	}
+	if _, err := store.ReadFlightSecurityStatus(ctx, "missing"); !errors.Is(err, ccsds.ErrAssociationNotFound) {
+		t.Fatalf("missing flight status error=%v", err)
+	}
 	other := digest
 	other[0] ^= 1
 	if err := store.BindMissionProfile(ctx, "tenant-1", other); !errors.Is(err, ccsds.ErrAssociationState) {
@@ -122,6 +137,37 @@ func TestMissionProfileAndFlightStatusSurviveRestart(t *testing.T) {
 	loaded, err := store.ReadFlightSecurityStatus(ctx, "tenant-1")
 	if err != nil || loaded.ReceiveCount != ^uint64(0) || loaded.ProfileDigest != digest || loaded.NextSPI != 0 {
 		t.Fatalf("flight=%+v err=%v", loaded, err)
+	}
+}
+
+func TestCorruptMissionAndFlightStatusRowsFailClosed(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, filepath.Join(t.TempDir(), "security.db"))
+	defer store.Close()
+	if err := store.EnsureTenant(ctx, "tenant-1", "Mission 1"); err != nil {
+		t.Fatal(err)
+	}
+	digest := [32]byte{1}
+	if err := store.BindMissionProfile(ctx, "tenant-1", digest); err != nil {
+		t.Fatal(err)
+	}
+	status := ccsds.FlightSecurityStatus{FormatVersion: 1, ProfileDigest: digest,
+		SelfTest: ccsds.FlightSelfTestPassed, CryptoBackend: ccsds.FlightBackendSoftware,
+		CurrentSPI: 1, NextSPI: 2, RecoverySPI: 3, SecurityEpoch: 1, RootVersion: 1}
+	if err := store.ObserveFlightSecurityStatus(ctx, "tenant-1", status); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE flight_security_status SET receive_count='bad' WHERE tenant_id='tenant-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadFlightSecurityStatus(ctx, "tenant-1"); err == nil {
+		t.Fatal("invalid flight counter accepted")
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE flight_security_status SET receive_count='0',observed_at='bad' WHERE tenant_id='tenant-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadFlightSecurityStatus(ctx, "tenant-1"); err == nil {
+		t.Fatal("invalid observation time accepted")
 	}
 }
 
