@@ -351,6 +351,28 @@ static int test_sm4_hctr(void) {
            memcmp(partial_recovered, partial_plaintext, sizeof(partial_recovered)) == 0;
 }
 
+static int test_sm4_backend_contract(void) {
+    static const uint8_t key[16] = {
+        0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,0xfe,0xdc,0xba,0x98,0x76,0x54,0x32,0x10
+    };
+    static const uint8_t expected[16] = {
+        0x68,0x1e,0xdf,0x34,0xd2,0x06,0x96,0x5e,0x86,0xb3,0xe9,0x4f,0x53,0x6e,0x42,0x46
+    };
+    tcsec_sm4_key_t context;
+    uint8_t output[16];
+    uint8_t recovered[16];
+    const char *backend;
+    if (tcsec_sm4_key_init(&context, key) != 0) return 0;
+    backend = tcsec_sm4_backend_name(&context);
+    if (backend == NULL ||
+        (strcmp(backend, "software") != 0 && strcmp(backend, "armv7-neon") != 0)) return 0;
+    tcsec_sm4_encrypt_with_key(&context, key, output);
+    tcsec_sm4_decrypt_with_key(&context, output, recovered);
+    tcsec_sm4_key_clear(&context);
+    return memcmp(output, expected, sizeof(output)) == 0 &&
+           memcmp(recovered, key, sizeof(recovered)) == 0;
+}
+
 static int test_shared_kdf_vectors(void) {
     static const uint8_t ordinary_expected[32] = {
         0xd0,0x77,0xe6,0x05,0x2e,0x64,0xfa,0x4b,0x35,0xb2,0x46,0x5d,0x32,0x50,0xdc,0xb7,
@@ -1092,6 +1114,10 @@ int main(int argc, char **argv) {
     }
     if (!test_sm4_hctr()) {
         fprintf(stderr, "SM4-HCTR known-answer test failed\n");
+        return 1;
+    }
+    if (!test_sm4_backend_contract()) {
+        fprintf(stderr, "SM4 backend dispatch contract failed\n");
         return 1;
     }
     if (!test_shared_kdf_vectors()) {

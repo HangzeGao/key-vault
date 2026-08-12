@@ -54,6 +54,12 @@ done
   "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" \
   "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"
 
+"${CC:-cc}" -I"$C_DIR/include" -I"$C_DIR/src" -std=c11 -O2 \
+  -Wall -Wextra -Wpedantic -Werror -DTCSEC_HAVE_ARMV7_NEON_ASM=1 \
+  -DTCSEC_TEST_ARMV7_CAPABILITY=1 "$C_DIR/src/sm4.c" \
+  "$C_DIR/tests/test_sm4_dispatch.c" -o "$COVERAGE_DIR/test_sm4_dispatch"
+"$COVERAGE_DIR/test_sm4_dispatch"
+
 readonly GCOV_OUTPUT="$COVERAGE_DIR/gcov-summary.txt"
 (
   cd "$COVERAGE_DIR"

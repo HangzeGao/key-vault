@@ -81,7 +81,9 @@ static int universal_hash(const uint8_t hash_key[BLOCK_LENGTH],
     uint8_t block[BLOCK_LENGTH] = {0u};
     size_t offset = 0u;
     size_t remaining;
+#if SIZE_MAX > UINT32_MAX
     if (message_length > (UINT64_MAX / 8u) - BLOCK_LENGTH) return -1;
+#endif
     while (message_length - offset >= BLOCK_LENGTH) {
         hash_block(state, hash_key, &message[offset]);
         offset += BLOCK_LENGTH;

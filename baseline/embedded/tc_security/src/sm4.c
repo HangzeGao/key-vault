@@ -2,7 +2,27 @@
 
 #include <string.h>
 
-static const uint8_t sbox[256] = {
+#if defined(TCSEC_HAVE_ARMV7_NEON_ASM) && defined(__linux__)
+#include <sys/auxv.h>
+#ifndef AT_HWCAP
+#define AT_HWCAP 16
+#endif
+#ifndef HWCAP_NEON
+#define HWCAP_NEON (1UL << 12)
+#endif
+#endif
+
+#define TCSEC_SM4_BACKEND_SOFTWARE 0u
+#define TCSEC_SM4_BACKEND_ARMV7_NEON 1u
+
+#if defined(TCSEC_HAVE_ARMV7_NEON_ASM)
+void tcsec_sm4_armv7_neon_encrypt(const uint8_t input[16], uint8_t output[16],
+                                  const uint32_t round_keys[32]);
+void tcsec_sm4_armv7_neon_decrypt(const uint8_t input[16], uint8_t output[16],
+                                  const uint32_t round_keys[32]);
+#endif
+
+const uint8_t tcsec_sm4_sbox[256] = {
     0xd6,0x90,0xe9,0xfe,0xcc,0xe1,0x3d,0xb7,0x16,0xb6,0x14,0xc2,0x28,0xfb,0x2c,0x05,
     0x2b,0x67,0x9a,0x76,0x2a,0xbe,0x04,0xc3,0xaa,0x44,0x13,0x26,0x49,0x86,0x06,0x99,
     0x9c,0x42,0x50,0xf4,0x91,0xef,0x98,0x7a,0x33,0x54,0x0b,0x43,0xed,0xcf,0xac,0x62,
@@ -53,10 +73,10 @@ static uint32_t rotate_left(uint32_t value, uint8_t count) {
 }
 
 static uint32_t substitute(uint32_t value) {
-    return ((uint32_t)sbox[(value >> 24) & 0xffu] << 24) |
-           ((uint32_t)sbox[(value >> 16) & 0xffu] << 16) |
-           ((uint32_t)sbox[(value >> 8) & 0xffu] << 8) |
-           (uint32_t)sbox[value & 0xffu];
+    return ((uint32_t)tcsec_sm4_sbox[(value >> 24) & 0xffu] << 24) |
+           ((uint32_t)tcsec_sm4_sbox[(value >> 16) & 0xffu] << 16) |
+           ((uint32_t)tcsec_sm4_sbox[(value >> 8) & 0xffu] << 8) |
+           (uint32_t)tcsec_sm4_sbox[value & 0xffu];
 }
 
 static uint32_t round_transform(uint32_t value) {
@@ -92,8 +112,8 @@ static void expand_key(const uint8_t key[16], uint32_t round_keys[32]) {
     zero_memory(state, sizeof(state));
 }
 
-static void crypt_block(const uint8_t input[16], uint8_t output[16],
-                        const uint32_t round_keys[32], int decrypt) {
+static void software_crypt_block(const uint8_t input[16], uint8_t output[16],
+                                 const uint32_t round_keys[32], int decrypt) {
     uint32_t state[36];
     uint32_t round;
     state[0] = read_u32_be(&input[0]);
@@ -112,9 +132,30 @@ static void crypt_block(const uint8_t input[16], uint8_t output[16],
     zero_memory(state, sizeof(state));
 }
 
+static uint8_t select_backend(void) {
+#if defined(TCSEC_HAVE_ARMV7_NEON_ASM)
+#if defined(TCSEC_TEST_ARMV7_CAPABILITY)
+    extern int tcsec_test_armv7_neon_available(void);
+    if (tcsec_test_armv7_neon_available() != 0) return TCSEC_SM4_BACKEND_ARMV7_NEON;
+#elif defined(__linux__)
+    if ((getauxval(AT_HWCAP) & HWCAP_NEON) != 0UL) return TCSEC_SM4_BACKEND_ARMV7_NEON;
+#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
+    return TCSEC_SM4_BACKEND_ARMV7_NEON;
+#endif
+#endif
+    return TCSEC_SM4_BACKEND_SOFTWARE;
+}
+
+static int armv7_neon_selected(const tcsec_sm4_key_t *context) {
+    return context->backend == TCSEC_SM4_BACKEND_ARMV7_NEON &&
+           context->backend_inverse == (uint8_t)~TCSEC_SM4_BACKEND_ARMV7_NEON;
+}
+
 int tcsec_sm4_key_init(tcsec_sm4_key_t *context, const uint8_t key[16]) {
     if (context == NULL || key == NULL) return -1;
     expand_key(key, context->round_keys);
+    context->backend = select_backend();
+    context->backend_inverse = (uint8_t)~context->backend;
     return 0;
 }
 
@@ -124,23 +165,40 @@ void tcsec_sm4_key_clear(tcsec_sm4_key_t *context) {
 
 void tcsec_sm4_encrypt_with_key(const tcsec_sm4_key_t *context,
                                 const uint8_t input[16], uint8_t output[16]) {
-    crypt_block(input, output, context->round_keys, 0);
+#if defined(TCSEC_HAVE_ARMV7_NEON_ASM)
+    if (armv7_neon_selected(context)) {
+        tcsec_sm4_armv7_neon_encrypt(input, output, context->round_keys);
+        return;
+    }
+#endif
+    software_crypt_block(input, output, context->round_keys, 0);
 }
 
 void tcsec_sm4_decrypt_with_key(const tcsec_sm4_key_t *context,
                                 const uint8_t input[16], uint8_t output[16]) {
-    crypt_block(input, output, context->round_keys, 1);
+#if defined(TCSEC_HAVE_ARMV7_NEON_ASM)
+    if (armv7_neon_selected(context)) {
+        tcsec_sm4_armv7_neon_decrypt(input, output, context->round_keys);
+        return;
+    }
+#endif
+    software_crypt_block(input, output, context->round_keys, 1);
 }
 
 int tcsec_sm4_encrypt_block(const uint8_t key[16],
                             const uint8_t input[16],
                             uint8_t output[16]) {
-    uint32_t round_keys[32];
+    tcsec_sm4_key_t context;
     if (key == NULL || input == NULL || output == NULL) {
         return -1;
     }
-    expand_key(key, round_keys);
-    crypt_block(input, output, round_keys, 0);
-    zero_memory(round_keys, sizeof(round_keys));
+    if (tcsec_sm4_key_init(&context, key) != 0) return -1;
+    tcsec_sm4_encrypt_with_key(&context, input, output);
+    tcsec_sm4_key_clear(&context);
     return 0;
+}
+
+const char *tcsec_sm4_backend_name(const tcsec_sm4_key_t *context) {
+    if (context != NULL && armv7_neon_selected(context)) return "armv7-neon";
+    return "software";
 }

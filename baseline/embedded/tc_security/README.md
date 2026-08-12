@@ -37,6 +37,22 @@ A single context owns one replay and rotation state machine, so the flight
 software must serialize calls on that same context and must not re-enter it
 from its callbacks.
 
+## ARMv7 SM4 acceleration
+
+ARMv7 targets build both the software SM4 implementation and the ARMv7/NEON
+assembly adapter. Linux selects NEON from `AT_HWCAP/HWCAP_NEON`; freestanding
+ARMv7 builds compiled with NEON select it from the target capability. A target
+without NEON always uses software. This selection is internal to each expanded
+SM4 key and requires no flight-software callback or `tcsec_*` configuration.
+Consequently SM4-HCTR, Recovery SM4-GCM, and CMAC KDF share the same automatic
+selection.
+
+`make print-backend` reports which implementations are in the binary. Set
+`ARMV7_NEON=0` only for an explicit software-only build, or `ARMV7_NEON=1` for
+an ARMv7 cross build whose compiler target has NEON enabled. QEMU/KAT validates
+instruction correctness; final-board WCET, throughput, and side-channel
+evidence remain release requirements.
+
 ## Fixed SEU hardening
 
 The module has one fixed Balanced hardening contract. It is not part of

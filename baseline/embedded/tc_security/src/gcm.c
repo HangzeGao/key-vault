@@ -9,14 +9,6 @@ static void zeroize(void *memory, size_t length) {
     while (length-- != 0u) *cursor++ = 0u;
 }
 
-static int encrypt_block(tcsec_suite_t suite, const uint8_t *key,
-                         const uint8_t input[16], uint8_t output[16]) {
-    if (suite == TCSEC_SUITE_SM4_GCM) {
-        return tcsec_sm4_encrypt_block(key, input, output);
-    }
-    return -1;
-}
-
 static void shift_right_one(uint8_t value[16]) {
     uint8_t carry = 0u;
     size_t index;
@@ -105,14 +97,18 @@ int tcsec_gcm_open(tcsec_suite_t suite, const uint8_t *key,
     uint8_t j0[16] = {0u};
     uint8_t mask[16];
     uint8_t expected_tag[16];
+    tcsec_sm4_key_t key_context;
     size_t offset = 0u;
     int result = -1;
     if (key == NULL || nonce == NULL || tag == NULL ||
         (aad_length != 0u && aad == NULL) ||
-        (ciphertext_length != 0u && (ciphertext == NULL || plaintext == NULL)) ||
-        aad_length > UINT64_MAX / 8u || ciphertext_length > UINT64_MAX / 8u ||
+        (ciphertext_length != 0u && (ciphertext == NULL || plaintext == NULL))) return -1;
+#if SIZE_MAX > UINT32_MAX
+    if (aad_length > UINT64_MAX / 8u || ciphertext_length > UINT64_MAX / 8u ||
         ciphertext_length > ((uint64_t)UINT32_MAX - 1u) * 16u) return -1;
-    if (encrypt_block(suite, key, hash_key, hash_key) != 0) goto done;
+#endif
+    if (suite != TCSEC_SUITE_SM4_GCM || tcsec_sm4_key_init(&key_context, key) != 0) return -1;
+    tcsec_sm4_encrypt_with_key(&key_context, hash_key, hash_key);
     ghash_bytes(state, hash_key, aad, aad_length);
     ghash_bytes(state, hash_key, ciphertext, ciphertext_length);
     write_u64_be(&length_block[0], (uint64_t)aad_length * 8u);
@@ -120,7 +116,7 @@ int tcsec_gcm_open(tcsec_suite_t suite, const uint8_t *key,
     ghash_block(state, hash_key, length_block);
     memcpy(j0, nonce, TCSEC_GCM_NONCE_LENGTH);
     j0[15] = 1u;
-    if (encrypt_block(suite, key, j0, mask) != 0) goto done;
+    tcsec_sm4_encrypt_with_key(&key_context, j0, mask);
     for (offset = 0u; offset < 16u; ++offset) expected_tag[offset] = (uint8_t)(state[offset] ^ mask[offset]);
     if (!constant_time_equal(expected_tag, tag)) {
         result = -2;
@@ -134,13 +130,14 @@ int tcsec_gcm_open(tcsec_suite_t suite, const uint8_t *key,
         size_t index;
         if (count > 16u) count = 16u;
         increment_counter32(mask);
-        (void)encrypt_block(suite, key, mask, stream);
+        tcsec_sm4_encrypt_with_key(&key_context, mask, stream);
         for (index = 0u; index < count; ++index) plaintext[offset + index] = (uint8_t)(ciphertext[offset + index] ^ stream[index]);
         zeroize(stream, sizeof(stream));
         offset += count;
     }
     result = 0;
 done:
+    tcsec_sm4_key_clear(&key_context);
     zeroize(hash_key, sizeof(hash_key));
     zeroize(state, sizeof(state));
     zeroize(length_block, sizeof(length_block));

@@ -366,6 +366,20 @@ make release-gate
 
 一次飞行候选发布还必须完成目标板 KAT 自检、实际编译器/板卡资源与时间测试、物理 NVM 故障恢复，以及威胁模型要求的侧信道测试。
 
+### ARMv7 SM4 加速门禁
+
+星载构建在 ARMv7 目标上默认编译 `ARMv7/NEON + software` 两个 SM4 后端。运行时在 Linux 使用 `AT_HWCAP/HWCAP_NEON`，在裸机或 RTOS 使用编译器提供的 NEON 目标能力，自动选择后端；能力不存在时必须选择 software。调用方不得选择后端，HCTR、GCM 与 KDF 共用 SM4 模块的内部调度。
+
+每个 ARMv7 飞行候选必须增加以下目标板证据：
+
+- 强制 software 与自动选择路径分别执行 SM4、HCTR、GCM、KDF KAT，输出逐字节一致；
+- NEON 可用时断言诊断后端为 `armv7-neon`，不可用时断言为 `software`；
+- 非 NEON ARMv7 板不得产生非法指令；
+- 测量普通 TC 解密端到端 WCET、单分组 SM4 和长帧吞吐，报告相对 software 的提升；
+- 对汇编后端单独执行寄存器清理审查、已知/随机差分测试和侧信道测试。
+
+CI 若没有 ARMv7 交叉编译器与 QEMU，只能验证 software 回退，不能把 x86 结果作为汇编后端合格证据。ARMv7 汇编代码发生变化时，目标板证据是发布阻断项。
+
 ## 15. 规范和测试依据
 
 - GB/T 32907-2016《信息安全技术 SM4 分组密码算法》
