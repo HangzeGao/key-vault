@@ -293,6 +293,7 @@ tcsec_status_t tcsec_init(tcsec_context_t *context, const tcsec_config_t *config
         callbacks->monotonic_time_us == NULL)
         return TCSEC_INVALID_ARGUMENT;
     memset(context, 0, sizeof(*context));
+    memcpy(context->profile_digest, config->profile_digest, TCSEC_PROFILE_DIGEST_LENGTH);
     if (tcsec_crypto_self_test(&context->crypto_backend) != 0) {
         context->self_test_state = TCSEC_SELF_TEST_LOCKED;
         context_seal(context);
@@ -302,7 +303,6 @@ tcsec_status_t tcsec_init(tcsec_context_t *context, const tcsec_config_t *config
     recovery = &config->recovery;
     if (!tcsec_config_valid_internal(config))
         return TCSEC_INVALID_CONFIGURATION;
-    memcpy(context->profile_digest, config->profile_digest, TCSEC_PROFILE_DIGEST_LENGTH);
     context->spacecraft_id = ordinary->spacecraft_id;
     context->current_suite = ordinary->suite;
     context->next_suite = ordinary->pending_root_present != 0u

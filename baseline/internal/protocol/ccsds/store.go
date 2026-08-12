@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Store owns CCSDS-specific association, transmit, and replay state. It is a
@@ -15,6 +16,9 @@ type Store interface {
 	GetTransmitAssociation(ctx context.Context, tenantID string, direction Direction) (*SecurityAssociation, error)
 	ReadOperationsState(ctx context.Context, tenantID string) ([]AssociationRuntimeState, error)
 	ReadTCRotationState(ctx context.Context, tenantID string) (*TCRotationState, error)
+	ReadMissionProfileDigest(ctx context.Context, tenantID string) ([32]byte, error)
+	ReadFlightSecurityStatus(ctx context.Context, tenantID string) (*ObservedFlightSecurityStatus, error)
+	ObserveFlightSecurityStatus(ctx context.Context, tenantID string, status FlightSecurityStatus) error
 	MarkTCRotationPrepared(ctx context.Context, tenantID string, state TCRotationState) error
 	MarkTCRotationFrameProduced(ctx context.Context, tenantID, associationID string) error
 	PromoteNextTC(ctx context.Context, tenantID string) error
@@ -33,6 +37,8 @@ type MemoryStore struct {
 	txNext   map[string]uint64
 	rx       map[string]ReplayState
 	rotation map[string]TCRotationState
+	profiles map[string][32]byte
+	flight   map[string]ObservedFlightSecurityStatus
 }
 
 // ReplayState is the durable representation of a sliding replay window.
@@ -48,6 +54,7 @@ func NewMemoryStore(associations ...SecurityAssociation) (*MemoryStore, error) {
 	s := &MemoryStore{
 		byID: make(map[string]SecurityAssociation), bySPI: make(map[string]string),
 		txNext: make(map[string]uint64), rx: make(map[string]ReplayState), rotation: make(map[string]TCRotationState),
+		profiles: make(map[string][32]byte), flight: make(map[string]ObservedFlightSecurityStatus),
 	}
 	for _, association := range associations {
 		if err := s.PutAssociation(association); err != nil {
@@ -55,6 +62,50 @@ func NewMemoryStore(associations ...SecurityAssociation) (*MemoryStore, error) {
 		}
 	}
 	return s, nil
+}
+
+func (s *MemoryStore) BindMissionProfile(tenantID string, digest [32]byte) error {
+	if tenantID == "" || digest == ([32]byte{}) {
+		return ErrAssociationState
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, ok := s.profiles[tenantID]; ok && existing != digest {
+		return ErrAssociationState
+	}
+	s.profiles[tenantID] = digest
+	return nil
+}
+
+func (s *MemoryStore) ReadMissionProfileDigest(_ context.Context, tenantID string) ([32]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	digest, ok := s.profiles[tenantID]
+	if !ok {
+		return [32]byte{}, ErrAssociationNotFound
+	}
+	return digest, nil
+}
+
+func (s *MemoryStore) ReadFlightSecurityStatus(_ context.Context, tenantID string) (*ObservedFlightSecurityStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	status, ok := s.flight[tenantID]
+	if !ok {
+		return nil, ErrAssociationNotFound
+	}
+	copy := status
+	return &copy, nil
+}
+
+func (s *MemoryStore) ObserveFlightSecurityStatus(_ context.Context, tenantID string, status FlightSecurityStatus) error {
+	if tenantID == "" || status.Validate() != nil {
+		return ErrAssociationState
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.flight[tenantID] = ObservedFlightSecurityStatus{FlightSecurityStatus: status, ObservedAt: time.Now().UTC()}
+	return nil
 }
 
 func (s *MemoryStore) PutAssociation(sa SecurityAssociation) error {

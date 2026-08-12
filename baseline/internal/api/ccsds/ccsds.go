@@ -6,6 +6,7 @@ package ccsds
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -22,6 +23,7 @@ type Service interface {
 	ProtectTCFrame(ctx context.Context, tenantID string, frame []byte) (*protocol.ProtectedTCFrame, error)
 	UnprotectAOS(ctx context.Context, tenantID string, frame []byte) (*protocol.PlainAOSFrame, error)
 	OperationsStatus(ctx context.Context, tenantID string) (*protocol.OperationsStatus, error)
+	ObserveFlightSecurityStatus(ctx context.Context, tenantID string, status protocol.FlightSecurityStatus) error
 }
 
 type Handler struct {
@@ -33,6 +35,7 @@ func New(service Service) *Handler { return &Handler{service: service} }
 func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /ui/api/v1/ccsds/tc:protect", h.protectTC)
 	mux.HandleFunc("POST /ui/api/v1/ccsds/aos:unprotect", h.unprotectAOS)
+	mux.HandleFunc("POST /ui/api/v1/ccsds/flight-status:observe", h.observeFlightStatus)
 }
 
 // OpsRoutes exposes a read-only operational projection. It intentionally has
@@ -68,10 +71,30 @@ type operationsStatusResponse struct {
 		Next     *associationStatusResponse `json:"next"`
 		Recovery *associationStatusResponse `json:"recovery"`
 	} `json:"tc"`
-	TCRotation *tcRotationStatusResponse   `json:"tc_rotation"`
-	AOS        []associationStatusResponse `json:"aos"`
-	AOSFormat  string                      `json:"aos_format"`
-	Warnings   []string                    `json:"warnings"`
+	TCRotation           *tcRotationStatusResponse   `json:"tc_rotation"`
+	AOS                  []associationStatusResponse `json:"aos"`
+	AOSFormat            string                      `json:"aos_format"`
+	ProfileDigest        string                      `json:"profile_digest"`
+	Flight               *flightStatusResponse       `json:"flight"`
+	FlightReconciliation string                      `json:"flight_reconciliation"`
+	Warnings             []string                    `json:"warnings"`
+}
+
+type flightStatusResponse struct {
+	ObservedAt              string                       `json:"observed_at"`
+	SelfTest                protocol.FlightSelfTestState `json:"self_test"`
+	CryptoBackend           protocol.FlightCryptoBackend `json:"crypto_backend"`
+	CurrentSPI              uint16                       `json:"current_spi"`
+	NextSPI                 uint16                       `json:"next_spi"`
+	RecoverySPI             uint16                       `json:"recovery_spi"`
+	SecurityEpoch           uint32                       `json:"security_epoch"`
+	RootVersion             uint32                       `json:"root_version"`
+	PendingRootPresent      bool                         `json:"pending_root_present"`
+	ReceiveCount            uint64                       `json:"receive_count"`
+	LastReceiveUS           uint64                       `json:"last_receive_us"`
+	MaxReceiveUS            uint64                       `json:"max_receive_us"`
+	CycleLimitExceededCount uint64                       `json:"cycle_limit_exceeded_count"`
+	ClockAnomalyCount       uint64                       `json:"clock_anomaly_count"`
 }
 
 type tcRotationStatusResponse struct {
@@ -101,7 +124,17 @@ func (h *Handler) operationsStatus(w http.ResponseWriter, r *http.Request) {
 	response := operationsStatusResponse{
 		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Status: status.Status,
 		Ready: status.Ready, AOS: make([]associationStatusResponse, 0, len(status.AOSActive)), AOSFormat: status.AOSFormat,
-		Warnings: append([]string{}, status.Warnings...),
+		Warnings:      append([]string{}, status.Warnings...),
+		ProfileDigest: status.ProfileDigest, FlightReconciliation: status.FlightReconciliation,
+	}
+	if status.FlightStatus != nil {
+		flight := status.FlightStatus
+		response.Flight = &flightStatusResponse{ObservedAt: flight.ObservedAt.UTC().Format(time.RFC3339Nano),
+			SelfTest: flight.SelfTest, CryptoBackend: flight.CryptoBackend, CurrentSPI: flight.CurrentSPI,
+			NextSPI: flight.NextSPI, RecoverySPI: flight.RecoverySPI, SecurityEpoch: flight.SecurityEpoch,
+			RootVersion: flight.RootVersion, PendingRootPresent: flight.PendingRootPresent,
+			ReceiveCount: flight.ReceiveCount, LastReceiveUS: flight.LastReceiveUS, MaxReceiveUS: flight.MaxReceiveUS,
+			CycleLimitExceededCount: flight.CycleLimitExceededCount, ClockAnomalyCount: flight.ClockAnomalyCount}
 	}
 	response.TC.Current = mapAssociationStatus(status.TCCurrent)
 	response.TC.Next = mapAssociationStatus(status.TCNext)
@@ -123,6 +156,53 @@ func (h *Handler) operationsStatus(w http.ResponseWriter, r *http.Request) {
 		response.AOS = append(response.AOS, *mapAssociationStatus(&status.AOSActive[i]))
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+type observeFlightStatusRequest struct {
+	FormatVersion           uint16                       `json:"format_version"`
+	ProfileDigest           string                       `json:"profile_digest"`
+	SelfTest                protocol.FlightSelfTestState `json:"self_test"`
+	CryptoBackend           protocol.FlightCryptoBackend `json:"crypto_backend"`
+	CurrentSPI              uint16                       `json:"current_spi"`
+	NextSPI                 uint16                       `json:"next_spi"`
+	RecoverySPI             uint16                       `json:"recovery_spi"`
+	SecurityEpoch           uint32                       `json:"security_epoch"`
+	RootVersion             uint32                       `json:"root_version"`
+	PendingRootPresent      bool                         `json:"pending_root_present"`
+	ReceiveCount            uint64                       `json:"receive_count"`
+	LastReceiveUS           uint64                       `json:"last_receive_us"`
+	MaxReceiveUS            uint64                       `json:"max_receive_us"`
+	CycleLimitExceededCount uint64                       `json:"cycle_limit_exceeded_count"`
+	ClockAnomalyCount       uint64                       `json:"clock_anomaly_count"`
+}
+
+func (h *Handler) observeFlightStatus(w http.ResponseWriter, r *http.Request) {
+	_, tenantID, ok := authorize(w, r, "ccsds:aos:unprotect")
+	if !ok {
+		return
+	}
+	var request observeFlightStatusRequest
+	if err := middleware.DecodeJSONStrict(middleware.BodyFromContext(r.Context()), &request); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid json")
+		return
+	}
+	digest, err := hex.DecodeString(request.ProfileDigest)
+	if err != nil || len(digest) != 32 {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "profile_digest must be 32-byte hexadecimal")
+		return
+	}
+	status := protocol.FlightSecurityStatus{FormatVersion: request.FormatVersion, SelfTest: request.SelfTest,
+		CryptoBackend: request.CryptoBackend, CurrentSPI: request.CurrentSPI, NextSPI: request.NextSPI,
+		RecoverySPI: request.RecoverySPI, SecurityEpoch: request.SecurityEpoch, RootVersion: request.RootVersion,
+		PendingRootPresent: request.PendingRootPresent, ReceiveCount: request.ReceiveCount,
+		LastReceiveUS: request.LastReceiveUS, MaxReceiveUS: request.MaxReceiveUS,
+		CycleLimitExceededCount: request.CycleLimitExceededCount, ClockAnomalyCount: request.ClockAnomalyCount}
+	copy(status.ProfileDigest[:], digest)
+	if err := h.service.ObserveFlightSecurityStatus(r.Context(), tenantID, status); err != nil {
+		writeProtocolError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func mapAssociationStatus(state *protocol.AssociationRuntimeState) *associationStatusResponse {

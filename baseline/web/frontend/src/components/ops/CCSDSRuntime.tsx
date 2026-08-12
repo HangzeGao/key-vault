@@ -10,6 +10,13 @@ const warningCopy: Record<string, string> = {
   TC_CURRENT_AMBIGUOUS: "More than one TC Current association exists. Transmit state is ambiguous.",
   TC_NEXT_AMBIGUOUS: "More than one TC Next association exists. Staged state is ambiguous.",
   TC_RECOVERY_AMBIGUOUS: "More than one active Recovery association exists.",
+  MISSION_PROFILE_NOT_BOUND: "No controlled Mission Security Profile digest is bound to this tenant.",
+  FLIGHT_STATUS_NOT_OBSERVED: "No flight security status has been received through the housekeeping adapter.",
+  FLIGHT_PROFILE_MISMATCH: "Flight and ground are using different Mission Security Profile digests.",
+  FLIGHT_SELF_TEST_LOCKED: "Flight cryptography is locked because startup known-answer testing failed.",
+  FLIGHT_TC_STATE_MISMATCH: "Flight Current SPI, epoch, root version, or Recovery SPI differs from ground.",
+  FLIGHT_CYCLE_LIMIT_EXCEEDED: "Flight TC processing exceeded the 120 ms whole-cycle safety ceiling.",
+  FLIGHT_CLOCK_ANOMALY: "The flight monotonic timing source moved backwards during TC processing.",
 };
 
 export const TC_COUNTER_CAPACITY = 2 ** 32;

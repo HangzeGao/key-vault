@@ -87,6 +87,44 @@ func TestProtocolKeyCRKAndDiagnosticsSurviveRestart(t *testing.T) {
 	}
 }
 
+func TestMissionProfileAndFlightStatusSurviveRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "security.db")
+	store := openTestStore(t, path)
+	if err := store.EnsureTenant(ctx, "tenant-1", "Mission 1"); err != nil {
+		t.Fatal(err)
+	}
+	digest := [32]byte{1, 2, 3}
+	if err := store.BindMissionProfile(ctx, "tenant-1", digest); err != nil {
+		t.Fatal(err)
+	}
+	other := digest
+	other[0] ^= 1
+	if err := store.BindMissionProfile(ctx, "tenant-1", other); !errors.Is(err, ccsds.ErrAssociationState) {
+		t.Fatalf("changed profile binding error=%v", err)
+	}
+	status := ccsds.FlightSecurityStatus{FormatVersion: ccsds.FlightSecurityStatusVersion,
+		ProfileDigest: digest, SelfTest: ccsds.FlightSelfTestPassed, CryptoBackend: ccsds.FlightBackendARMv7NEON,
+		CurrentSPI: 0xffff, NextSPI: 0, RecoverySPI: 0x7001, SecurityEpoch: 5, RootVersion: 3,
+		ReceiveCount: ^uint64(0), LastReceiveUS: 12, MaxReceiveUS: 44}
+	if err := store.ObserveFlightSecurityStatus(ctx, "tenant-1", status); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openTestStore(t, path)
+	defer store.Close()
+	loadedDigest, err := store.ReadMissionProfileDigest(ctx, "tenant-1")
+	if err != nil || loadedDigest != digest {
+		t.Fatalf("digest=%x err=%v", loadedDigest, err)
+	}
+	loaded, err := store.ReadFlightSecurityStatus(ctx, "tenant-1")
+	if err != nil || loaded.ReceiveCount != ^uint64(0) || loaded.ProfileDigest != digest || loaded.NextSPI != 0 {
+		t.Fatalf("flight=%+v err=%v", loaded, err)
+	}
+}
+
 func TestCCSDSCounterPromotionReplayAndPersistence(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "security.db")

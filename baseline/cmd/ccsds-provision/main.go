@@ -89,6 +89,9 @@ func run(ctx context.Context, options provisionOptions) error {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
 	defer app.Store.Close()
+	if err := app.Store.BindMissionProfile(ctx, profile.TenantID, digest); err != nil {
+		return fmt.Errorf("bind mission profile digest: %w", err)
+	}
 
 	ids := provisionIDs(profile.TenantID, profile.TC.CurrentRootVersion, profile.TC.NextRootVersion)
 	keySpecs := []keySpec{

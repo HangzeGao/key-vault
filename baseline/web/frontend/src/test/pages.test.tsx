@@ -19,6 +19,11 @@ const get = vi.mocked(api.get);
 const emptyResponse = (path: string) => {
   if (path.endsWith("/ops/ccsds/status")) return {
     observed_at: new Date().toISOString(), status: "READY", ready: true, warnings: [],
+    profile_digest: "01".repeat(32), flight_reconciliation: "MATCHED",
+    flight: { observed_at: new Date().toISOString(), self_test: "PASSED", crypto_backend: "SOFTWARE",
+      current_spi: 4097, next_spi: 4098, recovery_spi: 28673, security_epoch: 5, root_version: 2,
+      pending_root_present: false, receive_count: 12, last_receive_us: 40, max_receive_us: 55,
+      cycle_limit_exceeded_count: 0, clock_anomaly_count: 0 },
     tc: {
       current: { id: "tc-current", spi: 4097, direction: "TC_TX", state: "CURRENT", suite_id: "SM4_HCTR", security_epoch: 5, key_version: 2, policy_version: 1, sequence_number_length: 0, transmitted_iv_length: 4, tag_length: 0, replay_window: 0, next_iv_counter: 42, replay_seen: false },
       next: { id: "tc-next", spi: 4098, direction: "TC_TX", state: "NEXT", suite_id: "SM4_HCTR", security_epoch: 6, key_version: 3, policy_version: 1, sequence_number_length: 0, transmitted_iv_length: 4, tag_length: 0, replay_window: 0, next_iv_counter: 0, replay_seen: false },
@@ -31,7 +36,7 @@ const emptyResponse = (path: string) => {
   if (path.endsWith("/ops/db/status")) return {
     driver: "sqlite", status: "ok", observed_at: new Date().toISOString(), connected: true,
     connection: { status: "ok", latency_ms: 3 },
-    schema: { status: "ok", current: 1, expected: 1 },
+    schema: { status: "ok", current: 2, expected: 2 },
     storage: { database_bytes: 4096, wal_bytes: 512, journal_mode: "WAL", synchronous: "FULL" },
     records: { security_associations: 4, audit_events: 12 },
     backup: { status: "operator_managed", rule: "restore only with a new operational SPI/epoch" },

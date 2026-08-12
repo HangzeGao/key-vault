@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 var (
 	ErrNotFound = errors.New("securitystate: not found")
@@ -120,9 +120,9 @@ func (s *Store) migrate(ctx context.Context) error {
 var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS schema_meta (
 		singleton INTEGER PRIMARY KEY CHECK (singleton=1),
-		version INTEGER NOT NULL CHECK (version=1)
+		version INTEGER NOT NULL CHECK (version=2)
 	) STRICT`,
-	`INSERT INTO schema_meta(singleton, version) VALUES(1, 1) ON CONFLICT(singleton) DO NOTHING`,
+	`INSERT INTO schema_meta(singleton, version) VALUES(1, 2) ON CONFLICT(singleton) DO NOTHING`,
 	`CREATE TABLE IF NOT EXISTS tenants (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -143,6 +143,30 @@ var schemaStatements = []string{
 		tags_json TEXT NOT NULL,
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
+	) STRICT`,
+	`CREATE TABLE IF NOT EXISTS mission_profiles (
+		tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+		profile_digest BLOB NOT NULL CHECK (length(profile_digest)=32),
+		bound_at TEXT NOT NULL
+	) STRICT`,
+	`CREATE TABLE IF NOT EXISTS flight_security_status (
+		tenant_id TEXT PRIMARY KEY REFERENCES mission_profiles(tenant_id) ON DELETE CASCADE,
+		format_version INTEGER NOT NULL CHECK (format_version=1),
+		profile_digest BLOB NOT NULL CHECK (length(profile_digest)=32),
+		self_test TEXT NOT NULL CHECK (self_test IN ('PASSED','LOCKED')),
+		crypto_backend TEXT NOT NULL CHECK (crypto_backend IN ('SOFTWARE','ARMV7_NEON')),
+		current_spi INTEGER NOT NULL CHECK (current_spi BETWEEN 0 AND 65535),
+		next_spi INTEGER NOT NULL CHECK (next_spi BETWEEN 0 AND 65535),
+		recovery_spi INTEGER NOT NULL CHECK (recovery_spi BETWEEN 0 AND 65535),
+		security_epoch INTEGER NOT NULL CHECK (security_epoch>0),
+		root_version INTEGER NOT NULL CHECK (root_version>0),
+		pending_root_present INTEGER NOT NULL CHECK (pending_root_present IN (0,1)),
+		receive_count TEXT NOT NULL,
+		last_receive_us TEXT NOT NULL,
+		max_receive_us TEXT NOT NULL,
+		cycle_limit_exceeded_count TEXT NOT NULL,
+		clock_anomaly_count TEXT NOT NULL,
+		observed_at TEXT NOT NULL
 	) STRICT`,
 	`CREATE TABLE IF NOT EXISTS protocol_key_versions (
 		id TEXT PRIMARY KEY,

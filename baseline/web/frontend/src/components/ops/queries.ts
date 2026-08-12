@@ -57,6 +57,24 @@ export interface CCSDSOperationsStatus {
   } | null;
   aos: CCSDSAssociationStatus[];
   aos_format: "NOT_FROZEN" | "FROZEN";
+  profile_digest: string;
+  flight_reconciliation: "NOT_OBSERVED" | "MATCHED" | "MISMATCH";
+  flight: {
+    observed_at: string;
+    self_test: "PASSED" | "LOCKED";
+    crypto_backend: "SOFTWARE" | "ARMV7_NEON";
+    current_spi: number;
+    next_spi: number;
+    recovery_spi: number;
+    security_epoch: number;
+    root_version: number;
+    pending_root_present: boolean;
+    receive_count: number;
+    last_receive_us: number;
+    max_receive_us: number;
+    cycle_limit_exceeded_count: number;
+    clock_anomaly_count: number;
+  } | null;
   warnings: string[];
 }
 
@@ -78,6 +96,10 @@ export function useCCSDSStatus(refetchInterval = 5_000) {
       }
       if (status.aos_format !== "NOT_FROZEN" && status.aos_format !== "FROZEN") {
         throw new Error("invalid CCSDS operations response: aos_format is required");
+      }
+      if (!(status.profile_digest === "" || /^[0-9a-f]{64}$/.test(status.profile_digest)) ||
+          !["NOT_OBSERVED", "MATCHED", "MISMATCH"].includes(status.flight_reconciliation)) {
+        throw new Error("invalid CCSDS operations response: mission profile reconciliation is required");
       }
       return status;
     },

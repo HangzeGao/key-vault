@@ -19,6 +19,12 @@ import (
 type fakeService struct {
 	tenant string
 	input  []byte
+	flight protocol.FlightSecurityStatus
+}
+
+func (service *fakeService) ObserveFlightSecurityStatus(_ context.Context, tenantID string, status protocol.FlightSecurityStatus) error {
+	service.tenant, service.flight = tenantID, status
+	return nil
 }
 
 func (service *fakeService) ProtectTCFrame(_ context.Context, tenantID string, frame []byte) (*protocol.ProtectedTCFrame, error) {
@@ -95,6 +101,22 @@ func TestAOSAPIHasSeparateLeastPrivilegeScope(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden || len(service.input) != 0 {
 		t.Fatalf("status=%d input=%x", response.Code, service.input)
+	}
+}
+
+func TestFlightStatusObservationUsesAOSScopeAndStrictSemantic(t *testing.T) {
+	service := &fakeService{}
+	handler := authenticatedHandler(service, "ccsds:aos:unprotect")
+	body := []byte(`{"format_version":1,"profile_digest":"` + string(bytes.Repeat([]byte("01"), 32)) +
+		`","self_test":"PASSED","crypto_backend":"ARMV7_NEON","current_spi":4097,"next_spi":4098,` +
+		`"recovery_spi":28673,"security_epoch":5,"root_version":2,"pending_root_present":false,` +
+		`"receive_count":10,"last_receive_us":20,"max_receive_us":30,"cycle_limit_exceeded_count":0,"clock_anomaly_count":0}`)
+	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/flight-status:observe", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer test-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent || service.flight.CurrentSPI != 4097 || service.flight.ProfileDigest[0] != 1 {
+		t.Fatalf("status=%d flight=%+v body=%s", response.Code, service.flight, response.Body.String())
 	}
 }
 

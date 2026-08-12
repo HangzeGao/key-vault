@@ -52,6 +52,14 @@ export function TCSecurityPage() {
             </div>
             <p className="ops-panel-note">Rotation: <strong>{snapshot.tc_rotation?.phase ?? "NOT PREPARED"}</strong> · {snapshot.tc_rotation?.evidence ?? "NO GROUND EVIDENCE"}</p>
           </Panel>
+          <Panel title="Flight Crypto Runtime">
+            <div className="ops-budget-list">
+              <div><ShieldCheck size={15} /><span>Startup self-test / backend</span><strong>{snapshot.flight ? `${snapshot.flight.self_test} / ${snapshot.flight.crypto_backend}` : "NOT OBSERVED"}</strong></div>
+              <div><Satellite size={15} /><span>Current SPI / epoch / root</span><strong>{snapshot.flight ? `${snapshot.flight.current_spi.toString(16).toUpperCase().padStart(4, "0")} / ${snapshot.flight.security_epoch} / v${snapshot.flight.root_version}` : "--"}</strong></div>
+              <div><Satellite size={15} /><span>Last / maximum processing</span><strong>{snapshot.flight ? `${snapshot.flight.last_receive_us} / ${snapshot.flight.max_receive_us} µs` : "--"}</strong></div>
+            </div>
+            <p className="ops-panel-note">Ground / flight profile and state: <strong>{snapshot.flight_reconciliation}</strong></p>
+          </Panel>
         </div>
 
         <Panel title={`TC Action Queue / ${tcWarnings.length}`}><WarningList warnings={tcWarnings} /></Panel>

@@ -60,6 +60,14 @@ export function DashboardPage() {
               <div><span>AOS Downlink</span><strong>{snapshot.aos.length > 0 ? "ACTIVE" : "MISSING"}</strong><small>{snapshot.aos_format.replaceAll("_", " ")} · {snapshot.aos.length} associations</small></div>
             </div>
           </Panel>
+          <Panel title="Ground / Flight Reconciliation">
+            <div className="ops-state-matrix">
+              <div><span>Profile digest</span><strong>{snapshot.flight_reconciliation}</strong><small>{snapshot.profile_digest.slice(0, 16)}&hellip;</small></div>
+              <div><span>Flight self-test</span><strong>{snapshot.flight?.self_test ?? "NOT OBSERVED"}</strong><small>{snapshot.flight?.crypto_backend ?? "No backend evidence"}</small></div>
+              <div><span>Flight TC state</span><strong>{snapshot.flight ? formatSPI(snapshot.flight.current_spi) : "--"}</strong><small>{snapshot.flight ? `Epoch ${snapshot.flight.security_epoch} / root v${snapshot.flight.root_version}` : "No housekeeping status"}</small></div>
+              <div><span>Flight processing</span><strong>{snapshot.flight ? `${snapshot.flight.max_receive_us.toLocaleString("en-US")} µs max` : "--"}</strong><small>{snapshot.flight ? `${snapshot.flight.cycle_limit_exceeded_count} cycle overruns` : "No timing evidence"}</small></div>
+            </div>
+          </Panel>
         </div>
 
         <section className="ops-guardrail">

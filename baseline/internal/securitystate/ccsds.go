@@ -1,6 +1,7 @@
 package securitystate
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -160,6 +161,107 @@ func (s *Store) ReadTCRotationState(ctx context.Context, tenantID string) (*ccsd
 		return nil, errors.New("securitystate: invalid persisted TC rotation state")
 	}
 	return &state, nil
+}
+
+func (s *Store) BindMissionProfile(ctx context.Context, tenantID string, digest [32]byte) error {
+	if tenantID == "" || digest == ([32]byte{}) {
+		return ccsds.ErrAssociationState
+	}
+	var existing []byte
+	err := s.db.QueryRowContext(ctx, `SELECT profile_digest FROM mission_profiles WHERE tenant_id=?`, tenantID).Scan(&existing)
+	if err == nil {
+		if !bytes.Equal(existing, digest[:]) {
+			return ccsds.ErrAssociationState
+		}
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return wrap("read mission profile binding", err)
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO mission_profiles(tenant_id,profile_digest,bound_at) VALUES(?,?,?)`,
+		tenantID, digest[:], formatTime(time.Now()))
+	return conflict("bind mission profile", err)
+}
+
+func (s *Store) ReadMissionProfileDigest(ctx context.Context, tenantID string) ([32]byte, error) {
+	var digest [32]byte
+	var encoded []byte
+	err := s.db.QueryRowContext(ctx, `SELECT profile_digest FROM mission_profiles WHERE tenant_id=?`, tenantID).Scan(&encoded)
+	if errors.Is(err, sql.ErrNoRows) {
+		return digest, ccsds.ErrAssociationNotFound
+	}
+	if err != nil {
+		return digest, wrap("read mission profile binding", err)
+	}
+	if len(encoded) != len(digest) {
+		return digest, errors.New("securitystate: invalid mission profile digest")
+	}
+	copy(digest[:], encoded)
+	return digest, nil
+}
+
+func (s *Store) ObserveFlightSecurityStatus(ctx context.Context, tenantID string, status ccsds.FlightSecurityStatus) error {
+	if tenantID == "" || status.Validate() != nil {
+		return ccsds.ErrAssociationState
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO flight_security_status(
+		tenant_id,format_version,profile_digest,self_test,crypto_backend,current_spi,next_spi,recovery_spi,
+		security_epoch,root_version,pending_root_present,receive_count,last_receive_us,max_receive_us,
+		cycle_limit_exceeded_count,clock_anomaly_count,observed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(tenant_id) DO UPDATE SET
+		format_version=excluded.format_version,profile_digest=excluded.profile_digest,self_test=excluded.self_test,
+		crypto_backend=excluded.crypto_backend,current_spi=excluded.current_spi,next_spi=excluded.next_spi,
+		recovery_spi=excluded.recovery_spi,security_epoch=excluded.security_epoch,root_version=excluded.root_version,
+		pending_root_present=excluded.pending_root_present,receive_count=excluded.receive_count,
+		last_receive_us=excluded.last_receive_us,max_receive_us=excluded.max_receive_us,
+		cycle_limit_exceeded_count=excluded.cycle_limit_exceeded_count,clock_anomaly_count=excluded.clock_anomaly_count,
+		observed_at=excluded.observed_at`, tenantID, status.FormatVersion, status.ProfileDigest[:], string(status.SelfTest),
+		string(status.CryptoBackend), status.CurrentSPI, status.NextSPI, status.RecoverySPI, status.SecurityEpoch,
+		status.RootVersion, status.PendingRootPresent, strconv.FormatUint(status.ReceiveCount, 10),
+		strconv.FormatUint(status.LastReceiveUS, 10), strconv.FormatUint(status.MaxReceiveUS, 10),
+		strconv.FormatUint(status.CycleLimitExceededCount, 10), strconv.FormatUint(status.ClockAnomalyCount, 10),
+		formatTime(time.Now()))
+	return wrap("observe flight security status", err)
+}
+
+func (s *Store) ReadFlightSecurityStatus(ctx context.Context, tenantID string) (*ccsds.ObservedFlightSecurityStatus, error) {
+	var status ccsds.ObservedFlightSecurityStatus
+	var digest []byte
+	var selfTest, backend, receiveCount, lastUS, maxUS, exceeded, anomalies, observedAt string
+	err := s.db.QueryRowContext(ctx, `SELECT format_version,profile_digest,self_test,crypto_backend,current_spi,
+		next_spi,recovery_spi,security_epoch,root_version,pending_root_present,receive_count,last_receive_us,
+		max_receive_us,cycle_limit_exceeded_count,clock_anomaly_count,observed_at
+		FROM flight_security_status WHERE tenant_id=?`, tenantID).Scan(&status.FormatVersion, &digest, &selfTest,
+		&backend, &status.CurrentSPI, &status.NextSPI, &status.RecoverySPI, &status.SecurityEpoch, &status.RootVersion,
+		&status.PendingRootPresent, &receiveCount, &lastUS, &maxUS, &exceeded, &anomalies, &observedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ccsds.ErrAssociationNotFound
+	}
+	if err != nil {
+		return nil, wrap("read flight security status", err)
+	}
+	if len(digest) != len(status.ProfileDigest) {
+		return nil, errors.New("securitystate: invalid flight status digest")
+	}
+	copy(status.ProfileDigest[:], digest)
+	status.SelfTest = ccsds.FlightSelfTestState(selfTest)
+	status.CryptoBackend = ccsds.FlightCryptoBackend(backend)
+	values := []*uint64{&status.ReceiveCount, &status.LastReceiveUS, &status.MaxReceiveUS,
+		&status.CycleLimitExceededCount, &status.ClockAnomalyCount}
+	texts := []string{receiveCount, lastUS, maxUS, exceeded, anomalies}
+	for index := range values {
+		value, parseErr := strconv.ParseUint(texts[index], 10, 64)
+		if parseErr != nil {
+			return nil, errors.New("securitystate: invalid flight status counter")
+		}
+		*values[index] = value
+	}
+	status.ObservedAt, err = parseTime(observedAt)
+	if err != nil || status.Validate() != nil {
+		return nil, errors.New("securitystate: invalid persisted flight security status")
+	}
+	return &status, nil
 }
 
 func (s *Store) MarkTCRotationPrepared(ctx context.Context, tenantID string, state ccsds.TCRotationState) error {

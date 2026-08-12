@@ -40,7 +40,8 @@ func TestOperationsStatusReportsUnconfiguredTenant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Status != "UNCONFIGURED" || status.Ready || len(status.Warnings) != 4 {
+	if status.Status != "UNCONFIGURED" || status.Ready || len(status.Warnings) != 5 ||
+		!containsWarning(status.Warnings, "FLIGHT_STATUS_NOT_OBSERVED") {
 		t.Fatalf("unexpected unconfigured status: %+v", status)
 	}
 }
@@ -123,6 +124,34 @@ func TestRuntimeStateCloneOwnsReplayPointer(t *testing.T) {
 	*cloned.ReplayHighest = 45
 	if highest != 44 {
 		t.Fatal("runtime replay pointer was aliased")
+	}
+}
+
+func TestOperationsStatusDetectsFlightMismatchAndTelemetryWarnings(t *testing.T) {
+	security, store := newTestSecurity(t, &fakeCore{}, tcAssociation(), nextTCAssociation(), recoveryAssociation(), aosAssociation())
+	prepareTestRotation(t, store, tcAssociation(), nextTCAssociation())
+	digest, err := store.ReadMissionProfileDigest(context.Background(), "tenant-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest[0] ^= 1
+	digest[1] = 2
+	flight := FlightSecurityStatus{FormatVersion: FlightSecurityStatusVersion, ProfileDigest: digest,
+		SelfTest: FlightSelfTestLocked, CryptoBackend: FlightBackendARMv7NEON,
+		CurrentSPI: 0x2222, NextSPI: 0x2223, RecoverySPI: recoveryAssociation().SPI,
+		SecurityEpoch: 9, RootVersion: 7, CycleLimitExceededCount: 1, ClockAnomalyCount: 1}
+	if err := store.ObserveFlightSecurityStatus(context.Background(), "tenant-1", flight); err != nil {
+		t.Fatal(err)
+	}
+	status, err := security.OperationsStatus(context.Background(), "tenant-1")
+	if err != nil || status.Ready || status.FlightReconciliation != "MISMATCH" {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	for _, warning := range []string{"FLIGHT_PROFILE_MISMATCH", "FLIGHT_SELF_TEST_LOCKED",
+		"FLIGHT_TC_STATE_MISMATCH", "FLIGHT_CYCLE_LIMIT_EXCEEDED", "FLIGHT_CLOCK_ANOMALY"} {
+		if !containsWarning(status.Warnings, warning) {
+			t.Fatalf("missing %s in %v", warning, status.Warnings)
+		}
 	}
 }
 

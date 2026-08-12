@@ -17,6 +17,7 @@ func TestAPIAccessStrictCCSDSMatrix(t *testing.T) {
 	}{
 		{"TC protect", http.MethodPost, "/ui/api/v1/ccsds/tc:protect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:tc:protect"}}, 204},
 		{"AOS unprotect", http.MethodPost, "/ui/api/v1/ccsds/aos:unprotect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:aos:unprotect"}}, 204},
+		{"flight status observe", http.MethodPost, "/ui/api/v1/ccsds/flight-status:observe", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:aos:unprotect"}}, 204},
 		{"wrong data scope", http.MethodPost, "/ui/api/v1/ccsds/tc:protect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:aos:unprotect"}}, 403},
 		{"wrong plane", http.MethodPost, "/ui/api/v1/ccsds/tc:protect", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ccsds:tc:protect"}}, 403},
 		{"audit read", http.MethodGet, "/ui/api/v1/audit/events", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"audit:read"}}, 204},

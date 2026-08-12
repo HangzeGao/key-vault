@@ -2,6 +2,7 @@ package ccsds
 
 import (
 	"context"
+	"encoding/hex"
 	"sort"
 )
 
@@ -50,15 +51,18 @@ type TCRotationState struct {
 // OperationsStatus is the single read model consumed by mission operations.
 // State changes remain internal to the protocol module.
 type OperationsStatus struct {
-	Status     string
-	Ready      bool
-	TCCurrent  *AssociationRuntimeState
-	TCNext     *AssociationRuntimeState
-	TCRecovery *AssociationRuntimeState
-	TCRotation *TCRotationState
-	AOSActive  []AssociationRuntimeState
-	AOSFormat  string
-	Warnings   []string
+	Status               string
+	Ready                bool
+	TCCurrent            *AssociationRuntimeState
+	TCNext               *AssociationRuntimeState
+	TCRecovery           *AssociationRuntimeState
+	TCRotation           *TCRotationState
+	AOSActive            []AssociationRuntimeState
+	AOSFormat            string
+	ProfileDigest        string
+	FlightStatus         *ObservedFlightSecurityStatus
+	FlightReconciliation string
+	Warnings             []string
 }
 
 // OperationsStatus returns a safe, tenant-scoped snapshot without allocating
@@ -69,7 +73,15 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 		return nil, err
 	}
 	status := &OperationsStatus{Status: "UNCONFIGURED", AOSActive: make([]AssociationRuntimeState, 0),
-		AOSFormat: "NOT_FROZEN", Warnings: make([]string, 0)}
+		AOSFormat: "NOT_FROZEN", FlightReconciliation: "NOT_OBSERVED", Warnings: make([]string, 0)}
+	digest, digestErr := s.store.ReadMissionProfileDigest(ctx, tenantID)
+	if digestErr == nil {
+		status.ProfileDigest = hex.EncodeToString(digest[:])
+	} else if digestErr == ErrAssociationNotFound {
+		status.Warnings = append(status.Warnings, "MISSION_PROFILE_NOT_BOUND")
+	} else {
+		return nil, digestErr
+	}
 	rotation, rotationErr := s.store.ReadTCRotationState(ctx, tenantID)
 	if rotationErr == nil {
 		status.TCRotation = rotation
@@ -124,6 +136,35 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 	}
 	if len(status.AOSActive) == 0 {
 		status.Warnings = append(status.Warnings, "AOS_ACTIVE_MISSING")
+	}
+	flight, flightErr := s.store.ReadFlightSecurityStatus(ctx, tenantID)
+	if flightErr == nil {
+		status.FlightStatus = flight
+		status.FlightReconciliation = "MATCHED"
+		if digestErr != nil || flight.ProfileDigest != digest {
+			status.FlightReconciliation = "MISMATCH"
+			status.Warnings = append(status.Warnings, "FLIGHT_PROFILE_MISMATCH")
+		}
+		if flight.SelfTest != FlightSelfTestPassed {
+			status.FlightReconciliation = "MISMATCH"
+			status.Warnings = append(status.Warnings, "FLIGHT_SELF_TEST_LOCKED")
+		}
+		if status.TCCurrent == nil || flight.CurrentSPI != status.TCCurrent.SPI ||
+			flight.SecurityEpoch != status.TCCurrent.SecurityEpoch || flight.RootVersion != status.TCCurrent.KeyVersion ||
+			status.TCRecovery == nil || flight.RecoverySPI != status.TCRecovery.SPI {
+			status.FlightReconciliation = "MISMATCH"
+			status.Warnings = append(status.Warnings, "FLIGHT_TC_STATE_MISMATCH")
+		}
+		if flight.CycleLimitExceededCount != 0 {
+			status.Warnings = append(status.Warnings, "FLIGHT_CYCLE_LIMIT_EXCEEDED")
+		}
+		if flight.ClockAnomalyCount != 0 {
+			status.Warnings = append(status.Warnings, "FLIGHT_CLOCK_ANOMALY")
+		}
+	} else if flightErr == ErrAssociationNotFound {
+		status.Warnings = append(status.Warnings, "FLIGHT_STATUS_NOT_OBSERVED")
+	} else {
+		return nil, flightErr
 	}
 	sort.Slice(status.AOSActive, func(i, j int) bool { return status.AOSActive[i].SPI < status.AOSActive[j].SPI })
 	status.Ready = status.TCCurrent != nil && status.TCNext != nil && status.TCRecovery != nil && len(status.AOSActive) > 0 && len(status.Warnings) == 0

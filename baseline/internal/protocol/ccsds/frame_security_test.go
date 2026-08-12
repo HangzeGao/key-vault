@@ -144,6 +144,19 @@ func newTestSecurity(t *testing.T, core ProtectionCore, associations ...Security
 	if err != nil {
 		t.Fatal(err)
 	}
+	digest := [32]byte{1}
+	if err := store.BindMissionProfile("tenant-1", digest); err != nil {
+		t.Fatal(err)
+	}
+	if len(associations) != 0 {
+		status := FlightSecurityStatus{FormatVersion: FlightSecurityStatusVersion, ProfileDigest: digest,
+			SelfTest: FlightSelfTestPassed, CryptoBackend: FlightBackendSoftware,
+			CurrentSPI: tcAssociation().SPI, NextSPI: nextTCAssociation().SPI, RecoverySPI: recoveryAssociation().SPI,
+			SecurityEpoch: tcAssociation().SecurityEpoch, RootVersion: tcAssociation().KeyVersion}
+		if err := store.ObserveFlightSecurityStatus(context.Background(), "tenant-1", status); err != nil {
+			t.Fatal(err)
+		}
+	}
 	security, err := New(core, store, Options{
 		AOSPrimaryHeaderLength: 6, MaxFrameLength: 2048, NodeID: "node-1", TCSpacecraftID: 0x1234,
 	})
