@@ -65,7 +65,8 @@ npm run build
 ```
 
 `release-gate` runs all Go tests, the API-to-flight shared vector, the C and Go
-95% coverage gates, and frontend tests/build, then writes a hash-bound evidence
+95% coverage gates, ARMv7 cross compilation, QEMU/NEON flight tests, a
+Go/x86-C/ARMv7-C differential corpus, and frontend tests/build, then writes a hash-bound evidence
 record below `build/release/`. Ordinary test success alone is not release evidence.
 
 ## HTTP Contract
@@ -75,10 +76,11 @@ record below `build/release/`. Ordinary test success alone is not release eviden
 | `GET /healthz` | Process liveness |
 | Data `POST /ui/api/v1/ccsds/tc:protect` | Transform one complete plain TC frame into a complete protected frame |
 | Data `POST /ui/api/v1/ccsds/aos:unprotect` | Provisional AOS decrypt endpoint; not a frozen release contract |
+| Data `POST /ui/api/v1/ccsds/flight-status:observe` | Submit carrier-independent flight crypto status extracted by the housekeeping/AOS adapter |
 | Ops `GET /ui/api/v1/audit/*` | Read and verify audit chains |
 | Ops `GET /ui/api/v1/ops/health` | TPM, policy, and SQLite readiness |
 | Ops `GET /ui/api/v1/ops/db/status` | Redacted local-state diagnostics |
-| Ops `GET /ui/api/v1/ops/ccsds/status` | Security Association and counter state |
+| Ops `GET /ui/api/v1/ops/ccsds/status` | Ground/flight profile, Security Association, counter, self-test and timing reconciliation |
 
 See [CCSDS Link Security](docs/CCSDS_LINK_SECURITY.md),
 [Ground/Flight Architecture](docs/TC_GROUND_FLIGHT_ARCHITECTURE.md),

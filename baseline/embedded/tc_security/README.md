@@ -11,7 +11,11 @@ This freestanding C11 module receives complete TC transfer frames and implements
 - durable Pending Root restore across reset;
 - no Previous/Grace state and no compatibility parser.
 
-The caller supplies only two integration callbacks: a complete ordinary plaintext validator and an atomic state commit adapter. Plaintext is released only after both succeed. Root Prepare plaintext is consumed internally.
+The caller supplies three platform callbacks: a complete ordinary plaintext
+validator, an atomic state commit adapter, and a monotonic microsecond clock.
+Plaintext is released only after validation and persistence both succeed. Root
+Prepare plaintext is consumed internally. The clock is used only for redacted
+runtime timing counters; it is not part of nonce, replay, or key derivation.
 
 The production plaintext validator is owned by flight software and must implement
 the closed contract in
@@ -19,10 +23,11 @@ the closed contract in
 The `CA FE` check in the C test harness is only a test double; it is forbidden in
 production builds and is not release evidence.
 
-The integration surface is `tcsec_init`, `tcsec_reset`, `tcsec_receive`, and
-`tcsec_deinit`.
+The integration surface is `tcsec_init`, `tcsec_reset`, `tcsec_receive`,
+`tcsec_get_runtime_status`, and `tcsec_deinit`.
 `tcsec_status_string` is a diagnostic helper. The required callback types are
-`tcsec_plaintext_validator_fn` and `tcsec_state_commit_fn`.
+`tcsec_plaintext_validator_fn`, `tcsec_state_commit_fn`, and
+`tcsec_monotonic_time_us_fn`.
 `tcsec_init` accepts them as one `tcsec_callbacks_t` value and copies that value
 into the caller-owned context; no separate bind/unbind lifecycle exists.
 
@@ -52,6 +57,14 @@ selection.
 an ARMv7 cross build whose compiler target has NEON enabled. QEMU/KAT validates
 instruction correctness; final-board WCET, throughput, and side-channel
 evidence remain release requirements.
+
+`tcsec_init` runs SM4 block, CMAC-KDF, HCTR, and authenticated GCM known-answer
+tests through the backend selected on that target before loading mission roots.
+Failure leaves the context in `TCSEC_SELF_TEST_LOCKED`; `receive` and `reset`
+cannot bypass it. `tcsec_get_runtime_status` exposes only the self-test/backend,
+Mission Profile digest, SPI/epoch/root versions, pending-root flag, receive
+counts and timing counters. It never exposes roots, working keys, nonce prefixes
+or replay bitmaps.
 
 ## Fixed SEU hardening
 
@@ -83,6 +96,10 @@ enforces a caller-provided rollback floor. The BSP still owns physical erase,
 write, read-back and storage of the trusted generation floor. CRC detects
 accidental corruption; it is not an authenticity mechanism, so only trusted
 flight software may write these slots.
+When exactly one slot is invalid, `tcsec_nvm_plan_repair` returns a complete
+next-generation replacement targeting the bad slot. The BSP performs the
+physical atomic write and read-back verification before advancing its trusted
+generation floor.
 
 Build and run the shared Go/C vectors:
 
@@ -92,3 +109,8 @@ make test
 
 The two current vector files live in `../../testdata` and cover SM4-HCTR
 ordinary protection plus authenticated SM4-GCM Root Prepare.
+
+`scripts/armv7_gate.sh` additionally generates deterministic Go reference
+vectors and verifies them with x86 C software and ARMv7/NEON C under QEMU. The
+release gate fails if the cross toolchain, QEMU, sysroot, backend identity, full
+flight suite, or any differential record is missing.

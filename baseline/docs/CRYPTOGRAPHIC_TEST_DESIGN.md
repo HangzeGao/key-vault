@@ -338,12 +338,12 @@ make release-gate
 | HTTP API 生成完整密帧并与星载向量比较 | 已有 |
 | Replay、Next promotion、Recovery、NVM 双槽负向测试 | 已有 |
 | Go/C 95% 覆盖率门禁、前端测试/build、发布哈希证据 | 已有 |
-| GB/T/GM/T SM4 单分组权威 KAT | **待补 P0** |
+| GB/T/GM/T SM4 单分组权威 KAT | 已有；启动自检和单元测试共同覆盖 |
 | RFC 8998 SM4-GCM 权威 KAT | **待补 P0** |
 | SM4-GCM 独立 OpenSSL Oracle 差分 | **待补 P0** |
 | 与产品无共享实现的 HCTR 参考模型和批量差分 | **待补 P0** |
 | ASan/UBSan 自动门禁和有界 fuzz runner | **待补 P0** |
-| 星载启动 KAT 与失败锁定 | **待补 P0（飞行发布前）** |
+| 星载启动 KAT 与失败锁定 | 已有；实际选中后端执行，失败锁定 receive/reset |
 | 自动 context/NVM/状态 bit-flip campaign | **待补 P1** |
 | 目标板 WCET、栈高水位、编译器交叉验证 | **待补 P1（飞行发布前）** |
 | 目标 CPU timing leakage/按威胁模型的 TVLA | **待补 P1/P2** |
@@ -378,7 +378,11 @@ make release-gate
 - 测量普通 TC 解密端到端 WCET、单分组 SM4 和长帧吞吐，报告相对 software 的提升；
 - 对汇编后端单独执行寄存器清理审查、已知/随机差分测试和侧信道测试。
 
-CI 若没有 ARMv7 交叉编译器与 QEMU，只能验证 software 回退，不能把 x86 结果作为汇编后端合格证据。ARMv7 汇编代码发生变化时，目标板证据是发布阻断项。
+`scripts/armv7_gate.sh` 是当前强制门禁：Go 固定种子生成 128 组 HCTR 和
+128 组 KDF 参考记录，x86 C software 与 QEMU ARMv7/NEON 逐条比较，同时
+QEMU 运行完整 TC Current/Next/Recovery 套件。缺少交叉编译器、sysroot 或
+QEMU 直接失败，不再允许以 x86 结果替代汇编后端证据。真实目标板 WCET、
+物理 NVM 和侧信道证据仍是发布验收项。
 
 ## 15. 规范和测试依据
 
