@@ -15,6 +15,7 @@ if [[ -z "$npm_bin" ]]; then echo "release gate failed: npm not found" >&2; exit
 cd "$ROOT_DIR"
 (
   cd web/frontend
+	"$npm_bin" ci --no-audit --no-fund --no-progress
   "$npm_bin" test -- --run
   "$npm_bin" run build
 )
