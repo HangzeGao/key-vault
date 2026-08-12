@@ -45,6 +45,7 @@ typedef struct {
     uint8_t corrupt_context_during_validation;
     uint8_t corrupt_context_during_commit;
     uint8_t corrupt_plaintext_during_commit;
+    uint64_t monotonic_time_us;
 } callbacks_t;
 
 typedef struct {
@@ -185,6 +186,12 @@ static tcsec_commit_result_t commit_state(void *user, const tcsec_commit_t *comm
     return callbacks->result;
 }
 
+static uint64_t monotonic_time_us(void *user) {
+    callbacks_t *callbacks = (callbacks_t *)user;
+    callbacks->monotonic_time_us += 10u;
+    return callbacks->monotonic_time_us;
+}
+
 static tcsec_status_t init_context(tcsec_context_t *context,
                                    const tcsec_config_t *config,
                                    tcsec_plaintext_validator_fn validator,
@@ -192,6 +199,7 @@ static tcsec_status_t init_context(tcsec_context_t *context,
     const tcsec_callbacks_t callbacks = {
         validator,
         commit_state,
+        monotonic_time_us,
         user_context
     };
     return tcsec_init(context, config, &callbacks);
@@ -248,6 +256,7 @@ static void ordinary_config(tcsec_config_t *config, const vector_t *vector) {
         0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,0xfe,0xdc,0xba,0x98,0x76,0x54,0x32,0x10
     };
     memset(config, 0, sizeof(*config));
+    memset(config->profile_digest, 0x5au, sizeof(config->profile_digest));
     config->ordinary.spacecraft_id = vector->spacecraft_id;
     config->ordinary.suite = vector->suite;
     memcpy(config->ordinary.operational_root, vector->root, vector->root_length);
@@ -272,6 +281,7 @@ static int init_ordinary(tcsec_context_t *context, const vector_t *vector, callb
 
 static void recovery_config(tcsec_config_t *config, const vector_t *vector) {
     memset(config, 0, sizeof(*config));
+    memset(config->profile_digest, 0x5au, sizeof(config->profile_digest));
     config->ordinary.spacecraft_id = vector->spacecraft_id;
     config->ordinary.suite = vector->ordinary_suite;
     memcpy(config->ordinary.operational_root, vector->ordinary_root, vector->ordinary_root_length);
@@ -440,7 +450,7 @@ static int test_low_level_rejections(void) {
         tcsec_derive_recovery_key(block, 16u, 1u, TCSEC_SUITE_SM4_GCM,
                                   1u, 1u, output, 15u) == 0)
         return 0;
-    for (status = TCSEC_OK; status <= TCSEC_ROOT_ALREADY_PREPARED;
+    for (status = TCSEC_OK; status <= TCSEC_SELF_TEST_FAILED;
          status = (tcsec_status_t)(status + 1))
         if (strcmp(tcsec_status_string(status), "UNKNOWN") == 0) return 0;
     return strcmp(tcsec_status_string((tcsec_status_t)-1), "UNKNOWN") == 0 &&
@@ -452,7 +462,7 @@ static int test_strict_configuration(const char *path) {
     tcsec_config_t config;
     tcsec_context_t context;
     callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
-    tcsec_callbacks_t invalid_callbacks = {validate_plaintext, NULL, &callbacks};
+    tcsec_callbacks_t invalid_callbacks = {validate_plaintext, NULL, monotonic_time_us, &callbacks};
     if (!load_vector(path, &vector)) return 0;
     ordinary_config(&config, &vector);
     if (tcsec_init(&context, &config, NULL) != TCSEC_INVALID_ARGUMENT ||
@@ -492,6 +502,40 @@ static int test_context_fault_detection(const char *path) {
         TCSEC_STATE_INTEGRITY_FAILED) return 0;
     tcsec_deinit(&context);
     return 1;
+}
+
+static int test_runtime_status(const char *path) {
+    vector_t vector;
+    tcsec_config_t replacement;
+    tcsec_context_t context;
+    tcsec_result_t result;
+    tcsec_runtime_status_t status;
+    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
+    uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
+    if (!load_vector(path, &vector) || !init_ordinary(&context, &vector, &callbacks) ||
+        tcsec_get_runtime_status(&context, &status) != TCSEC_OK ||
+        status.self_test != TCSEC_SELF_TEST_PASSED ||
+        status.crypto_backend != TCSEC_CRYPTO_BACKEND_SOFTWARE ||
+        status.receive_count != 0u || status.current_spi != vector.spi ||
+        status.next_spi != (uint16_t)(vector.spi + 1u) ||
+        status.recovery_spi != 0x7002u ||
+        memcmp(status.profile_digest, context.profile_digest,
+               TCSEC_PROFILE_DIGEST_LENGTH) != 0)
+        return 0;
+    if (tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      plaintext, sizeof(plaintext), &result) != TCSEC_OK ||
+        tcsec_get_runtime_status(&context, &status) != TCSEC_OK ||
+        status.receive_count != 1u || status.last_receive_us != 10u ||
+        status.max_receive_us != 10u || status.cycle_limit_exceeded_count != 0u ||
+        status.clock_anomaly_count != 0u)
+        return 0;
+    ordinary_config(&replacement, &vector);
+    replacement.profile_digest[0] ^= 1u;
+    if (tcsec_reset(&context, &replacement) != TCSEC_INVALID_CONFIGURATION)
+        return 0;
+    tcsec_deinit(&context);
+    return tcsec_get_runtime_status(NULL, &status) == TCSEC_INVALID_ARGUMENT &&
+           tcsec_get_runtime_status(&context, NULL) == TCSEC_INVALID_ARGUMENT;
 }
 
 static int test_reset_transaction(const char *path) {
@@ -542,6 +586,7 @@ static int test_nvm_two_slot_recovery(const char *path) {
     tcsec_nvm_image_t first;
     tcsec_nvm_image_t second;
     tcsec_nvm_image_t decoded;
+    tcsec_nvm_repair_plan_t repair;
     tcsec_context_t context;
     callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
     tcsec_result_t result;
@@ -555,7 +600,6 @@ static int test_nvm_two_slot_recovery(const char *path) {
     if (!load_vector(path, &vector)) return 0;
     memset(&first, 0, sizeof(first));
     first.generation = 7u;
-    memset(first.profile_digest, 0x5au, sizeof(first.profile_digest));
     ordinary_config(&first.config, &vector);
     if (tcsec_nvm_encode(NULL, slot0, sizeof(slot0), &slot0_length) != TCSEC_INVALID_ARGUMENT ||
         tcsec_nvm_encode(&first, NULL, sizeof(slot0), &slot0_length) != TCSEC_INVALID_ARGUMENT ||
@@ -567,7 +611,8 @@ static int test_nvm_two_slot_recovery(const char *path) {
         tcsec_nvm_decode(slot0, slot0_length, 0u, NULL) != TCSEC_INVALID_ARGUMENT ||
         tcsec_nvm_decode(slot0, slot0_length, 7u, &decoded) != TCSEC_OK ||
         decoded.generation != first.generation ||
-        memcmp(decoded.profile_digest, first.profile_digest, sizeof(first.profile_digest)) != 0 ||
+        memcmp(decoded.config.profile_digest, first.config.profile_digest,
+               sizeof(first.config.profile_digest)) != 0 ||
         decoded.config.ordinary.current_spi != vector.spi ||
         decoded.config.ordinary.root_version != vector.root_version)
         return 0;
@@ -602,6 +647,16 @@ static int test_nvm_two_slot_recovery(const char *path) {
                                 &decoded, &selected) != TCSEC_OK ||
         selected != 0u || decoded.generation != 7u)
         return 0;
+    if (tcsec_nvm_plan_repair(slot0, slot0_length, corrupt, sizeof(corrupt), 7u,
+                              &decoded, &selected, &repair) != TCSEC_OK ||
+        repair.required != 1u || repair.target_slot != 1u || repair.generation != 8u ||
+        tcsec_nvm_decode(repair.encoded, sizeof(repair.encoded), 8u, &decoded) != TCSEC_OK ||
+        decoded.generation != 8u ||
+        tcsec_nvm_plan_repair(slot0, slot0_length, slot1, slot1_length, 7u,
+                              &decoded, &selected, &repair) != TCSEC_OK || repair.required != 0u ||
+        tcsec_nvm_plan_repair(slot0, slot0_length, slot1, slot1_length, 7u,
+                              NULL, &selected, &repair) != TCSEC_INVALID_ARGUMENT)
+        return 0;
     if (tcsec_nvm_select_latest(corrupt, sizeof(corrupt), corrupt, sizeof(corrupt), 7u,
                                 &decoded, &selected) != TCSEC_STATE_INTEGRITY_FAILED ||
         tcsec_nvm_select_latest(slot0, slot0_length, slot1, slot1_length, 0u,
@@ -621,7 +676,7 @@ static int test_nvm_two_slot_recovery(const char *path) {
     if (tcsec_nvm_encode(&second, slot1, sizeof(slot1), &slot1_length) != TCSEC_INVALID_CONFIGURATION)
         return 0;
     second = first;
-    memset(second.profile_digest, 0, sizeof(second.profile_digest));
+    memset(second.config.profile_digest, 0, sizeof(second.config.profile_digest));
     if (tcsec_nvm_encode(&second, slot1, sizeof(slot1), &slot1_length) != TCSEC_INVALID_CONFIGURATION)
         return 0;
     second = first;
@@ -1134,6 +1189,10 @@ int main(int argc, char **argv) {
     }
     if (!test_context_fault_detection(argv[1])) {
         fprintf(stderr, "context fault was not detected\n");
+        return 1;
+    }
+    if (!test_runtime_status(argv[1])) {
+        fprintf(stderr, "runtime status/telemetry tests failed\n");
         return 1;
     }
     if (!test_receive_boundaries_and_replay_motion(argv[1])) {

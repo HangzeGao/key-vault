@@ -7,14 +7,19 @@
 extern "C" {
 #endif
 
-#define TCSEC_NVM_PROFILE_DIGEST_LENGTH 32u
 #define TCSEC_NVM_IMAGE_LENGTH 175u
 
 typedef struct {
     uint32_t generation;
-    uint8_t profile_digest[TCSEC_NVM_PROFILE_DIGEST_LENGTH];
     tcsec_config_t config;
 } tcsec_nvm_image_t;
+
+typedef struct {
+    uint8_t required;
+    uint8_t target_slot;
+    uint32_t generation;
+    uint8_t encoded[TCSEC_NVM_IMAGE_LENGTH];
+} tcsec_nvm_repair_plan_t;
 
 /* Deterministic, endian-stable serialization for one physical NVM slot. */
 tcsec_status_t tcsec_nvm_encode(const tcsec_nvm_image_t *image,
@@ -38,6 +43,19 @@ tcsec_status_t tcsec_nvm_select_latest(const uint8_t *slot0,
                                        uint32_t minimum_generation,
                                        tcsec_nvm_image_t *image,
                                        uint8_t *selected_slot);
+
+/* Selects the authoritative slot and, when exactly one slot is invalid,
+ * prepares a next-generation replacement for the invalid slot. The BSP owns
+ * erase/write/read-back and must advance its trusted generation floor only
+ * after verifying tcsec_nvm_decode on the written bytes. */
+tcsec_status_t tcsec_nvm_plan_repair(const uint8_t *slot0,
+                                     size_t slot0_length,
+                                     const uint8_t *slot1,
+                                     size_t slot1_length,
+                                     uint32_t minimum_generation,
+                                     tcsec_nvm_image_t *selected_image,
+                                     uint8_t *selected_slot,
+                                     tcsec_nvm_repair_plan_t *repair);
 
 #ifdef __cplusplus
 }

@@ -7,9 +7,9 @@
 #define NVM_HEADER_LENGTH 44u
 #define NVM_PAYLOAD_LENGTH 123u
 #define NVM_TRAILER_LENGTH 8u
-#define NVM_VERSION 1u
+#define NVM_VERSION 2u
 
-static const uint8_t nvm_magic[4] = {'T', 'C', 'S', '1'};
+static const uint8_t nvm_magic[4] = {'T', 'C', 'S', '2'};
 
 static void zeroize(void *memory, size_t length) {
     volatile uint8_t *cursor = (volatile uint8_t *)memory;
@@ -94,7 +94,7 @@ tcsec_status_t tcsec_nvm_encode(const tcsec_nvm_image_t *image,
     *output_length = 0u;
     if (output_capacity < TCSEC_NVM_IMAGE_LENGTH) return TCSEC_OUTPUT_TOO_SMALL;
     if (image->generation == 0u ||
-        bytes_all_zero(image->profile_digest, sizeof(image->profile_digest)) ||
+        bytes_all_zero(image->config.profile_digest, sizeof(image->config.profile_digest)) ||
         !tcsec_config_valid_internal(&image->config))
         return TCSEC_INVALID_CONFIGURATION;
     ordinary = &image->config.ordinary;
@@ -104,7 +104,7 @@ tcsec_status_t tcsec_nvm_encode(const tcsec_nvm_image_t *image,
     write_u16(&output[4], NVM_VERSION);
     write_u16(&output[6], NVM_PAYLOAD_LENGTH);
     write_u32(&output[8], image->generation);
-    memcpy(&output[12], image->profile_digest, TCSEC_NVM_PROFILE_DIGEST_LENGTH);
+    memcpy(&output[12], image->config.profile_digest, TCSEC_PROFILE_DIGEST_LENGTH);
     cursor = &output[NVM_HEADER_LENGTH];
     write_u16(cursor, ordinary->spacecraft_id); cursor += 2u;
     write_u16(cursor, (uint16_t)ordinary->suite); cursor += 2u;
@@ -158,8 +158,8 @@ tcsec_status_t tcsec_nvm_decode(const uint8_t *encoded,
     candidate.generation = read_u32(&encoded[8]);
     if (candidate.generation == 0u || candidate.generation < minimum_generation)
         return TCSEC_STATE_INTEGRITY_FAILED;
-    memcpy(candidate.profile_digest, &encoded[12], TCSEC_NVM_PROFILE_DIGEST_LENGTH);
-    if (bytes_all_zero(candidate.profile_digest, sizeof(candidate.profile_digest)))
+    memcpy(candidate.config.profile_digest, &encoded[12], TCSEC_PROFILE_DIGEST_LENGTH);
+    if (bytes_all_zero(candidate.config.profile_digest, sizeof(candidate.config.profile_digest)))
         return TCSEC_STATE_INTEGRITY_FAILED;
     ordinary = &candidate.config.ordinary;
     recovery = &candidate.config.recovery;
@@ -231,4 +231,52 @@ tcsec_status_t tcsec_nvm_select_latest(const uint8_t *slot0,
     }
     zeroize(&first, sizeof(first)); zeroize(&second, sizeof(second));
     return TCSEC_OK;
+}
+
+tcsec_status_t tcsec_nvm_plan_repair(const uint8_t *slot0,
+                                     size_t slot0_length,
+                                     const uint8_t *slot1,
+                                     size_t slot1_length,
+                                     uint32_t minimum_generation,
+                                     tcsec_nvm_image_t *selected_image,
+                                     uint8_t *selected_slot,
+                                     tcsec_nvm_repair_plan_t *repair) {
+    tcsec_nvm_image_t first;
+    tcsec_nvm_image_t second;
+    tcsec_nvm_image_t replacement;
+    tcsec_status_t first_status;
+    tcsec_status_t second_status;
+    tcsec_status_t status;
+    size_t encoded_length = 0u;
+    if (selected_image == NULL || selected_slot == NULL || repair == NULL)
+        return TCSEC_INVALID_ARGUMENT;
+    memset(repair, 0, sizeof(*repair));
+    memset(&first, 0, sizeof(first));
+    memset(&second, 0, sizeof(second));
+    first_status = tcsec_nvm_decode(slot0, slot0_length, minimum_generation, &first);
+    second_status = tcsec_nvm_decode(slot1, slot1_length, minimum_generation, &second);
+    status = tcsec_nvm_select_latest(slot0, slot0_length, slot1, slot1_length,
+                                     minimum_generation, selected_image, selected_slot);
+    if (status != TCSEC_OK) goto cleanup;
+    if ((first_status == TCSEC_OK) == (second_status == TCSEC_OK)) goto cleanup;
+    if (selected_image->generation == UINT32_MAX) {
+        status = TCSEC_STATE_INTEGRITY_FAILED;
+        goto cleanup;
+    }
+    replacement = *selected_image;
+    replacement.generation++;
+    repair->required = 1u;
+    repair->target_slot = first_status == TCSEC_OK ? 1u : 0u;
+    repair->generation = replacement.generation;
+    status = tcsec_nvm_encode(&replacement, repair->encoded,
+                              sizeof(repair->encoded), &encoded_length);
+    if (status != TCSEC_OK || encoded_length != sizeof(repair->encoded)) {
+        memset(repair, 0, sizeof(*repair));
+        if (status == TCSEC_OK) status = TCSEC_STATE_INTEGRITY_FAILED;
+    }
+    zeroize(&replacement, sizeof(replacement));
+cleanup:
+    zeroize(&first, sizeof(first));
+    zeroize(&second, sizeof(second));
+    return status;
 }

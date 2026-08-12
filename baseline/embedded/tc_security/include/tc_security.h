@@ -18,6 +18,8 @@ extern "C" {
 #define TCSEC_NONCE_PREFIX_LENGTH 6u
 #define TCSEC_GCM_NONCE_LENGTH 12u
 #define TCSEC_GCM_TAG_LENGTH 16u
+#define TCSEC_PROFILE_DIGEST_LENGTH 32u
+#define TCSEC_RECEIVE_CYCLE_LIMIT_US 120000u
 #define TCSEC_RECOVERY_AAD_LENGTH (TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH)
 #define TCSEC_REPLAY_WINDOW_BITS 64u
 #define TCSEC_MAX_FORWARD_JUMP 4096u
@@ -42,7 +44,8 @@ typedef enum {
     TCSEC_STATE_INTEGRITY_FAILED,
     TCSEC_EPOCH_PROMOTED,
     TCSEC_ROOT_PREPARED,
-    TCSEC_ROOT_ALREADY_PREPARED
+    TCSEC_ROOT_ALREADY_PREPARED,
+    TCSEC_SELF_TEST_FAILED
 } tcsec_status_t;
 
 typedef enum {
@@ -93,6 +96,7 @@ typedef struct {
 } tcsec_recovery_config_t;
 
 typedef struct {
+    uint8_t profile_digest[TCSEC_PROFILE_DIGEST_LENGTH];
     tcsec_ordinary_config_t ordinary;
     tcsec_recovery_config_t recovery;
 } tcsec_config_t;
@@ -141,14 +145,45 @@ typedef int (*tcsec_plaintext_validator_fn)(void *user_context,
 typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(void *user_context,
                                                        const tcsec_commit_t *commit);
 
+typedef uint64_t (*tcsec_monotonic_time_us_fn)(void *user_context);
+
 /* Runtime dependencies supplied by flight software. tcsec_init copies this
  * value; the struct itself need not outlive the call, while user_context and
  * everything it references must remain valid until tcsec_deinit. */
 typedef struct {
     tcsec_plaintext_validator_fn validate_plaintext;
     tcsec_state_commit_fn commit_state;
+    tcsec_monotonic_time_us_fn monotonic_time_us;
     void *user_context;
 } tcsec_callbacks_t;
+
+typedef enum {
+    TCSEC_SELF_TEST_NOT_RUN = 0,
+    TCSEC_SELF_TEST_PASSED = 1,
+    TCSEC_SELF_TEST_LOCKED = 2
+} tcsec_self_test_state_t;
+
+typedef enum {
+    TCSEC_CRYPTO_BACKEND_SOFTWARE = 0,
+    TCSEC_CRYPTO_BACKEND_ARMV7_NEON = 1
+} tcsec_crypto_backend_t;
+
+typedef struct {
+    tcsec_self_test_state_t self_test;
+    tcsec_crypto_backend_t crypto_backend;
+    uint8_t profile_digest[TCSEC_PROFILE_DIGEST_LENGTH];
+    uint16_t current_spi;
+    uint16_t next_spi;
+    uint16_t recovery_spi;
+    uint32_t security_epoch;
+    uint32_t root_version;
+    uint8_t pending_root_present;
+    uint64_t receive_count;
+    uint64_t last_receive_us;
+    uint64_t max_receive_us;
+    uint64_t cycle_limit_exceeded_count;
+    uint64_t clock_anomaly_count;
+} tcsec_runtime_status_t;
 
 typedef struct {
     uint16_t spi;
@@ -162,6 +197,7 @@ typedef struct {
 /* Caller-owned fixed storage. Fields are implementation-private despite being
  * visible for freestanding-C allocation. */
 typedef struct {
+    uint8_t profile_digest[TCSEC_PROFILE_DIGEST_LENGTH];
     uint16_t spacecraft_id;
     tcsec_suite_t current_suite;
     tcsec_suite_t next_suite;
@@ -186,6 +222,13 @@ typedef struct {
     uint8_t recovery_nonce_prefix[TCSEC_NONCE_PREFIX_LENGTH];
     tcsec_replay_state_t recovery_replay;
     tcsec_callbacks_t callbacks;
+    uint64_t receive_count;
+    uint64_t last_receive_us;
+    uint64_t max_receive_us;
+    uint64_t cycle_limit_exceeded_count;
+    uint64_t clock_anomaly_count;
+    tcsec_self_test_state_t self_test_state;
+    tcsec_crypto_backend_t crypto_backend;
     uint8_t initialized;
     uint32_t context_integrity;
     uint32_t context_integrity_inverse;
@@ -217,6 +260,11 @@ tcsec_status_t tcsec_receive(tcsec_context_t *context,
                              uint8_t *plaintext,
                              size_t plaintext_capacity,
                              tcsec_result_t *result);
+
+/* Returns a semantic, carrier-independent snapshot for housekeeping/AOS
+ * publication. It never exposes roots or derived keys. */
+tcsec_status_t tcsec_get_runtime_status(const tcsec_context_t *context,
+                                        tcsec_runtime_status_t *status);
 
 /* Deinitializes and zeroizes all roots, derived working keys, replay state,
  * callbacks, and caller binding in the context. */

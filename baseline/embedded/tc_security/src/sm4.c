@@ -202,3 +202,9 @@ const char *tcsec_sm4_backend_name(const tcsec_sm4_key_t *context) {
     if (context != NULL && armv7_neon_selected(context)) return "armv7-neon";
     return "software";
 }
+
+uint8_t tcsec_sm4_backend_id(const tcsec_sm4_key_t *context) {
+    if (context == NULL || context->backend_inverse != (uint8_t)~context->backend)
+        return UINT8_MAX;
+    return context->backend;
+}

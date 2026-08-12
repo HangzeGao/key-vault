@@ -23,5 +23,6 @@ int tcsec_sm4_encrypt_block(const uint8_t key[16],
 
 /* Diagnostic only; selection remains private to the SM4 module. */
 const char *tcsec_sm4_backend_name(const tcsec_sm4_key_t *context);
+uint8_t tcsec_sm4_backend_id(const tcsec_sm4_key_t *context);
 
 #endif

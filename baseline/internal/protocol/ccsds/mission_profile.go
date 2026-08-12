@@ -15,12 +15,12 @@ import (
 
 const (
 	MissionProfileVersion = 1
-	FlightNVMImageVersion = 1
+	FlightNVMImageVersion = 2
 	FlightNVMImageLength  = 175
 	flightNVMPayloadLen   = 123
 )
 
-var flightNVMMagic = [4]byte{'T', 'C', 'S', '1'}
+var flightNVMMagic = [4]byte{'T', 'C', 'S', '2'}
 
 // MissionSecurityProfile is the single controlled source used to provision
 // both ground security state and the initial flight NVM image. Its root fields

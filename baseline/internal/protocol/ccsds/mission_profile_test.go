@@ -70,7 +70,7 @@ func TestMissionProfileOwnsGroundFlightAndRecoveryConfiguration(t *testing.T) {
 		t.Fatalf("command=%+v header=%x err=%v", command, header, err)
 	}
 	image, err := profile.MarshalInitialFlightNVM(profile.TC.CurrentRootVersion)
-	if err != nil || len(image) != FlightNVMImageLength || string(image[:4]) != "TCS1" ||
+	if err != nil || len(image) != FlightNVMImageLength || string(image[:4]) != "TCS2" ||
 		binary.BigEndian.Uint32(image[8:12]) != profile.TC.CurrentRootVersion ||
 		!bytes.Equal(image[12:44], digest[:]) {
 		t.Fatalf("NVM image len=%d err=%v", len(image), err)

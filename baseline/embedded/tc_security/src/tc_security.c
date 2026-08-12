@@ -3,6 +3,7 @@
 #include "gcm.h"
 #include "hctr.h"
 #include "sm4.h"
+#include "selftest.h"
 #include "tc_security_kdf.h"
 #include "tc_security_internal.h"
 
@@ -69,6 +70,14 @@ static int context_valid(const tcsec_context_t *context) {
     if (context->context_integrity != expected ||
         context->context_integrity_inverse != ~expected) return 0;
     return 1;
+}
+
+static int context_locked(const tcsec_context_t *context) {
+    uint32_t expected;
+    if (context == NULL || context->self_test_state != TCSEC_SELF_TEST_LOCKED) return 0;
+    expected = crc32c(context, offsetof(tcsec_context_t, context_integrity));
+    return context->context_integrity == expected &&
+           context->context_integrity_inverse == ~expected;
 }
 
 static int suite_is_ordinary(tcsec_suite_t suite) {
@@ -217,10 +226,14 @@ static uint16_t next_spi(uint16_t spi) {
 int tcsec_config_valid_internal(const tcsec_config_t *config) {
     const tcsec_ordinary_config_t *ordinary;
     const tcsec_recovery_config_t *recovery;
+    uint8_t digest = 0u;
+    size_t index;
     if (config == NULL) return 0;
+    for (index = 0u; index < TCSEC_PROFILE_DIGEST_LENGTH; ++index)
+        digest |= config->profile_digest[index];
     ordinary = &config->ordinary;
     recovery = &config->recovery;
-    return suite_is_ordinary(ordinary->suite) && suite_is_gcm(recovery->suite) &&
+    return digest != 0u && suite_is_ordinary(ordinary->suite) && suite_is_gcm(recovery->suite) &&
            ordinary->operational_root_length == suite_root_length(ordinary->suite) &&
            recovery->recovery_root_length == suite_root_length(recovery->suite) &&
            ordinary->root_version != 0u && ordinary->current_epoch != 0u &&
@@ -276,13 +289,20 @@ tcsec_status_t tcsec_init(tcsec_context_t *context, const tcsec_config_t *config
     const tcsec_ordinary_config_t *ordinary;
     const tcsec_recovery_config_t *recovery;
     if (context == NULL || config == NULL || callbacks == NULL ||
-        callbacks->validate_plaintext == NULL || callbacks->commit_state == NULL)
+        callbacks->validate_plaintext == NULL || callbacks->commit_state == NULL ||
+        callbacks->monotonic_time_us == NULL)
         return TCSEC_INVALID_ARGUMENT;
+    memset(context, 0, sizeof(*context));
+    if (tcsec_crypto_self_test(&context->crypto_backend) != 0) {
+        context->self_test_state = TCSEC_SELF_TEST_LOCKED;
+        context_seal(context);
+        return TCSEC_SELF_TEST_FAILED;
+    }
     ordinary = &config->ordinary;
     recovery = &config->recovery;
     if (!tcsec_config_valid_internal(config))
         return TCSEC_INVALID_CONFIGURATION;
-    memset(context, 0, sizeof(*context));
+    memcpy(context->profile_digest, config->profile_digest, TCSEC_PROFILE_DIGEST_LENGTH);
     context->spacecraft_id = ordinary->spacecraft_id;
     context->current_suite = ordinary->suite;
     context->next_suite = ordinary->pending_root_present != 0u
@@ -307,6 +327,7 @@ tcsec_status_t tcsec_init(tcsec_context_t *context, const tcsec_config_t *config
     memcpy(context->recovery_nonce_prefix, recovery->nonce_prefix, TCSEC_NONCE_PREFIX_LENGTH);
     context->recovery_replay = recovery->replay;
     context->callbacks = *callbacks;
+    context->self_test_state = TCSEC_SELF_TEST_PASSED;
     if (derive_ordinary_hardened(
             context->current_root, context->current_root_length,
             context->spacecraft_id, context->current_suite, context->current_spi,
@@ -337,8 +358,11 @@ tcsec_status_t tcsec_reset(tcsec_context_t *context,
     tcsec_context_t candidate;
     tcsec_status_t status;
     if (context == NULL || config == NULL || context->initialized == 0u)
-        return TCSEC_INVALID_ARGUMENT;
+        return context_locked(context) ? TCSEC_SELF_TEST_FAILED : TCSEC_INVALID_ARGUMENT;
     if (!context_valid(context)) return TCSEC_STATE_INTEGRITY_FAILED;
+    if (memcmp(context->profile_digest, config->profile_digest,
+               TCSEC_PROFILE_DIGEST_LENGTH) != 0)
+        return TCSEC_INVALID_CONFIGURATION;
     memset(&candidate, 0, sizeof(candidate));
     status = tcsec_init(&candidate, config, &context->callbacks);
     if (status != TCSEC_OK) {
@@ -615,17 +639,30 @@ tcsec_status_t tcsec_receive(tcsec_context_t *context, const uint8_t *frame,
     uint16_t spi;
     uint32_t iv_counter;
     tcsec_status_t status;
+    uint64_t start_time;
+    uint64_t end_time;
+    uint64_t elapsed;
+    if (context_locked(context)) return TCSEC_SELF_TEST_FAILED;
     if (context == NULL || frame == NULL || result == NULL || context->initialized == 0u)
         return TCSEC_INVALID_ARGUMENT;
     if (!context_valid(context)) return TCSEC_STATE_INTEGRITY_FAILED;
+    start_time = context->callbacks.monotonic_time_us(context->callbacks.user_context);
     memset(result, 0, sizeof(*result));
     if (frame_length < TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH + 1u +
-                           TCSEC_FECF_LENGTH || frame_length > TCSEC_MAX_FRAME_LENGTH)
-        return TCSEC_FRAME_LENGTH_INVALID;
+                           TCSEC_FECF_LENGTH || frame_length > TCSEC_MAX_FRAME_LENGTH) {
+        status = TCSEC_FRAME_LENGTH_INVALID;
+        goto finish;
+    }
     if ((size_t)(((uint16_t)(frame[2] & 0x03u) << 8) | frame[3]) + 1u != frame_length)
-        return TCSEC_FRAME_LENGTH_INVALID;
+    {
+        status = TCSEC_FRAME_LENGTH_INVALID;
+        goto finish;
+    }
     if (read_u16_be(&frame[frame_length - TCSEC_FECF_LENGTH]) !=
-        crc16_ccitt(frame, frame_length - TCSEC_FECF_LENGTH)) return TCSEC_FECF_INVALID;
+        crc16_ccitt(frame, frame_length - TCSEC_FECF_LENGTH)) {
+        status = TCSEC_FECF_INVALID;
+        goto finish;
+    }
     spi = read_u16_be(&frame[TCSEC_PRIMARY_HEADER_LENGTH]);
     iv_counter = read_u32_be(&frame[TCSEC_PRIMARY_HEADER_LENGTH + 2u]);
     if (spi == context->current_spi) {
@@ -637,7 +674,7 @@ tcsec_status_t tcsec_receive(tcsec_context_t *context, const uint8_t *frame,
     } else if (spi == context->recovery_spi) {
         status = receive_root_prepare(context, frame, frame_length, iv_counter, result);
     } else {
-        return TCSEC_ASSOCIATION_NOT_FOUND;
+        status = TCSEC_ASSOCIATION_NOT_FOUND;
     }
     if (status == TCSEC_OK || status == TCSEC_EPOCH_PROMOTED ||
         status == TCSEC_ROOT_PREPARED || status == TCSEC_ROOT_ALREADY_PREPARED) {
@@ -647,7 +684,44 @@ tcsec_status_t tcsec_receive(tcsec_context_t *context, const uint8_t *frame,
         else if (result->profile == TCSEC_PROFILE_ORDINARY_NEXT) result->suite = context->current_suite;
         else result->suite = context->current_suite;
     }
+finish:
+    if (!context_valid(context)) return status;
+    end_time = context->callbacks.monotonic_time_us(context->callbacks.user_context);
+    context->receive_count++;
+    if (end_time < start_time) {
+        context->clock_anomaly_count++;
+        elapsed = 0u;
+    } else {
+        elapsed = end_time - start_time;
+    }
+    context->last_receive_us = elapsed;
+    if (elapsed > context->max_receive_us) context->max_receive_us = elapsed;
+    if (elapsed > TCSEC_RECEIVE_CYCLE_LIMIT_US) context->cycle_limit_exceeded_count++;
+    context_seal(context);
     return status;
+}
+
+tcsec_status_t tcsec_get_runtime_status(const tcsec_context_t *context,
+                                        tcsec_runtime_status_t *status) {
+    if (context == NULL || status == NULL) return TCSEC_INVALID_ARGUMENT;
+    if (!context_valid(context) && !context_locked(context))
+        return TCSEC_STATE_INTEGRITY_FAILED;
+    memset(status, 0, sizeof(*status));
+    status->self_test = context->self_test_state;
+    status->crypto_backend = context->crypto_backend;
+    memcpy(status->profile_digest, context->profile_digest, TCSEC_PROFILE_DIGEST_LENGTH);
+    status->current_spi = context->current_spi;
+    status->next_spi = next_spi(context->current_spi);
+    status->recovery_spi = context->recovery_spi;
+    status->security_epoch = context->current_epoch;
+    status->root_version = context->current_root_version;
+    status->pending_root_present = context->pending_root_present;
+    status->receive_count = context->receive_count;
+    status->last_receive_us = context->last_receive_us;
+    status->max_receive_us = context->max_receive_us;
+    status->cycle_limit_exceeded_count = context->cycle_limit_exceeded_count;
+    status->clock_anomaly_count = context->clock_anomaly_count;
+    return context_locked(context) ? TCSEC_SELF_TEST_FAILED : TCSEC_OK;
 }
 
 void tcsec_deinit(tcsec_context_t *context) {
@@ -661,7 +735,7 @@ const char *tcsec_status_string(tcsec_status_t status) {
         "IV_FORWARD_JUMP_REJECTED", "AUTHENTICATION_FAILED", "OUTPUT_TOO_SMALL",
         "PLAINTEXT_REJECTED", "ROOT_PREPARE_REJECTED", "PERSISTENCE_FAILED",
         "STATE_INTEGRITY_FAILED", "EPOCH_PROMOTED", "ROOT_PREPARED",
-        "ROOT_ALREADY_PREPARED"
+        "ROOT_ALREADY_PREPARED", "SELF_TEST_FAILED"
     };
-    return (int)status >= 0 && status <= TCSEC_ROOT_ALREADY_PREPARED ? names[status] : "UNKNOWN";
+    return (int)status >= 0 && status <= TCSEC_SELF_TEST_FAILED ? names[status] : "UNKNOWN";
 }
