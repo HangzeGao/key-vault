@@ -13,6 +13,12 @@ if [[ -z "$npm_bin" && -x /usr/bin/npm ]]; then npm_bin=/usr/bin/npm; fi
 if [[ -z "$npm_bin" ]]; then echo "release gate failed: npm not found" >&2; exit 1; fi
 
 cd "$ROOT_DIR"
+(
+  cd web/frontend
+  "$npm_bin" test -- --run
+  "$npm_bin" run build
+)
+
 "$go_bin" test ./...
 "$go_bin" test -count=1 -run '^TestTCDataPlaneAPIProducesFlightAcceptedVector$' ./internal/api/ccsds
 
@@ -21,12 +27,6 @@ printf '%s\n' "$coverage_output"
 c_coverage="$(printf '%s\n' "$coverage_output" | awk '/Flight C line coverage gate passed/ {gsub(/%/,"",$7); print $7}')"
 go_coverage="$(printf '%s\n' "$coverage_output" | awk '/Ground TC Go statement coverage gate passed/ {gsub(/%/,"",$8); print $8}')"
 if [[ -z "$c_coverage" || -z "$go_coverage" ]]; then echo "release gate failed: coverage evidence missing" >&2; exit 1; fi
-
-(
-  cd web/frontend
-  "$npm_bin" test -- --run
-  "$npm_bin" run build
-)
 
 mkdir -p "$EVIDENCE_DIR"
 commit=unavailable
