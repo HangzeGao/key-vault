@@ -3,8 +3,6 @@
 .vscode/
 .cache/
 .gocache/
-.superpowers/
-.pnpm-store/
 .docx-work/
 
 # OS and editor leftovers
@@ -28,11 +26,8 @@ Desktop.ini
 .ssh/
 secrets/
 
-# Local Docker/offline build artifacts
-p0/.docker/
-p1/.docker/
-.docker/
-/baseline/state/
+# Runtime state
+/state/
 
 # Runtime databases and journals
 *.db
@@ -70,17 +65,6 @@ core.*
 bin/
 build/
 dist/
-
-# Frontend dependencies and build cache
-node_modules/
-*.tsbuildinfo
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-playwright-report/
-test-results/
-blob-report/
 
 # Python tooling used by document and analysis workflows
 __pycache__/
