@@ -17,6 +17,7 @@ import (
 	"github.com/kvlt/key-vault/internal/bootstrap"
 	"github.com/kvlt/key-vault/internal/config"
 	"github.com/kvlt/key-vault/internal/logging"
+	"github.com/kvlt/key-vault/internal/operations"
 )
 
 func main() {
@@ -55,9 +56,9 @@ func main() {
 
 	ccsdsH := ccsdsapi.New(app.CCSDSFrameSecurity, app.Downlink)
 	auditH := auditapi.New(app.AuditChain)
-	opsH := ops.New(ops.Deps{
-		Store: app.Store, Resolver: app.Resolver, Policies: app.Policies,
-	})
+	operationsService := operations.New(operations.Deps{Store: app.Store, Resolver: app.Resolver,
+		Policies: app.Policies, TC: app.CCSDSFrameSecurity, Downlink: app.Downlink})
+	opsH := ops.New(operationsService)
 
 	srv, err := server.New(server.Deps{
 		Cfg:          cfg,

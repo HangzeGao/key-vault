@@ -72,10 +72,10 @@ func CapacityGuard(cfg CapacityConfig) func(http.Handler) http.Handler {
 }
 
 func routeLimit(method, path string) int {
-	if method == http.MethodPost && strings.HasPrefix(path, "/ui/api/v1/ccsds/") {
+	if method == http.MethodPost && strings.HasPrefix(path, "/api/v1/") {
 		return 120
 	}
-	if method == http.MethodGet && strings.HasPrefix(path, "/ui/api/v1/audit/") {
+	if method == http.MethodGet && strings.HasPrefix(path, "/ops/v1/audit/") {
 		return 60
 	}
 	return 0

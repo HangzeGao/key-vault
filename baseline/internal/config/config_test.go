@@ -82,11 +82,12 @@ func productionConfig(t *testing.T) *Config {
 	}
 	cfg := Default()
 	cfg.Environment = "production"
+	cfg.Server.OpsListenAddr = "127.0.0.1:8443"
 	cfg.Database = DatabaseConfig{Path: filepath.Join(dir, "security-state.db")}
 	cfg.TPM = TPMConfig{Provider: "native", TCTI: "device:/dev/tpmrm0"}
 	cfg.Server.NodeID = "node-01"
 	cfg.Server.DataListenAddr = ":8443"
-	cfg.Server.OpsListenAddr = ":8444"
+	cfg.Server.OpsListenAddr = "127.0.0.1:8444"
 	cfg.Server.TLSCertFile = file
 	cfg.Server.TLSKeyFile = file
 	cfg.Auth.AccessTokensFile = file

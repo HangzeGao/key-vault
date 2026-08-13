@@ -29,10 +29,10 @@ TC 与下行共享部署进程、审计和身份基础设施，但不共享密�
 
 | Plane | Endpoint | Scope |
 |---|---|---|
-| Data | `POST /ui/api/v1/ccsds/tc:protect` | `ccsds:tc:protect` |
-| Data | `POST /ui/api/v1/ccsds/downlink:unprotect` | `ccsds:downlink:unprotect` |
-| Data | `POST /ui/api/v1/ccsds/flight-status:observe` | `ccsds:downlink:unprotect` |
-| Ops | `GET /ui/api/v1/ops/ccsds/status` | `ops:read` |
+| Data | `POST /api/v1/tc:protect` | `ccsds:tc:protect` |
+| Data | `POST /api/v1/downlink:unprotect` | `ccsds:downlink:unprotect` |
+| Data | `POST /api/v1/flight-status:observe` | `ccsds:downlink:unprotect` |
+| Ops (loopback only) | `GET /ops/v1/status` | `ops:read` |
 
 在线接口不提供 Root、KEK、DEK、nonce prefix、计数器或轮换写操作。所有密钥初装与下行批次推进均由离线命令完成。
 

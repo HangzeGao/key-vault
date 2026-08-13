@@ -90,7 +90,7 @@ curl --fail-with-body \
   -H 'Authorization: Bearer <data-token>' \
   -H 'Content-Type: application/json' \
   --data @raw-downlink-request.json \
-  https://ground.example/ui/api/v1/ccsds/downlink:unprotect
+  https://ground.example/api/v1/downlink:unprotect
 ```
 
 请求文件：

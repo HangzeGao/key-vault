@@ -3,7 +3,7 @@
 environment: production
 
 server:
-  ops_listen_addr: ":8443"
+  ops_listen_addr: "127.0.0.1:8443"
   data_listen_addr: ":8444"
   tls_cert_file: /run/kvlt/tls/server.crt
   tls_key_file: /run/kvlt/tls/server.key

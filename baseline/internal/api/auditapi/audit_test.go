@@ -25,7 +25,7 @@ func TestReadOnlyAuditRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := New(audit)
-	for _, path := range []string{"/ui/api/v1/audit/events?action=provision", "/ui/api/v1/audit/chain/heads", "/ui/api/v1/audit/chain/verify"} {
+	for _, path := range []string{"/ops/v1/audit/events?action=provision", "/ops/v1/audit/heads", "/ops/v1/audit/verify"} {
 		recorder := perform(handler, path, true)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("%s status=%d body=%s", path, recorder.Code, recorder.Body.String())
@@ -34,7 +34,7 @@ func TestReadOnlyAuditRoutes(t *testing.T) {
 	mux := http.NewServeMux()
 	handler.Routes(mux)
 	recorder := httptest.NewRecorder()
-	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, "/ui/api/v1/audit/events", nil))
+	mux.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, "/ops/v1/audit/events", nil))
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("delete status=%d", recorder.Code)
 	}
@@ -47,7 +47,7 @@ func TestAuditRequiresScope(t *testing.T) {
 	}
 	defer store.Close()
 	handler := New(auditchain.New(store))
-	if recorder := perform(handler, "/ui/api/v1/audit/events", false); recorder.Code != http.StatusUnauthorized {
+	if recorder := perform(handler, "/ops/v1/audit/events", false); recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("status=%d", recorder.Code)
 	}
 }

@@ -87,7 +87,7 @@ func TestDownlinkBatchToAuthenticatedHTTPPlaintext(t *testing.T) {
 	}})
 	handler := middleware.ReadBody(auth(middleware.APIAccess(mux)))
 	body, _ := json.Marshal(map[string]string{"package": base64.StdEncoding.EncodeToString(raw)})
-	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/downlink:unprotect", bytes.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer test-token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -111,7 +111,7 @@ func TestDownlinkBatchToAuthenticatedHTTPPlaintext(t *testing.T) {
 
 	raw[len(raw)-1] ^= 1
 	body, _ = json.Marshal(map[string]string{"package": base64.StdEncoding.EncodeToString(raw)})
-	request = httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/downlink:unprotect", bytes.NewReader(body))
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer test-token")
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)

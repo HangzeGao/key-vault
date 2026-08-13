@@ -9,7 +9,7 @@ if [ "$MODE" != "serve" ] && [ "$MODE" != "provision-ccsds" ]; then
   exit 2
 fi
 
-export KVLT_OPS_ADDR="${KVLT_OPS_ADDR:-0.0.0.0:8080}"
+export KVLT_OPS_ADDR="${KVLT_OPS_ADDR:-127.0.0.1:8080}"
 export KVLT_DATA_ADDR="${KVLT_DATA_ADDR:-0.0.0.0:8081}"
 # Node identity, SQLite state, and TPM state remain stable across restarts.
 export KVLT_NODE_ID="${KVLT_NODE_ID:-node-bootstrap}"
@@ -59,23 +59,9 @@ if [ "$MODE" = "provision-ccsds" ]; then
     -artifacts-dir "$KVLT_PROVISION_ARTIFACTS_DIR"
 fi
 
-echo "building frontend..."
-(
-  cd web/frontend
-  if command -v pnpm >/dev/null 2>&1; then
-    pnpm_cmd=(pnpm)
-  elif command -v corepack >/dev/null 2>&1; then
-    pnpm_cmd=(corepack pnpm)
-  else
-    echo "pnpm or corepack is required to build the frontend" >&2
-    exit 1
-  fi
-  "${pnpm_cmd[@]}" install --frozen-lockfile --ignore-scripts
-  "${pnpm_cmd[@]}" run build
-)
-
-echo "building backend..."
+echo "building service and operations CLI..."
 go build -trimpath -o bin/key-vault ./cmd/key-vault
+go build -trimpath -o bin/kvltctl ./cmd/kvltctl
 
 echo "starting KVLT engineering baseline: Ops $KVLT_OPS_ADDR / Data $KVLT_DATA_ADDR"
 exec "$SCRIPT_DIR/bin/key-vault"

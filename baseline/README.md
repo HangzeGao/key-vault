@@ -6,7 +6,10 @@ This repository implements one strict pre-production contract:
 - authenticated raw downlink decryption using 8 dedicated SM4 KEKs and 1024-DEK Current/Previous batches;
 - direct TPM sealing of TC roots and the downlink KEK set, without CRK/SWK compatibility layers;
 - separate Data and Ops planes with bearer-token scopes;
-- a release gate requiring Go and flight-C tests, 95% coverage, frontend tests/build, ARMv7 checks, and ground-to-flight vectors.
+- a release gate requiring Go and flight-C tests, 95% coverage, operations CLI tests, ARMv7 checks, and ground-to-flight vectors.
+
+Operations are intentionally browser-free. Use the loopback-only `kvltctl`
+interface documented in [docs/OPERATIONS_CLI.md](docs/OPERATIONS_CLI.md).
 
 AOS framing is intentionally not implemented until the mission format freezes. Its future adapter must wrap the existing raw-downlink contract and may not create a second key lifecycle.
 

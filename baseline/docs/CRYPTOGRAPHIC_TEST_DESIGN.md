@@ -296,7 +296,7 @@ SM4 block KAT
 | 变更类型 | 提交前最小集合 | 发布前附加集合 |
 | --- | --- | --- |
 | 文档、注释且不改变合同 | 链接/格式/一致性检查 | 无 |
-| 非密码 UI 展示 | 相关前端测试与 build | 完整 release gate |
+| 运维 CLI/只读 Ops API | `kvltctl`、路由矩阵和响应脱敏测试 | 完整 release gate |
 | SM4/CMAC/GCM/HCTR/KDF | L0、L1、相关 L2、ASan/UBSan、smoke fuzz、95% | 长时 fuzz、独立 Oracle 全量差分、L5 |
 | TC 帧格式/API | L1、L2、L3、拒绝矩阵、95% | 目标链路/HIL |
 | Replay/轮换/NVM/数据库 | L2、L3、故障注入、并发/重启、95% | 掉电/磁盘满/物理 NVM |
@@ -337,7 +337,7 @@ make release-gate
 | Go/C 共享普通 HCTR 与 Recovery GCM 互操作向量 | 已有 |
 | HTTP API 生成完整密帧并与星载向量比较 | 已有 |
 | Replay、Next promotion、Recovery、NVM 双槽负向测试 | 已有 |
-| Go/C 95% 覆盖率门禁、前端测试/build、发布哈希证据 | 已有 |
+| Go/C 95% 覆盖率门禁、运维 CLI/API 测试、发布哈希证据 | 已有 |
 | GB/T/GM/T SM4 单分组权威 KAT | 已有；启动自检和单元测试共同覆盖 |
 | RFC 8998 SM4-GCM 权威 KAT | **待补 P0** |
 | SM4-GCM 独立 OpenSSL Oracle 差分 | **待补 P0** |

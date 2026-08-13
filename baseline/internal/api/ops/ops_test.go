@@ -6,63 +6,48 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/kvlt/key-vault/internal/api/middleware"
 	"github.com/kvlt/key-vault/internal/auth/principal"
-	"github.com/kvlt/key-vault/internal/securitystate"
+	"github.com/kvlt/key-vault/internal/operations"
 )
 
-type fakeState struct{ failure bool }
+type fakeSnapshot struct{ failure bool }
 
-func (state fakeState) Ping(context.Context) error {
-	if state.failure {
-		return errors.New("offline")
+func (f fakeSnapshot) Snapshot(context.Context, string) (*operations.Snapshot, error) {
+	if f.failure {
+		return nil, errors.New("sensitive internal path")
 	}
-	return nil
+	return &operations.Snapshot{Status: "READY", Ready: true, Warnings: []string{}}, nil
 }
-func (state fakeState) Diagnostics(context.Context) (*securitystate.Diagnostics, error) {
-	if state.failure {
-		return nil, errors.New("sensitive sqlite path")
-	}
-	return &securitystate.Diagnostics{ObservedAt: time.Now(), Schema: 1, DatabaseSize: 1024,
-		WALSize: 12, Associations: 4, AuditEvents: 2, IntegrityOK: true}, nil
-}
-func TestDatabaseStatusIsSQLiteSpecificAndRedacted(t *testing.T) {
-	handler := New(Deps{Store: fakeState{}})
-	recorder := request(t, handler, "/ui/api/v1/ops/db/status", true)
-	if recorder.Code != http.StatusOK || !contains(recorder.Body.String(), `"driver":"sqlite"`) ||
-		!contains(recorder.Body.String(), `"journal_mode":"WAL"`) || contains(recorder.Body.String(), "path") {
+
+func TestStatusIsTenantBoundAndRedacted(t *testing.T) {
+	recorder := request(t, New(fakeSnapshot{}), true)
+	if recorder.Code != http.StatusOK || !contains(recorder.Body.String(), `"status":"READY"`) || !contains(recorder.Body.String(), `"warnings":[]`) {
 		t.Fatalf("response %d: %s", recorder.Code, recorder.Body.String())
 	}
 }
-
-func TestDatabaseFailureDoesNotExposeRawError(t *testing.T) {
-	handler := New(Deps{Store: fakeState{failure: true}})
-	recorder := request(t, handler, "/ui/api/v1/ops/db/status", true)
-	if recorder.Code != http.StatusServiceUnavailable || contains(recorder.Body.String(), "sensitive") {
-		t.Fatalf("response %d: %s", recorder.Code, recorder.Body.String())
+func TestStatusFailureIsRedacted(t *testing.T) {
+	recorder := request(t, New(fakeSnapshot{true}), true)
+	if recorder.Code != 503 || contains(recorder.Body.String(), "sensitive") {
+		t.Fatalf("%d %s", recorder.Code, recorder.Body.String())
 	}
 }
-
-func TestOpsScopeIsRequired(t *testing.T) {
-	handler := New(Deps{Store: fakeState{}})
-	if recorder := request(t, handler, "/ui/api/v1/ops/db/status", false); recorder.Code != http.StatusUnauthorized {
+func TestStatusRequiresAuthentication(t *testing.T) {
+	if recorder := request(t, New(fakeSnapshot{}), false); recorder.Code != 401 {
 		t.Fatalf("status=%d", recorder.Code)
 	}
 }
 
-func request(t *testing.T, handler *Handler, path string, authenticated bool) *httptest.ResponseRecorder {
+func request(t *testing.T, handler *Handler, authenticated bool) *httptest.ResponseRecorder {
 	t.Helper()
 	mux := http.NewServeMux()
 	handler.Routes(mux)
 	var target http.Handler = mux
 	if authenticated {
-		target = middleware.ReadBody(middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{
-			"test-token": {ID: "ops", TenantID: "t-default", Plane: principal.PlaneOps, Scopes: []string{"ops:read"}},
-		}})(middleware.APIAccess(mux)))
+		target = middleware.ReadBody(middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{"test-token": {ID: "ops", TenantID: "t-default", Plane: principal.PlaneOps, Scopes: []string{"ops:read"}}}})(middleware.APIAccess(mux)))
 	}
-	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req := httptest.NewRequest(http.MethodGet, "/ops/v1/status", nil)
 	if authenticated {
 		req.Header.Set("Authorization", "Bearer test-token")
 	}
@@ -70,7 +55,6 @@ func request(t *testing.T, handler *Handler, path string, authenticated bool) *h
 	target.ServeHTTP(recorder, req)
 	return recorder
 }
-
 func contains(value, fragment string) bool {
 	for index := 0; index+len(fragment) <= len(value); index++ {
 		if value[index:index+len(fragment)] == fragment {

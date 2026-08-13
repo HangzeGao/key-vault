@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,7 +123,7 @@ func Default() *Config {
 	return &Config{
 		Environment: "development",
 		Server: ServerConfig{
-			OpsListenAddr:     ":8080",
+			OpsListenAddr:     "127.0.0.1:8080",
 			DataListenAddr:    ":8081",
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       15 * time.Second,
@@ -261,6 +262,10 @@ func (c *Config) Validate() error {
 	}
 	if c.Server.DataListenAddr == c.Server.OpsListenAddr {
 		return fmt.Errorf("config: data and ops listeners must use different addresses")
+	}
+	host, _, err := net.SplitHostPort(c.Server.OpsListenAddr)
+	if err != nil || (host != "localhost" && (net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback())) {
+		return fmt.Errorf("config: ops_listen_addr must bind an explicit loopback address")
 	}
 	if c.Server.NodeID == "" {
 		c.Server.NodeID = "node-development"

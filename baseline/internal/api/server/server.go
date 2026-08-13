@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -18,7 +17,6 @@ import (
 	"github.com/kvlt/key-vault/internal/api/ops"
 	"github.com/kvlt/key-vault/internal/auth/principal"
 	"github.com/kvlt/key-vault/internal/config"
-	"github.com/kvlt/key-vault/internal/web"
 )
 
 // Server is the HTTP server.
@@ -67,12 +65,11 @@ func New(deps Deps) (*Server, error) {
 	dataMux := http.NewServeMux()
 	registerDataRoutes(dataMux, deps)
 	dataServer := buildHTTPServer(deps.Cfg, deps.Cfg.Server.DataListenAddr,
-		listenerHandler(dataMux, deps, principal.PlaneData, false), tlsConfig)
+		listenerHandler(dataMux, deps, principal.PlaneData), tlsConfig)
 	opsMux := http.NewServeMux()
 	registerOpsRoutes(opsMux, deps)
-	registerConsoleRoutes(opsMux, deps)
 	opsServer := buildHTTPServer(deps.Cfg, deps.Cfg.Server.OpsListenAddr,
-		listenerHandler(opsMux, deps, principal.PlaneOps, true), tlsConfig.Clone())
+		listenerHandler(opsMux, deps, principal.PlaneOps), tlsConfig.Clone())
 	return &Server{data: dataServer, ops: opsServer, tlsEnabled: tlsEnabled}, nil
 }
 
@@ -89,14 +86,7 @@ func buildHTTPServer(cfg *config.Config, addr string, handler http.Handler, tlsC
 	}
 }
 
-func registerConsoleRoutes(mux *http.ServeMux, deps Deps) {
-	if deps.AuditHandler != nil {
-		deps.AuditHandler.Routes(mux)
-	}
-	mux.Handle("GET /ui/", http.StripPrefix("/ui", web.Handler()))
-}
-
-func listenerHandler(mux *http.ServeMux, deps Deps, plane principal.Plane, console bool) http.Handler {
+func listenerHandler(mux *http.ServeMux, deps Deps, plane principal.Plane) http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
@@ -106,7 +96,7 @@ func listenerHandler(mux *http.ServeMux, deps Deps, plane principal.Plane, conso
 		SigmaThreshold: deps.Cfg.TrafficGuard.RateSigmaThreshold})(mux)
 	protected := middleware.APIAccess(middleware.RequirePlane(plane)(admitted))
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || (console && strings.HasPrefix(r.URL.Path, "/ui/") && !strings.HasPrefix(r.URL.Path, "/ui/api/")) {
+		if r.URL.Path == "/healthz" {
 			mux.ServeHTTP(w, r)
 			return
 		}
@@ -115,7 +105,7 @@ func listenerHandler(mux *http.ServeMux, deps Deps, plane principal.Plane, conso
 	handler = middleware.ReadBody(handler)
 	handler = middleware.BodyLimit(deps.Cfg.Server.MaxRequestBody)(handler)
 	handler = middleware.RequestID(handler)
-	return browserSecurity(handler)
+	return transportSecurity(handler)
 }
 
 func registerDataRoutes(mux *http.ServeMux, deps Deps) {
@@ -128,8 +118,8 @@ func registerOpsRoutes(mux *http.ServeMux, deps Deps) {
 	if deps.OpsHandler != nil {
 		deps.OpsHandler.Routes(mux)
 	}
-	if deps.CCSDSHandler != nil {
-		deps.CCSDSHandler.OpsRoutes(mux)
+	if deps.AuditHandler != nil {
+		deps.AuditHandler.Routes(mux)
 	}
 }
 
@@ -170,45 +160,18 @@ func serverTLSConfig() *tls.Config {
 	return &tls.Config{MinVersion: tls.VersionTLS13}
 }
 
-// browserSecurity centralizes browser response hardening and implements
-// least-privilege CORS. An empty allowlist means same-origin only.
-func browserSecurity(next http.Handler) http.Handler {
+// transportSecurity contains only protocol-level response protections. The
+// service no longer hosts browser assets or implements browser CORS policy.
+func transportSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("X-Frame-Options", "DENY")
-		h.Set("Referrer-Policy", "no-referrer")
-		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=()")
 		if r.TLS != nil {
 			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
-		if strings.HasPrefix(r.URL.Path, "/ui/api/") {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ops/") {
 			h.Set("Cache-Control", "no-store")
-		}
-
-		origin := r.Header.Get("Origin")
-		if origin != "" && !requestIsSameOrigin(r, origin) {
-			http.Error(w, "origin not allowed", http.StatusForbidden)
-			return
-		}
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
 		}
 		next.ServeHTTP(w, r)
 	})
-}
-
-func requestIsSameOrigin(r *http.Request, rawOrigin string) bool {
-	origin, err := url.Parse(rawOrigin)
-	if err != nil || origin.User != nil || origin.Path != "" ||
-		origin.RawQuery != "" || origin.Fragment != "" {
-		return false
-	}
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	return origin.Scheme == scheme && strings.EqualFold(origin.Host, r.Host)
 }

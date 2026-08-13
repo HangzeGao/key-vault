@@ -37,7 +37,7 @@ TC Primary Header(5) | Recovery SPI(2) | IV Counter(4)
 
 | 模块 | 输入 | 输出或职责 |
 | --- | --- | --- |
-| 测控调用方 | 带合法帧长和 FECF 的完整 TC 明帧 | 调用 `POST /ui/api/v1/ccsds/tc:protect` |
+| 测控调用方 | 带合法帧长和 FECF 的完整 TC 明帧 | 调用 `POST /api/v1/tc:protect` |
 | 地面密码系统普通 TC API | Base64 完整明帧 | Base64 完整 `Primary Header \| SPI \| IV \| Ciphertext \| FECF` 密帧 |
 | 地面密码系统受控 Recovery 流程 | 主导头模板与换根事务 | 完整 Recovery GCM 密帧；Primary Header 与安全头均被认证 |
 | 测控链路适配器 | 地面返回的完整密帧 | 原样传输并提供受控故障注入，不再组帧 |

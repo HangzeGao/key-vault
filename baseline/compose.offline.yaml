@@ -10,7 +10,7 @@ services:
       - "8081:8080"
       - "8082:8081"
     environment:
-      KVLT_OPS_ADDR: ":8080"
+      KVLT_OPS_ADDR: "127.0.0.1:8080"
       KVLT_DATA_ADDR: ":8081"
       KVLT_STATE_DB: "/var/lib/key-vault/security-state.db"
       KVLT_TPM_PROVIDER: "tpm2"

@@ -19,9 +19,9 @@
 | 不增加 downlink replay window | schema 与 service 无 downlink replay 状态 | schema/静态搜索 | 已实现 |
 | AOS 仅保留未来适配口，不建立 SA/生命周期 | 删除 AOS SA、API 和 replay 表；`RAW` 合同 | 旧 AOS 路由拒绝、schema 测试 | 已实现 |
 | KEKSet 直接 TPM seal；删除 CRK/SWK | `TPMSealer` 与直接 sealed protocol roots | TPM context、解封失败测试 | 已实现 |
-| 离线 CLI 是唯一密钥批次写入口 | `cmd/downlink-keyctl`；前端无写按钮 | CLI 编译、API 路由矩阵 | 已实现 |
+| 离线 CLI 是唯一密钥批次写入口 | `cmd/downlink-keyctl`；Ops API 只读 | CLI 编译、API 路由矩阵 | 已实现 |
 | 单星 singleton 下行状态 | `downlink_key_state(singleton=1)` | 重复 provision/冲突测试 | 已实现 |
-| 运维页只读展示真实状态 | Ops status 返回 slot/generation/observed/previous | API 与前端页面测试 | 已实现 |
+| 运维 CLI 只读展示真实状态 | Ops status 返回 slot/generation/observed/previous | API 与 `kvltctl` 测试 | 已实现 |
 | 用户手册与可运行 example | `DOWNLINK_KEY_USER_MANUAL.md` 与模拟器 | 示例编译、真实 SQLite+TPM+HTTP E2E | 已实现 |
 | 删除旧通用导入/批量密码示例 | `examples` 只保留当前两类合同 | 文件清单审查 | 已实现 |
 | 所有强制覆盖率、C、ARMv7 与发布门禁通过 | `scripts/coverage_gate.sh`、`release_gate.sh` | C 95.41%；地面组合 95.10%；下行 96.50%；ARMv7 与 256 组差分通过 | 已实现并验收 |
@@ -31,7 +31,7 @@
 
 完整 `release-gate` 已在配置的 Linux/ARMv7 集成服务器独立候选目录执行并生成 `build/release/release-evidence.json`。验收结果：
 
-- 前端 12 项测试和生产构建通过；
+- `kvltctl` 与只读 Ops API 测试通过；
 - 全量 Go、TC API 到星载和下行批次到 HTTP 明文 E2E 通过；
 - Go/C software/ARMv7-NEON 256 组差分通过；
 - 星载 C 行覆盖率 95.41%；

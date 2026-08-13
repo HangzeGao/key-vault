@@ -8,23 +8,7 @@ readonly EVIDENCE_DIR="$ROOT_DIR/build/release"
 go_bin="$(command -v go || true)"
 if [[ -z "$go_bin" && -x /usr/local/go/bin/go ]]; then go_bin=/usr/local/go/bin/go; fi
 if [[ -z "$go_bin" ]]; then echo "release gate failed: Go toolchain not found" >&2; exit 1; fi
-if command -v pnpm >/dev/null 2>&1; then
-	pnpm_cmd=(pnpm)
-elif command -v corepack >/dev/null 2>&1; then
-	pnpm_cmd=(corepack pnpm)
-else
-	echo "release gate failed: pnpm or corepack not found" >&2
-	exit 1
-fi
-
 cd "$ROOT_DIR"
-(
-	cd web/frontend
-	"${pnpm_cmd[@]}" install --frozen-lockfile --ignore-scripts
-	"${pnpm_cmd[@]}" test
-	"${pnpm_cmd[@]}" run build
-)
-
 "$go_bin" test ./...
 "$go_bin" test -count=1 -run '^TestTCDataPlaneAPIProducesFlightAcceptedVector$' ./internal/api/ccsds
 "$go_bin" test -count=1 -run '^TestDownlinkBatchToAuthenticatedHTTPPlaintext$' ./internal/api/ccsds
@@ -47,14 +31,14 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 source_manifest_hash="$({
   find cmd internal scripts embedded/tc_security/src embedded/tc_security/include \
-    embedded/tc_security/tests web/frontend/src -type f -print
+    embedded/tc_security/tests -type f -print
   printf '%s\n' Makefile go.mod go.sum
 } | LC_ALL=C sort | xargs sha256sum | sha256sum | awk '{print $1}')"
 ordinary_hash="$(sha256sum testdata/ccsds_tc_sm4_hctr.txt | awk '{print $1}')"
 recovery_hash="$(sha256sum testdata/ccsds_tc_sm4_gcm_recovery.txt | awk '{print $1}')"
 cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
 {
-  "format_version": 2,
+  "format_version": 3,
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_commit": "$commit",
   "dirty_worktree": $dirty,
@@ -68,8 +52,8 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "armv7_cross_compile": "passed",
   "armv7_qemu_neon": "passed",
   "go_x86_armv7_differential_records": 256,
-  "frontend_test": "passed",
-  "frontend_build": "passed"
+  "operations_cli_test": "passed",
+  "browser_asset_chain": "absent"
 }
 EOF
 printf 'Release evidence: %s\n' "$EVIDENCE_DIR/release-evidence.json"

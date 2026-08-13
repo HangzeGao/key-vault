@@ -124,10 +124,10 @@ func RequirePlane(plane principal.Plane) func(http.Handler) http.Handler {
 
 // APIAccess enforces the externally exposed API plane/scope matrix in one
 // place. Handlers keep their local checks as defense-in-depth, but every
-// /ui/api/v1 route must pass this guard first.
+// API route must pass this guard first.
 func APIAccess(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/ui/api/v1/") {
+		if !strings.HasPrefix(r.URL.Path, "/api/v1/") && !strings.HasPrefix(r.URL.Path, "/ops/v1/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -165,21 +165,21 @@ func (r accessRule) allowsPrincipal(p *principal.Principal) bool {
 func accessRuleFor(method, path string) (accessRule, bool) {
 	if method == http.MethodPost {
 		switch path {
-		case "/ui/api/v1/ccsds/tc:protect":
+		case "/api/v1/tc:protect":
 			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:tc:protect"}}, true
-		case "/ui/api/v1/ccsds/downlink:unprotect":
+		case "/api/v1/downlink:unprotect":
 			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:downlink:unprotect"}}, true
-		case "/ui/api/v1/ccsds/flight-status:observe":
+		case "/api/v1/flight-status:observe":
 			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:downlink:unprotect"}}, true
 		}
 	}
 
-	if strings.HasPrefix(path, "/ui/api/v1/audit/") && method == http.MethodGet {
+	if strings.HasPrefix(path, "/ops/v1/audit/") && method == http.MethodGet {
 		return accessRule{plane: principal.PlaneOps, scopes: []string{"audit:read"}}, true
 	}
 	if method == http.MethodGet {
 		switch path {
-		case "/ui/api/v1/ops/ccsds/status", "/ui/api/v1/ops/health", "/ui/api/v1/ops/db/status":
+		case "/ops/v1/status":
 			return accessRule{plane: principal.PlaneOps, scopes: []string{"ops:read"}}, true
 		}
 	}

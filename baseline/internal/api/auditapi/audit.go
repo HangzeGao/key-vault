@@ -17,9 +17,9 @@ type Handler struct{ audit *auditchain.Service }
 func New(audit *auditchain.Service) *Handler { return &Handler{audit: audit} }
 
 func (h *Handler) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /ui/api/v1/audit/events", h.events)
-	mux.HandleFunc("GET /ui/api/v1/audit/chain/verify", h.verify)
-	mux.HandleFunc("GET /ui/api/v1/audit/chain/heads", h.heads)
+	mux.HandleFunc("GET /ops/v1/audit/events", h.events)
+	mux.HandleFunc("GET /ops/v1/audit/verify", h.verify)
+	mux.HandleFunc("GET /ops/v1/audit/heads", h.heads)
 }
 
 func (h *Handler) events(w http.ResponseWriter, request *http.Request) {

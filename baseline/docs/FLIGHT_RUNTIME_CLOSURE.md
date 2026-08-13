@@ -48,7 +48,7 @@ flowchart LR
 
 `make release-gate` 强制执行：
 
-1. 全量 Go、星载 C 和前端测试/构建；
+1. 全量 Go、星载 C 和运维 CLI/API 测试；
 2. 星载 C 行覆盖率不低于 95%，地面 TC Go 语句覆盖率不低于 95%；
 3. ARMv7 hard-float/NEON 交叉编译；
 4. QEMU 执行完整星载 TC/Recovery 测试；

@@ -33,11 +33,11 @@ type Service struct {
 // Status is a non-secret operational projection of the singleton downlink
 // key lifecycle. It never contains KEKs, DEKs, packages, nonces, or digests.
 type Status struct {
-	Provisioned        bool
-	ActiveKEKSlot      uint8
-	CurrentGeneration  uint32
-	CurrentObserved    bool
-	PreviousGeneration uint32
+	Provisioned        bool   `json:"provisioned"`
+	ActiveKEKSlot      uint8  `json:"active_kek_slot"`
+	CurrentGeneration  uint32 `json:"current_generation"`
+	CurrentObserved    bool   `json:"current_observed"`
+	PreviousGeneration uint32 `json:"previous_generation"`
 }
 
 func NewService(store StateStore, sealer KEKSealer) *Service {

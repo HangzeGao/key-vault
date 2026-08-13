@@ -65,7 +65,7 @@ func TestTCAPIConsumesAndReturnsCompleteFrames(t *testing.T) {
 	handler := authenticatedHandler(service, "ccsds:tc:protect")
 	plainFrame := []byte{0x20, 0x01, 0, 0, 7, 0xca, 0xfe, 0, 0}
 	body := []byte(`{"frame":"` + base64.StdEncoding.EncodeToString(plainFrame) + `"}`)
-	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/tc:protect", bytes.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/tc:protect", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer test-token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -86,7 +86,7 @@ func TestTCAPIConsumesAndReturnsCompleteFrames(t *testing.T) {
 func TestTCAPIRejectsObsoleteDataOnlyContract(t *testing.T) {
 	service := &fakeService{}
 	handler := authenticatedHandler(service, "ccsds:tc:protect")
-	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/tc:protect",
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/tc:protect",
 		bytes.NewReader([]byte(`{"data":"AQID"}`)))
 	request.Header.Set("Authorization", "Bearer test-token")
 	response := httptest.NewRecorder()
@@ -100,7 +100,7 @@ func TestDownlinkAPIHasSeparateLeastPrivilegeScope(t *testing.T) {
 	service := &fakeService{}
 	handler := authenticatedHandler(service, "ccsds:tc:protect")
 	body := []byte(`{"frame":"AQID"}`)
-	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/downlink:unprotect", bytes.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer test-token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -114,7 +114,7 @@ func TestDownlinkAPIConsumesRawPackageAndReturnsPlaintext(t *testing.T) {
 	handler := authenticatedHandler(service, "ccsds:downlink:unprotect")
 	raw := append([]byte{0, 17}, bytes.Repeat([]byte{1}, 12+16)...)
 	body := []byte(`{"package":"` + base64.StdEncoding.EncodeToString(raw) + `"}`)
-	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/downlink:unprotect", bytes.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer test-token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -136,7 +136,7 @@ func TestDownlinkAPIErrorsFailClosed(t *testing.T) {
 	} {
 		service := &fakeService{downlinkErr: tc.err}
 		handler := authenticatedHandler(service, "ccsds:downlink:unprotect")
-		request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/downlink:unprotect",
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect",
 			bytes.NewReader([]byte(`{"package":"AQID"}`)))
 		request.Header.Set("Authorization", "Bearer test-token")
 		response := httptest.NewRecorder()
@@ -154,50 +154,12 @@ func TestFlightStatusObservationUsesDownlinkScopeAndStrictSemantic(t *testing.T)
 		`","self_test":"PASSED","crypto_backend":"ARMV7_NEON","current_spi":4097,"next_spi":4098,` +
 		`"recovery_spi":28673,"security_epoch":5,"root_version":2,"pending_root_present":false,` +
 		`"receive_count":10,"last_receive_us":20,"max_receive_us":30,"cycle_limit_exceeded_count":0,"clock_anomaly_count":0}`)
-	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/flight-status:observe", bytes.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/flight-status:observe", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer test-token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || service.flight.CurrentSPI != 4097 || service.flight.ProfileDigest[0] != 1 {
 		t.Fatalf("status=%d flight=%+v body=%s", response.Code, service.flight, response.Body.String())
-	}
-}
-
-func TestOperationsStatusExposesOnlyNonSecretRuntimeState(t *testing.T) {
-	service := &fakeService{}
-	mux := http.NewServeMux()
-	ccsdsapi.New(service, service).OpsRoutes(mux)
-	auth := middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{
-		"test-token": {ID: "operator", TenantID: "tenant-1", Plane: principal.PlaneOps, Scopes: []string{"ops:read"}},
-	}})
-	handler := middleware.ReadBody(auth(middleware.APIAccess(mux)))
-	request := httptest.NewRequest(http.MethodGet, "/ui/api/v1/ops/ccsds/status", nil)
-	request.Header.Set("Authorization", "Bearer test-token")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || service.tenant != "tenant-1" {
-		t.Fatalf("status=%d tenant=%q body=%s", response.Code, service.tenant, response.Body.String())
-	}
-	body := response.Body.String()
-	if bytes.Contains([]byte(body), []byte("key_id")) || bytes.Contains([]byte(body), []byte("nonce_prefix")) ||
-		bytes.Contains([]byte(body), []byte("bitmap")) || bytes.Contains([]byte(body), []byte(`"root":`)) {
-		t.Fatalf("operations response exposed secret or internal state: %s", body)
-	}
-	if !bytes.Contains([]byte(body), []byte(`"warnings":[]`)) {
-		t.Fatalf("empty collections must use the strict JSON array contract: %s", body)
-	}
-	if !bytes.Contains([]byte(body), []byte(`"downlink_format":"RAW"`)) {
-		t.Fatalf("downlink format status missing: %s", body)
-	}
-	if !bytes.Contains([]byte(body), []byte(`"active_kek_slot":3`)) ||
-		!bytes.Contains([]byte(body), []byte(`"current_generation":8`)) ||
-		!bytes.Contains([]byte(body), []byte(`"previous_generation":7`)) {
-		t.Fatalf("downlink lifecycle status missing: %s", body)
-	}
-	if !bytes.Contains([]byte(body), []byte(`"phase":"PREPARED"`)) ||
-		!bytes.Contains([]byte(body), []byte(`"evidence":"RECOVERY_FRAME_PRODUCED"`)) ||
-		!bytes.Contains([]byte(body), []byte(`"transaction_id":"18446744073709551615"`)) {
-		t.Fatalf("rotation evidence missing: %s", body)
 	}
 }
 
