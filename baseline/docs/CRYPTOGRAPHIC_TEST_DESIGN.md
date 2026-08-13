@@ -2,11 +2,11 @@
 
 状态：上线前强制测试合同
 
-适用范围：地面 Go 密码系统、星载 C TC 密码模块、共享密码材料与 CCSDS TC 组合
+适用范围：地面 Go 密码系统、星载 C TC 密码模块、共享密码材料、CCSDS TC 组合及 RAW 数传下行
 
 下位专项设计：[`TC_END_TO_END_TEST_DESIGN.md`](TC_END_TO_END_TEST_DESIGN.md)
 
-AOS 状态：任务帧格式未冻结，仅测试已实现的算法组件，不执行完整 AOS 帧发布验收
+AOS 状态：任务帧格式未冻结；当前只验收独立的 RAW 下行合同，不执行完整 AOS 帧发布验收
 
 ## 1. 目的和约束
 

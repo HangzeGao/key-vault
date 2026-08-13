@@ -255,7 +255,7 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 
 ### 11.1 星地同源测试密钥装载
 
-`ccsds-provision` 现只接受一个严格 Mission Security Profile：同一受控输入将 Current/Next/Recovery/AOS 材料导入地面 TPM 封装流程，并生成星载初始 NVM 镜像、Recovery Root Prepare 完整帧和哈希证据。运行时仍不存在明文导出接口。
+`ccsds-provision` 现只接受一个严格 Mission Security Profile：同一受控输入将 Current/Next/Recovery Root 和独立的 8 槽下行 KEKSet 直接导入地面 TPM 封装流程，并生成星载初始 NVM 镜像、Recovery Root Prepare 完整帧和哈希证据。运行时仍不存在明文密钥导出接口。
 
 ### 11.2 地面 epoch 切换的生产编排入口
 

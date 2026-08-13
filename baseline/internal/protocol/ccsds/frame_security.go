@@ -2,7 +2,6 @@ package ccsds
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 
@@ -174,99 +173,6 @@ func (s *FrameSecurity) ProtectRootPrepareFrame(ctx context.Context, tenantID st
 	protectedFrame := appendTCFECF(join(finalPrimaryHeader, securityHeader, result.Data, result.Tag))
 	return &ProtectedTCFrame{Frame: protectedFrame,
 		Metadata: metadata(*sa, uint64(counter), result.ServiceType)}, nil
-}
-
-// UnprotectAOS verifies replay and authentication before releasing plaintext.
-// A failed authenticator never advances the receive replay window.
-func (s *FrameSecurity) UnprotectAOS(ctx context.Context, tenantID string, frame []byte) (*PlainAOSFrame, error) {
-	headerLen := s.options.AOSPrimaryHeaderLength
-	if len(frame) <= headerLen+2 || len(frame) > s.options.MaxFrameLength {
-		return nil, ErrFrameInvalid
-	}
-	spi := binary.BigEndian.Uint16(frame[headerLen : headerLen+2])
-	sa, err := s.store.GetAssociationBySPI(ctx, tenantID, DirectionAOSRx, spi)
-	if err != nil {
-		return nil, err
-	}
-	if err := sa.Validate(); err != nil {
-		return nil, err
-	}
-	if sa.State != AssociationActive {
-		return nil, ErrAssociationState
-	}
-	securityHeaderLen := 2 + sa.Parameters.SequenceNumberLength + sa.Parameters.TransmittedIVLength
-	minimum := headerLen + securityHeaderLen + sa.Parameters.TagLength
-	if len(frame) < minimum {
-		return nil, ErrFrameInvalid
-	}
-	primaryHeader := append([]byte(nil), frame[:headerLen]...)
-	securityHeader := append([]byte(nil), frame[headerLen:headerLen+securityHeaderLen]...)
-	sequence, err := decodeSequence(securityHeader[2 : 2+sa.Parameters.SequenceNumberLength])
-	if err != nil {
-		return nil, err
-	}
-	if err := s.store.CheckReplay(ctx, sa.ID, sequence, sa.Parameters.ReplayWindow); err != nil {
-		return nil, err
-	}
-	nonceStart := 2 + sa.Parameters.SequenceNumberLength
-	nonce := append([]byte(nil), securityHeader[nonceStart:]...)
-	dataEnd := len(frame) - sa.Parameters.TagLength
-	data := append([]byte(nil), frame[headerLen+securityHeaderLen:dataEnd]...)
-	tag := append([]byte(nil), frame[dataEnd:]...)
-	suiteID, _ := suite.Parse(sa.SuiteID)
-	var aad, authenticationInput []byte
-	switch suiteID.ServiceType() {
-	case suite.ServiceAuthOnly:
-		authenticationInput = join(primaryHeader, securityHeader, data)
-	case suite.ServiceAuthEncrypt:
-		aad = join(primaryHeader, securityHeader)
-	case suite.ServiceEncryptOnly:
-	default:
-		return nil, ErrFrameInvalid
-	}
-	result, err := s.core.Unprotect(ctx, protection.UnprotectRequest{
-		TenantID: tenantID, KeyID: sa.KeyID, UsageScope: models.KeyUsageProtocol, KeyVersion: sa.KeyVersion,
-		PolicyVersion: sa.PolicyVersion, Data: data, Nonce: nonce, Tag: tag,
-		AAD: aad, AuthenticationInput: authenticationInput, NodeID: s.options.NodeID,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if result == nil || result.SuiteID != suiteID || result.ServiceType != suiteID.ServiceType() {
-		return nil, fmt.Errorf("%w: unprotection result does not match association binding", ErrFrameInvalid)
-	}
-	if err := s.store.CommitReplay(ctx, sa.ID, sequence, sa.Parameters.ReplayWindow); err != nil {
-		return nil, err
-	}
-	return &PlainAOSFrame{
-		Frame:    join(primaryHeader, result.Data),
-		Metadata: metadata(*sa, sequence, result.ServiceType),
-	}, nil
-}
-
-func encodeAOSSecurityHeader(spi uint16, sequence uint64, width int, nonce []byte) ([]byte, error) {
-	if width < 1 || width > 8 || (width < 8 && sequence >= uint64(1)<<(uint(width)*8)) {
-		return nil, ErrSequenceExhausted
-	}
-	out := make([]byte, 2+width+len(nonce))
-	binary.BigEndian.PutUint16(out[:2], spi)
-	for i := width - 1; i >= 0; i-- {
-		out[2+i] = byte(sequence)
-		sequence >>= 8
-	}
-	copy(out[2+width:], nonce)
-	return out, nil
-}
-
-func decodeSequence(raw []byte) (uint64, error) {
-	if len(raw) < 1 || len(raw) > 8 {
-		return 0, ErrFrameInvalid
-	}
-	var out uint64
-	for _, b := range raw {
-		out = out<<8 | uint64(b)
-	}
-	return out, nil
 }
 
 func metadata(sa SecurityAssociation, sequence uint64, serviceType suite.ServiceType) OperationMetadata {

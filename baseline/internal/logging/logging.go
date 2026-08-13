@@ -2,8 +2,8 @@
 // Per design §18.2 and INV-09, the following must never appear in logs:
 //   - raw tokens / Authorization header
 //   - plaintext, plaintext_data_key
-//   - DEK / CRK material
-//   - full wrapped_dek
+//   - protocol root / KEK / DEK material
+//   - sealed key material
 //   - full Envelope bytes
 package logging
 
@@ -21,8 +21,7 @@ var sensitiveKeys = map[string]struct{}{
 	"plaintext":          {},
 	"plaintext_data_key": {},
 	"dek":                {},
-	"crk":                {},
-	"wrapped_dek":        {},
+	"sealed_material":    {},
 	"envelope":           {},
 	"password":           {},
 	"secret":             {},

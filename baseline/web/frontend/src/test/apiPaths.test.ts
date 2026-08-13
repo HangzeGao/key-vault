@@ -5,7 +5,7 @@ describe("current mission BFF contract", () => {
   it("exposes only the two CCSDS data-plane operations", () => {
     expect(apiPaths.ccsds.protectTC).toBe("/ui/api/v1/ccsds/tc:protect");
 	expect(apiPaths.ops.ccsdsStatus).toBe("/ui/api/v1/ops/ccsds/status");
-    expect(apiPaths.ccsds.unprotectAOS).toBe("/ui/api/v1/ccsds/aos:unprotect");
+    expect(apiPaths.ccsds.unprotectDownlink).toBe("/ui/api/v1/ccsds/downlink:unprotect");
   });
 
   it("builds audit query strings without empty values", () => {

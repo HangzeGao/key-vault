@@ -12,7 +12,7 @@ const query = (path: string, params: Record<string, string | number | undefined>
 export const apiPaths = {
   ccsds: {
     protectTC: `${BFF}/ccsds/tc:protect`,
-    unprotectAOS: `${BFF}/ccsds/aos:unprotect`,
+    unprotectDownlink: `${BFF}/ccsds/downlink:unprotect`,
   },
   audit: {
     events: (params: Record<string, string | number | undefined> = {}) => query(`${BFF}/audit/events`, params),

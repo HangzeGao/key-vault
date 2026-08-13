@@ -25,11 +25,9 @@ tc:
   recovery_nonce_prefix_hex: "a0a1a2a3a4a5"
   recovery_transaction_id: 72623859790382856
   recovery_primary_header_hex: "2001000001"
-aos:
-  spi: 8193
-  key_version: 4
-  receive_key_hex: "ffeeddccbbaa99887766554433221100"
-  replay_window: 32
+downlink:
+  active_kek_slot: 3
+  kek_set_hex: "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f"
 `
 
 func loadMissionProfile(t *testing.T) *MissionSecurityProfile {
@@ -53,10 +51,10 @@ func TestMissionProfileOwnsGroundFlightAndRecoveryConfiguration(t *testing.T) {
 		t.Fatalf("secrets=%+v err=%v", secrets, err)
 	}
 	defer secrets.Zeroize()
-	ids := MissionAssociationIDs{CurrentKey: "kc", NextKey: "kn", RecoveryKey: "kr", AOSKey: "ka",
-		CurrentSA: "sc", NextSA: "sn", RecoverySA: "sr", AOSSA: "sa"}
+	ids := MissionAssociationIDs{CurrentKey: "kc", NextKey: "kn", RecoveryKey: "kr",
+		CurrentSA: "sc", NextSA: "sn", RecoverySA: "sr"}
 	associations, err := profile.Associations(ids, 1)
-	if err != nil || len(associations) != 4 {
+	if err != nil || len(associations) != 3 {
 		t.Fatalf("associations=%+v err=%v", associations, err)
 	}
 	current, next := associations[0], associations[1]
@@ -106,8 +104,8 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 		func(p *MissionSecurityProfile) { p.TC.SecurityEpoch = ^uint32(0) },
 		func(p *MissionSecurityProfile) { p.TC.NextRootVersion = p.TC.CurrentRootVersion },
 		func(p *MissionSecurityProfile) { p.TC.RecoveryTransactionID = 0 },
-		func(p *MissionSecurityProfile) { p.AOS.ReplayWindow = 65 },
-		func(p *MissionSecurityProfile) { p.AOS.SPI = NextSPI(p.TC.CurrentSPI) },
+		func(p *MissionSecurityProfile) { p.Downlink.ActiveKEKSlot = 8 },
+		func(p *MissionSecurityProfile) { p.Downlink.KEKSetHex = "00" },
 	}
 	for index, mutate := range mutations {
 		candidate := base
@@ -119,8 +117,8 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 	if _, err := base.Associations(MissionAssociationIDs{}, 1); err == nil {
 		t.Fatal("empty IDs accepted")
 	}
-	ids := MissionAssociationIDs{CurrentKey: "kc", NextKey: "kn", RecoveryKey: "kr", AOSKey: "ka",
-		CurrentSA: "sc", NextSA: "sn", RecoverySA: "sr", AOSSA: "sa"}
+	ids := MissionAssociationIDs{CurrentKey: "kc", NextKey: "kn", RecoveryKey: "kr",
+		CurrentSA: "sc", NextSA: "sn", RecoverySA: "sr"}
 	if _, err := base.Associations(ids, 0); err == nil {
 		t.Fatal("zero policy version accepted")
 	}
@@ -132,7 +130,7 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 	(*MissionSecrets)(nil).Zeroize()
 	secrets, _ := base.Secrets()
 	secrets.Zeroize()
-	if !bytes.Equal(secrets.CurrentRoot, make([]byte, 16)) || !bytes.Equal(secrets.AOSKey, make([]byte, 16)) {
+	if !bytes.Equal(secrets.CurrentRoot, make([]byte, 16)) || !bytes.Equal(secrets.KEKSet, make([]byte, 128)) {
 		t.Fatal("mission secrets were not zeroized")
 	}
 	invalid := base

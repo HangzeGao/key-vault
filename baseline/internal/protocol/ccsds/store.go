@@ -23,8 +23,6 @@ type Store interface {
 	MarkTCRotationFrameProduced(ctx context.Context, tenantID, associationID string) error
 	PromoteNextTC(ctx context.Context, tenantID string) error
 	NextTransmitCounter(ctx context.Context, associationID string) (uint32, error)
-	CheckReplay(ctx context.Context, associationID string, sequence uint64, window uint8) error
-	CommitReplay(ctx context.Context, associationID string, sequence uint64, window uint8) error
 }
 
 // MemoryStore is the deterministic test/development adapter. Production must
@@ -35,25 +33,15 @@ type MemoryStore struct {
 	byID     map[string]SecurityAssociation
 	bySPI    map[string]string
 	txNext   map[string]uint64
-	rx       map[string]ReplayState
 	rotation map[string]TCRotationState
 	profiles map[string][32]byte
 	flight   map[string]ObservedFlightSecurityStatus
 }
 
-// ReplayState is the durable representation of a sliding replay window.
-// Exporting the value lets persistence adapters share the exact same state
-// transition rules as the in-memory adapter.
-type ReplayState struct {
-	Highest uint64
-	Bitmap  uint64
-	Seen    bool
-}
-
 func NewMemoryStore(associations ...SecurityAssociation) (*MemoryStore, error) {
 	s := &MemoryStore{
 		byID: make(map[string]SecurityAssociation), bySPI: make(map[string]string),
-		txNext: make(map[string]uint64), rx: make(map[string]ReplayState), rotation: make(map[string]TCRotationState),
+		txNext: make(map[string]uint64), rotation: make(map[string]TCRotationState),
 		profiles: make(map[string][32]byte), flight: make(map[string]ObservedFlightSecurityStatus),
 	}
 	for _, association := range associations {
@@ -193,14 +181,6 @@ func (s *MemoryStore) ReadOperationsState(_ context.Context, tenantID string) ([
 			counter := s.txNext[association.ID]
 			state.NextIVCounter = &counter
 		}
-		if association.Direction == DirectionAOSRx {
-			replay := s.rx[association.ID]
-			state.ReplaySeen = replay.Seen
-			if replay.Seen {
-				highest := replay.Highest
-				state.ReplayHighest = &highest
-			}
-		}
 		states = append(states, state)
 	}
 	sort.Slice(states, func(i, j int) bool {
@@ -316,69 +296,6 @@ func (s *MemoryStore) NextTransmitCounter(_ context.Context, associationID strin
 	}
 	s.txNext[associationID] = next + 1
 	return uint32(next), nil
-}
-
-func (s *MemoryStore) CheckReplay(_ context.Context, associationID string, sequence uint64, window uint8) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	sa, ok := s.byID[associationID]
-	if !ok {
-		return ErrAssociationNotFound
-	}
-	if sa.Direction != DirectionAOSRx || sa.State != AssociationActive {
-		return ErrAssociationState
-	}
-	return s.rx[associationID].Check(sequence, window)
-}
-
-func (s *MemoryStore) CommitReplay(_ context.Context, associationID string, sequence uint64, window uint8) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	state := s.rx[associationID]
-	if err := state.Commit(sequence, window); err != nil {
-		return err
-	}
-	s.rx[associationID] = state
-	return nil
-}
-
-// Check verifies whether sequence is acceptable without mutating state.
-func (state ReplayState) Check(sequence uint64, window uint8) error {
-	if window == 0 || window > 64 {
-		return ErrReplay
-	}
-	if !state.Seen || sequence > state.Highest {
-		return nil
-	}
-	delta := state.Highest - sequence
-	if delta >= uint64(window) || state.Bitmap&(uint64(1)<<delta) != 0 {
-		return ErrReplay
-	}
-	return nil
-}
-
-// Commit records an authenticated sequence number. Callers must serialize
-// concurrent commits for the same association (for example with FOR UPDATE).
-func (state *ReplayState) Commit(sequence uint64, window uint8) error {
-	if err := state.Check(sequence, window); err != nil {
-		return err
-	}
-	if !state.Seen {
-		state.Highest, state.Bitmap, state.Seen = sequence, 1, true
-		return nil
-	}
-	if sequence > state.Highest {
-		shift := sequence - state.Highest
-		if shift >= 64 {
-			state.Bitmap = 1
-		} else {
-			state.Bitmap = (state.Bitmap << shift) | 1
-		}
-		state.Highest = sequence
-		return nil
-	}
-	state.Bitmap |= uint64(1) << (state.Highest - sequence)
-	return nil
 }
 
 func spiKey(tenantID string, direction Direction, spi uint16) string {

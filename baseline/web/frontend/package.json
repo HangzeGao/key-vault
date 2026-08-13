@@ -2,6 +2,7 @@
   "name": "kvlt-keyvault-ui",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "pnpm@10.15.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -34,6 +35,6 @@
     "tailwindcss": "^3.4.15",
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
-    "vitest": "^4.1.10"
+    "vitest": "2.1.9"
   }
 }

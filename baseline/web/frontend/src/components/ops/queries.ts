@@ -22,7 +22,7 @@ export interface DBStatusResponse {
 export interface CCSDSAssociationStatus {
   id: string;
   spi: number;
-  direction: "TC_TX" | "TC_RECOVERY_TX" | "AOS_RX";
+  direction: "TC_TX" | "TC_RECOVERY_TX";
   state: "CURRENT" | "NEXT" | "ACTIVE";
   suite_id: string;
   security_epoch: number;
@@ -55,8 +55,14 @@ export interface CCSDSOperationsStatus {
     next_root_version: number;
     evidence: "RECOVERY_FRAME_PRODUCED" | "GROUND_PROMOTED" | "FIRST_NEXT_FRAME_PRODUCED";
   } | null;
-  aos: CCSDSAssociationStatus[];
-  aos_format: "NOT_FROZEN" | "FROZEN";
+  downlink_format: "RAW";
+  downlink: {
+    provisioned: boolean;
+    active_kek_slot: number;
+    current_generation: number;
+    current_observed: boolean;
+    previous_generation: number;
+  };
   profile_digest: string;
   flight_reconciliation: "NOT_OBSERVED" | "MATCHED" | "MISMATCH";
   flight: {
@@ -91,11 +97,14 @@ export function useCCSDSStatus(refetchInterval = 5_000) {
     queryKey: ["ops", "ccsds-status"],
     queryFn: async () => {
       const status = await api.get<CCSDSOperationsStatus>(apiPaths.ops.ccsdsStatus);
-      if (!Array.isArray(status.warnings) || !Array.isArray(status.aos)) {
-        throw new Error("invalid CCSDS operations response: warnings and aos must be arrays");
+      if (!Array.isArray(status.warnings)) {
+        throw new Error("invalid CCSDS operations response: warnings must be an array");
       }
-      if (status.aos_format !== "NOT_FROZEN" && status.aos_format !== "FROZEN") {
-        throw new Error("invalid CCSDS operations response: aos_format is required");
+      if (status.downlink_format !== "RAW") {
+        throw new Error("invalid CCSDS operations response: downlink_format must be RAW");
+      }
+      if (!status.downlink || status.downlink.active_kek_slot < 0 || status.downlink.active_kek_slot > 7) {
+        throw new Error("invalid CCSDS operations response: downlink lifecycle is required");
       }
       if (!(status.profile_digest === "" || /^[0-9a-f]{64}$/.test(status.profile_digest)) ||
           !["NOT_OBSERVED", "MATCHED", "MISMATCH"].includes(status.flight_reconciliation)) {

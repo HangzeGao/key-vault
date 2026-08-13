@@ -167,10 +167,10 @@ func accessRuleFor(method, path string) (accessRule, bool) {
 		switch path {
 		case "/ui/api/v1/ccsds/tc:protect":
 			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:tc:protect"}}, true
-		case "/ui/api/v1/ccsds/aos:unprotect":
-			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:aos:unprotect"}}, true
+		case "/ui/api/v1/ccsds/downlink:unprotect":
+			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:downlink:unprotect"}}, true
 		case "/ui/api/v1/ccsds/flight-status:observe":
-			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:aos:unprotect"}}, true
+			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:downlink:unprotect"}}, true
 		}
 	}
 

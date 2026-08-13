@@ -22,7 +22,7 @@ interface NavEntry {
 const missionNav: NavEntry[] = [
   { to: "/ui/dashboard", label: "Operations Overview", icon: <LayoutDashboard /> },
   { to: "/ui/tc-security", label: "TC Uplink", icon: <Satellite /> },
-  { to: "/ui/aos-security", label: "AOS Downlink", icon: <RadioTower /> },
+  { to: "/ui/downlink-security", label: "Raw Downlink", icon: <RadioTower /> },
 ];
 
 const assuranceNav: NavEntry[] = [

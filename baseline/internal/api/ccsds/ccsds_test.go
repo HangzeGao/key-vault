@@ -13,13 +13,25 @@ import (
 	"github.com/kvlt/key-vault/internal/api/middleware"
 	"github.com/kvlt/key-vault/internal/auth/principal"
 	"github.com/kvlt/key-vault/internal/crypto/suite"
+	"github.com/kvlt/key-vault/internal/downlink"
 	protocol "github.com/kvlt/key-vault/internal/protocol/ccsds"
 )
 
 type fakeService struct {
-	tenant string
-	input  []byte
-	flight protocol.FlightSecurityStatus
+	tenant      string
+	input       []byte
+	flight      protocol.FlightSecurityStatus
+	downlinkErr error
+}
+
+func (service *fakeService) UnprotectRaw(_ context.Context, frame []byte) ([]byte, error) {
+	service.input = append([]byte(nil), frame...)
+	return []byte{1, 2, 3}, service.downlinkErr
+}
+
+func (service *fakeService) Status(context.Context) (downlink.Status, error) {
+	return downlink.Status{Provisioned: true, ActiveKEKSlot: 3, CurrentGeneration: 8,
+		CurrentObserved: true, PreviousGeneration: 7}, nil
 }
 
 func (service *fakeService) ObserveFlightSecurityStatus(_ context.Context, tenantID string, status protocol.FlightSecurityStatus) error {
@@ -34,24 +46,17 @@ func (service *fakeService) ProtectTCFrame(_ context.Context, tenantID string, f
 			PolicyVersion: 2, SuiteID: suite.SM4HCTR.String(), ServiceType: suite.ServiceEncryptOnly}}, nil
 }
 
-func (service *fakeService) UnprotectAOS(_ context.Context, tenantID string, frame []byte) (*protocol.PlainAOSFrame, error) {
-	service.tenant, service.input = tenantID, append([]byte(nil), frame...)
-	return &protocol.PlainAOSFrame{Frame: []byte{1, 2, 3}, Metadata: protocol.OperationMetadata{
-		SPI: 0x2001, Counter: 9, KeyVersion: 4, PolicyVersion: 2,
-		SuiteID: suite.SM4GCM.String(), ServiceType: suite.ServiceAuthEncrypt}}, nil
-}
-
 func (service *fakeService) OperationsStatus(_ context.Context, tenantID string) (*protocol.OperationsStatus, error) {
 	service.tenant = tenantID
 	counter := uint64(42)
 	return &protocol.OperationsStatus{
-		Status: "READY", Ready: true, AOSFormat: "NOT_FROZEN",
+		Status: "READY", Ready: true, DownlinkFormat: "RAW",
 		TCRotation: &protocol.TCRotationState{Phase: protocol.TCRotationPrepared, TransactionID: ^uint64(0),
 			CurrentSPI: 0x1001, NextSPI: 0x1002, CurrentRootVersion: 4, NextRootVersion: 5},
 		TCCurrent: &protocol.AssociationRuntimeState{ID: "tc-current", SPI: 0x1001, Direction: protocol.DirectionTCTx,
 			State: protocol.AssociationCurrent, SuiteID: suite.SM4HCTR.String(), SecurityEpoch: 3,
 			KeyVersion: 4, PolicyVersion: 2, TransmittedIVLength: 4, NextIVCounter: &counter},
-		AOSActive: []protocol.AssociationRuntimeState{}, Warnings: []string{},
+		Warnings: []string{},
 	}, nil
 }
 
@@ -91,11 +96,11 @@ func TestTCAPIRejectsObsoleteDataOnlyContract(t *testing.T) {
 	}
 }
 
-func TestAOSAPIHasSeparateLeastPrivilegeScope(t *testing.T) {
+func TestDownlinkAPIHasSeparateLeastPrivilegeScope(t *testing.T) {
 	service := &fakeService{}
 	handler := authenticatedHandler(service, "ccsds:tc:protect")
 	body := []byte(`{"frame":"AQID"}`)
-	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/aos:unprotect", bytes.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/downlink:unprotect", bytes.NewReader(body))
 	request.Header.Set("Authorization", "Bearer test-token")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
@@ -104,9 +109,47 @@ func TestAOSAPIHasSeparateLeastPrivilegeScope(t *testing.T) {
 	}
 }
 
-func TestFlightStatusObservationUsesAOSScopeAndStrictSemantic(t *testing.T) {
+func TestDownlinkAPIConsumesRawPackageAndReturnsPlaintext(t *testing.T) {
 	service := &fakeService{}
-	handler := authenticatedHandler(service, "ccsds:aos:unprotect")
+	handler := authenticatedHandler(service, "ccsds:downlink:unprotect")
+	raw := append([]byte{0, 17}, bytes.Repeat([]byte{1}, 12+16)...)
+	body := []byte(`{"package":"` + base64.StdEncoding.EncodeToString(raw) + `"}`)
+	request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/downlink:unprotect", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer test-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !bytes.Equal(service.input, raw) ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"plaintext":"AQID"`)) {
+		t.Fatalf("status=%d input=%x body=%s", response.Code, service.input, response.Body.String())
+	}
+}
+
+func TestDownlinkAPIErrorsFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{downlink.ErrInvalid, http.StatusBadRequest, "DOWNLINK_INVALID"},
+		{downlink.ErrAuthentication, http.StatusUnprocessableEntity, "DOWNLINK_AUTHENTICATION_FAILED"},
+		{downlink.ErrNotProvisioned, http.StatusConflict, "DOWNLINK_STATE_REJECTED"},
+	} {
+		service := &fakeService{downlinkErr: tc.err}
+		handler := authenticatedHandler(service, "ccsds:downlink:unprotect")
+		request := httptest.NewRequest(http.MethodPost, "/ui/api/v1/ccsds/downlink:unprotect",
+			bytes.NewReader([]byte(`{"package":"AQID"}`)))
+		request.Header.Set("Authorization", "Bearer test-token")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != tc.status || !bytes.Contains(response.Body.Bytes(), []byte(tc.code)) {
+			t.Fatalf("err=%v status=%d body=%s", tc.err, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestFlightStatusObservationUsesDownlinkScopeAndStrictSemantic(t *testing.T) {
+	service := &fakeService{}
+	handler := authenticatedHandler(service, "ccsds:downlink:unprotect")
 	body := []byte(`{"format_version":1,"profile_digest":"` + string(bytes.Repeat([]byte("01"), 32)) +
 		`","self_test":"PASSED","crypto_backend":"ARMV7_NEON","current_spi":4097,"next_spi":4098,` +
 		`"recovery_spi":28673,"security_epoch":5,"root_version":2,"pending_root_present":false,` +
@@ -123,7 +166,7 @@ func TestFlightStatusObservationUsesAOSScopeAndStrictSemantic(t *testing.T) {
 func TestOperationsStatusExposesOnlyNonSecretRuntimeState(t *testing.T) {
 	service := &fakeService{}
 	mux := http.NewServeMux()
-	ccsdsapi.New(service).OpsRoutes(mux)
+	ccsdsapi.New(service, service).OpsRoutes(mux)
 	auth := middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{
 		"test-token": {ID: "operator", TenantID: "tenant-1", Plane: principal.PlaneOps, Scopes: []string{"ops:read"}},
 	}})
@@ -140,11 +183,16 @@ func TestOperationsStatusExposesOnlyNonSecretRuntimeState(t *testing.T) {
 		bytes.Contains([]byte(body), []byte("bitmap")) || bytes.Contains([]byte(body), []byte(`"root":`)) {
 		t.Fatalf("operations response exposed secret or internal state: %s", body)
 	}
-	if !bytes.Contains([]byte(body), []byte(`"warnings":[]`)) || !bytes.Contains([]byte(body), []byte(`"aos":[]`)) {
+	if !bytes.Contains([]byte(body), []byte(`"warnings":[]`)) {
 		t.Fatalf("empty collections must use the strict JSON array contract: %s", body)
 	}
-	if !bytes.Contains([]byte(body), []byte(`"aos_format":"NOT_FROZEN"`)) {
-		t.Fatalf("AOS format status missing: %s", body)
+	if !bytes.Contains([]byte(body), []byte(`"downlink_format":"RAW"`)) {
+		t.Fatalf("downlink format status missing: %s", body)
+	}
+	if !bytes.Contains([]byte(body), []byte(`"active_kek_slot":3`)) ||
+		!bytes.Contains([]byte(body), []byte(`"current_generation":8`)) ||
+		!bytes.Contains([]byte(body), []byte(`"previous_generation":7`)) {
+		t.Fatalf("downlink lifecycle status missing: %s", body)
 	}
 	if !bytes.Contains([]byte(body), []byte(`"phase":"PREPARED"`)) ||
 		!bytes.Contains([]byte(body), []byte(`"evidence":"RECOVERY_FRAME_PRODUCED"`)) ||
@@ -155,7 +203,8 @@ func TestOperationsStatusExposesOnlyNonSecretRuntimeState(t *testing.T) {
 
 func authenticatedHandler(service ccsdsapi.Service, scopes ...string) http.Handler {
 	mux := http.NewServeMux()
-	ccsdsapi.New(service).Routes(mux)
+	downlink, _ := service.(ccsdsapi.RawDownlinkService)
+	ccsdsapi.New(service, downlink).Routes(mux)
 	auth := middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{
 		"test-token": {ID: "measurement", TenantID: "tenant-1", Plane: principal.PlaneData, Scopes: scopes},
 	}})

@@ -8,20 +8,26 @@ readonly EVIDENCE_DIR="$ROOT_DIR/build/release"
 go_bin="$(command -v go || true)"
 if [[ -z "$go_bin" && -x /usr/local/go/bin/go ]]; then go_bin=/usr/local/go/bin/go; fi
 if [[ -z "$go_bin" ]]; then echo "release gate failed: Go toolchain not found" >&2; exit 1; fi
-npm_bin="$(command -v npm || true)"
-if [[ -z "$npm_bin" && -x /usr/bin/npm ]]; then npm_bin=/usr/bin/npm; fi
-if [[ -z "$npm_bin" ]]; then echo "release gate failed: npm not found" >&2; exit 1; fi
+if command -v pnpm >/dev/null 2>&1; then
+	pnpm_cmd=(pnpm)
+elif command -v corepack >/dev/null 2>&1; then
+	pnpm_cmd=(corepack pnpm)
+else
+	echo "release gate failed: pnpm or corepack not found" >&2
+	exit 1
+fi
 
 cd "$ROOT_DIR"
 (
-  cd web/frontend
-	"$npm_bin" ci --no-audit --no-fund --no-progress
-  "$npm_bin" test -- --run
-  "$npm_bin" run build
+	cd web/frontend
+	"${pnpm_cmd[@]}" install --frozen-lockfile --ignore-scripts
+	"${pnpm_cmd[@]}" test
+	"${pnpm_cmd[@]}" run build
 )
 
 "$go_bin" test ./...
 "$go_bin" test -count=1 -run '^TestTCDataPlaneAPIProducesFlightAcceptedVector$' ./internal/api/ccsds
+"$go_bin" test -count=1 -run '^TestDownlinkBatchToAuthenticatedHTTPPlaintext$' ./internal/api/ccsds
 
 GO_BIN="$go_bin" bash scripts/armv7_gate.sh
 
@@ -58,6 +64,7 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "ordinary_vector_sha256": "$ordinary_hash",
   "recovery_vector_sha256": "$recovery_hash",
   "api_to_flight_vector": "passed",
+  "downlink_batch_to_http_plaintext": "passed",
   "armv7_cross_compile": "passed",
   "armv7_qemu_neon": "passed",
   "go_x86_armv7_differential_records": 256,

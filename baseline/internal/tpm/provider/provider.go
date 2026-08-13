@@ -3,9 +3,8 @@
 // swtpm, a software provider that emulates seal/unseal with AES-256-GCM is
 // acceptable for local baseline verification.
 //
-// The software provider persists NRWK and CRK envelopes to disk so that
-// restart recovery works (design §19.1: "swtpm 创建 NRWK、封装/解封 CRK、
-// 重启后恢复"). It is NOT a security boundary; production deployments MUST
+// The software provider persists a storage key and sealed-object envelopes so
+// restart recovery can be tested. It is NOT a security boundary; deployments MUST
 // use a real TPM or swtpm with proper isolation.
 package provider
 
@@ -31,22 +30,21 @@ import (
 	"github.com/kvlt/key-vault/internal/crypto/aad"
 )
 
-// CRKEnvelope is the sealed CRK material for a node.
-type CRKEnvelope struct {
+// SealedObject is opaque TPM-sealed material for one named purpose.
+type SealedObject struct {
 	NodeID         string `json:"node_id"`
-	ClusterID      string `json:"cluster_id"`
-	PlaneRole      string `json:"plane_role"`
-	CRKVersion     uint32 `json:"crk_version"`
-	NRWKName       string `json:"nrwk_name"`
-	WrappedCRK     []byte `json:"wrapped_crk"` // AES-GCM sealed
+	Purpose        string `json:"purpose"`
+	ObjectID       string `json:"object_id"`
+	StorageName    string `json:"storage_name"`
+	Blob           []byte `json:"blob"`
 	Nonce          []byte `json:"nonce"`
 	Tag            []byte `json:"tag"`
 	BaselineDigest []byte `json:"baseline_digest"`
 	PolicyDigest   []byte `json:"policy_digest"`
-	CRKAADDigest   string `json:"crk_aad_digest"`
+	ContextDigest  string `json:"context_digest"`
 }
 
-// TPMObjectRef references an NRWK in the provider.
+// TPMObjectRef references a provider storage object.
 type TPMObjectRef struct {
 	Name     string `json:"name"`
 	KeyBytes []byte `json:"key_bytes"` // software provider only; real TPM never exposes
@@ -54,12 +52,9 @@ type TPMObjectRef struct {
 
 // Provider is the TPM abstraction.
 type Provider interface {
-	// EnsureNRWK creates or loads the NRWK for the given name.
-	EnsureNRWK(ctx context.Context, name string) (*TPMObjectRef, error)
-	// SealCRK encrypts the CRK plaintext under the NRWK, bound to the AAD.
-	SealCRK(ctx context.Context, nrwk *TPMObjectRef, crk []byte, aad aad.CRKAAD) (*CRKEnvelope, error)
-	// UnsealCRK decrypts the CRK envelope, verifying the AAD.
-	UnsealCRK(ctx context.Context, nrwk *TPMObjectRef, env *CRKEnvelope, aad aad.CRKAAD) ([]byte, error)
+	EnsureStorage(ctx context.Context, name string) (*TPMObjectRef, error)
+	Seal(ctx context.Context, storage *TPMObjectRef, plaintext []byte, sealContext aad.SealContext) (*SealedObject, error)
+	Unseal(ctx context.Context, storage *TPMObjectRef, object *SealedObject, sealContext aad.SealContext) ([]byte, error)
 	// Quote is a baseline stub and returns a fixed placeholder.
 	Quote(ctx context.Context, nonce []byte, pcrs []int) ([]byte, error)
 	// Close releases provider resources.
@@ -70,7 +65,7 @@ type Provider interface {
 type SoftwareProvider struct {
 	mu       sync.Mutex
 	stateDir string
-	nrwk     map[string]*TPMObjectRef
+	storage  map[string]*TPMObjectRef
 }
 
 // HardwareOptions controls the restricted tpm2-tools based provider.
@@ -126,8 +121,8 @@ func NewHardwareProviderWithOptions(opts HardwareOptions) (*HardwareProvider, er
 }
 
 // HardwareProvider uses the host TPM 2.0 through tpm2-tools. It never exposes
-// a wrapping key in process memory; sealed CRK objects are stored as TPM public
-// and private blobs inside CRKEnvelope.WrappedCRK.
+// a wrapping key in process memory; sealed objects are stored as TPM public
+// and private blobs inside SealedObject.Blob.
 type HardwareProvider struct {
 	mu       sync.Mutex
 	stateDir string
@@ -141,14 +136,14 @@ type sealedObjectBundle struct {
 	Private []byte `json:"private"`
 }
 
-func (h *HardwareProvider) EnsureNRWK(ctx context.Context, name string) (*TPMObjectRef, error) {
+func (h *HardwareProvider) EnsureStorage(ctx context.Context, name string) (*TPMObjectRef, error) {
 	if name == "" {
-		return nil, fmt.Errorf("provider: empty NRWK name")
+		return nil, fmt.Errorf("provider: empty storage name")
 	}
 	return &TPMObjectRef{Name: name}, nil
 }
 
-func (h *HardwareProvider) SealCRK(ctx context.Context, nrwk *TPMObjectRef, crk []byte, a aad.CRKAAD) (*CRKEnvelope, error) {
+func (h *HardwareProvider) Seal(ctx context.Context, storage *TPMObjectRef, plaintext []byte, a aad.SealContext) (*SealedObject, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -159,11 +154,11 @@ func (h *HardwareProvider) SealCRK(ctx context.Context, nrwk *TPMObjectRef, crk 
 	defer os.RemoveAll(workDir)
 
 	primary := filepath.Join(workDir, "primary.ctx")
-	input := filepath.Join(workDir, "crk.bin")
+	input := filepath.Join(workDir, "secret.bin")
 	pub := filepath.Join(workDir, "sealed.pub")
 	priv := filepath.Join(workDir, "sealed.priv")
-	if err := os.WriteFile(input, crk, 0o600); err != nil {
-		return nil, fmt.Errorf("provider: write crk input: %w", err)
+	if err := os.WriteFile(input, plaintext, 0o600); err != nil {
+		return nil, fmt.Errorf("provider: write secret input: %w", err)
 	}
 	defer secureRemove(input)
 	if err := h.run(ctx, workDir, "tpm2_createprimary", "-C", "o", "-c", primary); err != nil {
@@ -184,31 +179,30 @@ func (h *HardwareProvider) SealCRK(ctx context.Context, nrwk *TPMObjectRef, crk 
 	if err != nil {
 		return nil, fmt.Errorf("provider: marshal sealed bundle: %w", err)
 	}
-	return &CRKEnvelope{
+	return &SealedObject{
 		NodeID:         a.NodeID,
-		ClusterID:      a.ClusterID,
-		PlaneRole:      a.PlaneRole,
-		CRKVersion:     a.CRKVersion,
-		NRWKName:       nrwk.Name,
-		WrappedCRK:     bundle,
+		Purpose:        a.Purpose,
+		ObjectID:       a.ObjectID,
+		StorageName:    storage.Name,
+		Blob:           bundle,
 		BaselineDigest: a.BaselineDigest,
 		PolicyDigest:   a.PolicyDigest,
-		CRKAADDigest:   aadDigestHex(a),
+		ContextDigest:  contextDigestHex(a),
 	}, nil
 }
 
-func (h *HardwareProvider) UnsealCRK(ctx context.Context, nrwk *TPMObjectRef, env *CRKEnvelope, a aad.CRKAAD) ([]byte, error) {
+func (h *HardwareProvider) Unseal(ctx context.Context, storage *TPMObjectRef, object *SealedObject, a aad.SealContext) ([]byte, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if env.NRWKName != nrwk.Name {
-		return nil, fmt.Errorf("provider: NRWK name mismatch")
+	if object.StorageName != storage.Name {
+		return nil, fmt.Errorf("provider: storage name mismatch")
 	}
-	if err := validateCRKEnvelopeAAD(env, a); err != nil {
+	if err := validateSealedObjectContext(object, a); err != nil {
 		return nil, err
 	}
 	var bundle sealedObjectBundle
-	if err := json.Unmarshal(env.WrappedCRK, &bundle); err != nil {
+	if err := json.Unmarshal(object.Blob, &bundle); err != nil {
 		return nil, fmt.Errorf("provider: parse sealed bundle: %w", err)
 	}
 
@@ -222,7 +216,7 @@ func (h *HardwareProvider) UnsealCRK(ctx context.Context, nrwk *TPMObjectRef, en
 	pub := filepath.Join(workDir, "sealed.pub")
 	priv := filepath.Join(workDir, "sealed.priv")
 	sealed := filepath.Join(workDir, "sealed.ctx")
-	out := filepath.Join(workDir, "crk.out")
+	out := filepath.Join(workDir, "secret.out")
 	if err := os.WriteFile(pub, bundle.Public, 0o600); err != nil {
 		return nil, fmt.Errorf("provider: write sealed public: %w", err)
 	}
@@ -241,7 +235,7 @@ func (h *HardwareProvider) UnsealCRK(ctx context.Context, nrwk *TPMObjectRef, en
 	defer secureRemove(out)
 	pt, err := os.ReadFile(out)
 	if err != nil {
-		return nil, fmt.Errorf("provider: read unsealed CRK: %w", err)
+		return nil, fmt.Errorf("provider: read unsealed secret: %w", err)
 	}
 	return pt, nil
 }
@@ -360,18 +354,14 @@ func sanitizeCommandOutput(out []byte) string {
 	return s
 }
 
-func validateCRKEnvelopeAAD(env *CRKEnvelope, a aad.CRKAAD) error {
-	if env.CRKAADDigest != aadDigestHex(a) {
-		return fmt.Errorf("provider: CRK envelope AAD digest mismatch")
+func validateSealedObjectContext(object *SealedObject, a aad.SealContext) error {
+	if object == nil || object.ContextDigest != contextDigestHex(a) {
+		return fmt.Errorf("provider: sealed-object context digest mismatch")
 	}
-	if env.ClusterID != a.ClusterID ||
-		env.NodeID != a.NodeID ||
-		env.PlaneRole != a.PlaneRole ||
-		env.CRKVersion != a.CRKVersion ||
-		env.NRWKName != a.NRWKName ||
-		!equalBytes(env.BaselineDigest, a.BaselineDigest) ||
-		!equalBytes(env.PolicyDigest, a.PolicyDigest) {
-		return fmt.Errorf("provider: CRK envelope AAD mismatch")
+	if object.Purpose != a.Purpose || object.ObjectID != a.ObjectID || object.NodeID != a.NodeID ||
+		object.StorageName != a.StorageName || !equalBytes(object.BaselineDigest, a.BaselineDigest) ||
+		!equalBytes(object.PolicyDigest, a.PolicyDigest) {
+		return fmt.Errorf("provider: sealed-object context mismatch")
 	}
 	return nil
 }
@@ -387,7 +377,7 @@ func equalBytes(a, b []byte) bool {
 	return diff == 0
 }
 
-func aadDigestHex(a aad.CRKAAD) string {
+func contextDigestHex(a aad.SealContext) string {
 	b, err := a.Canonical()
 	if err != nil {
 		return ""
@@ -410,7 +400,7 @@ func NewSoftwareProvider(stateDir string) (*SoftwareProvider, error) {
 	}
 	sp := &SoftwareProvider{
 		stateDir: stateDir,
-		nrwk:     make(map[string]*TPMObjectRef),
+		storage:  make(map[string]*TPMObjectRef),
 	}
 	if err := sp.loadAll(); err != nil {
 		return nil, err
@@ -424,7 +414,7 @@ func (s *SoftwareProvider) loadAll() error {
 		return fmt.Errorf("provider: readdir: %w", err)
 	}
 	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".nrwk" {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".storage" {
 			continue
 		}
 		path := filepath.Join(s.stateDir, e.Name())
@@ -436,16 +426,16 @@ func (s *SoftwareProvider) loadAll() error {
 		if err := json.Unmarshal(b, &ref); err != nil {
 			return fmt.Errorf("provider: parse %s: %w", path, err)
 		}
-		s.nrwk[ref.Name] = &ref
+		s.storage[ref.Name] = &ref
 	}
 	return nil
 }
 
-// EnsureNRWK creates or loads the NRWK for the given name.
-func (s *SoftwareProvider) EnsureNRWK(ctx context.Context, name string) (*TPMObjectRef, error) {
+// EnsureStorage creates or loads the software storage key for the given name.
+func (s *SoftwareProvider) EnsureStorage(ctx context.Context, name string) (*TPMObjectRef, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ref, ok := s.nrwk[name]; ok {
+	if ref, ok := s.storage[name]; ok {
 		return ref, nil
 	}
 	key := make([]byte, 32)
@@ -453,15 +443,15 @@ func (s *SoftwareProvider) EnsureNRWK(ctx context.Context, name string) (*TPMObj
 		return nil, fmt.Errorf("provider: rand: %w", err)
 	}
 	ref := &TPMObjectRef{Name: name, KeyBytes: key}
-	if err := s.persistNRWK(ref); err != nil {
+	if err := s.persistStorage(ref); err != nil {
 		return nil, err
 	}
-	s.nrwk[name] = ref
+	s.storage[name] = ref
 	return ref, nil
 }
 
-func (s *SoftwareProvider) persistNRWK(ref *TPMObjectRef) error {
-	path := filepath.Join(s.stateDir, ref.Name+".nrwk")
+func (s *SoftwareProvider) persistStorage(ref *TPMObjectRef) error {
+	path := filepath.Join(s.stateDir, ref.Name+".storage")
 	b, err := json.Marshal(ref)
 	if err != nil {
 		return fmt.Errorf("provider: marshal: %w", err)
@@ -474,12 +464,12 @@ func (s *SoftwareProvider) persistNRWK(ref *TPMObjectRef) error {
 	return os.Rename(tmp, path)
 }
 
-// SealCRK encrypts the CRK under the NRWK with AES-256-GCM, binding the AAD.
-func (s *SoftwareProvider) SealCRK(ctx context.Context, nrwk *TPMObjectRef, crk []byte, a aad.CRKAAD) (*CRKEnvelope, error) {
-	if len(nrwk.KeyBytes) != 32 {
-		return nil, fmt.Errorf("provider: NRWK key length %d", len(nrwk.KeyBytes))
+// Seal encrypts plaintext under the software storage key and binds its context.
+func (s *SoftwareProvider) Seal(ctx context.Context, storage *TPMObjectRef, plaintext []byte, a aad.SealContext) (*SealedObject, error) {
+	if len(storage.KeyBytes) != 32 {
+		return nil, fmt.Errorf("provider: storage key length %d", len(storage.KeyBytes))
 	}
-	block, err := aes.NewCipher(nrwk.KeyBytes)
+	block, err := aes.NewCipher(storage.KeyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("provider: aes new: %w", err)
 	}
@@ -495,37 +485,36 @@ func (s *SoftwareProvider) SealCRK(ctx context.Context, nrwk *TPMObjectRef, crk 
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("provider: rand nonce: %w", err)
 	}
-	sealed := g.Seal(nil, nonce, crk, aadBytes)
+	sealed := g.Seal(nil, nonce, plaintext, aadBytes)
 	tagLen := g.Overhead()
 	ct := sealed[:len(sealed)-tagLen]
 	tag := sealed[len(sealed)-tagLen:]
-	return &CRKEnvelope{
+	return &SealedObject{
 		NodeID:         a.NodeID,
-		ClusterID:      a.ClusterID,
-		PlaneRole:      a.PlaneRole,
-		CRKVersion:     a.CRKVersion,
-		NRWKName:       nrwk.Name,
-		WrappedCRK:     ct,
+		Purpose:        a.Purpose,
+		ObjectID:       a.ObjectID,
+		StorageName:    storage.Name,
+		Blob:           ct,
 		Nonce:          nonce,
 		Tag:            tag,
 		BaselineDigest: a.BaselineDigest,
 		PolicyDigest:   a.PolicyDigest,
-		CRKAADDigest:   aadDigestHex(a),
+		ContextDigest:  contextDigestHex(a),
 	}, nil
 }
 
-// UnsealCRK decrypts the CRK envelope, verifying the AAD.
-func (s *SoftwareProvider) UnsealCRK(ctx context.Context, nrwk *TPMObjectRef, env *CRKEnvelope, a aad.CRKAAD) ([]byte, error) {
-	if env.NRWKName != nrwk.Name {
-		return nil, fmt.Errorf("provider: NRWK name mismatch")
+// Unseal decrypts a sealed object after verifying its context.
+func (s *SoftwareProvider) Unseal(ctx context.Context, storage *TPMObjectRef, object *SealedObject, a aad.SealContext) ([]byte, error) {
+	if object.StorageName != storage.Name {
+		return nil, fmt.Errorf("provider: storage name mismatch")
 	}
-	if err := validateCRKEnvelopeAAD(env, a); err != nil {
+	if err := validateSealedObjectContext(object, a); err != nil {
 		return nil, err
 	}
-	if len(nrwk.KeyBytes) != 32 {
-		return nil, fmt.Errorf("provider: NRWK key length %d", len(nrwk.KeyBytes))
+	if len(storage.KeyBytes) != 32 {
+		return nil, fmt.Errorf("provider: storage key length %d", len(storage.KeyBytes))
 	}
-	block, err := aes.NewCipher(nrwk.KeyBytes)
+	block, err := aes.NewCipher(storage.KeyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("provider: aes new: %w", err)
 	}
@@ -537,10 +526,10 @@ func (s *SoftwareProvider) UnsealCRK(ctx context.Context, nrwk *TPMObjectRef, en
 	if err != nil {
 		return nil, fmt.Errorf("provider: aad canonical: %w", err)
 	}
-	combined := make([]byte, 0, len(env.WrappedCRK)+len(env.Tag))
-	combined = append(combined, env.WrappedCRK...)
-	combined = append(combined, env.Tag...)
-	pt, err := g.Open(nil, env.Nonce, combined, aadBytes)
+	combined := make([]byte, 0, len(object.Blob)+len(object.Tag))
+	combined = append(combined, object.Blob...)
+	combined = append(combined, object.Tag...)
+	pt, err := g.Open(nil, object.Nonce, combined, aadBytes)
 	if err != nil {
 		return nil, fmt.Errorf("provider: unseal failed (AAD or integrity check)")
 	}

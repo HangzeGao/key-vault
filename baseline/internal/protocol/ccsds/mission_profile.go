@@ -26,12 +26,12 @@ var flightNVMMagic = [4]byte{'T', 'C', 'S', '2'}
 // both ground security state and the initial flight NVM image. Its root fields
 // are secret and must only be handled by the offline provisioning process.
 type MissionSecurityProfile struct {
-	FormatVersion uint16            `yaml:"format_version" json:"format_version"`
-	MissionID     string            `yaml:"mission_id" json:"mission_id"`
-	TenantID      string            `yaml:"tenant_id" json:"tenant_id"`
-	SpacecraftID  uint16            `yaml:"spacecraft_id" json:"spacecraft_id"`
-	TC            MissionTCProfile  `yaml:"tc" json:"tc"`
-	AOS           MissionAOSProfile `yaml:"aos" json:"aos"`
+	FormatVersion uint16                 `yaml:"format_version" json:"format_version"`
+	MissionID     string                 `yaml:"mission_id" json:"mission_id"`
+	TenantID      string                 `yaml:"tenant_id" json:"tenant_id"`
+	SpacecraftID  uint16                 `yaml:"spacecraft_id" json:"spacecraft_id"`
+	TC            MissionTCProfile       `yaml:"tc" json:"tc"`
+	Downlink      MissionDownlinkProfile `yaml:"downlink" json:"downlink"`
 }
 
 type MissionTCProfile struct {
@@ -50,23 +50,21 @@ type MissionTCProfile struct {
 	RecoveryPrimaryHeaderHex string `yaml:"recovery_primary_header_hex" json:"recovery_primary_header_hex"`
 }
 
-type MissionAOSProfile struct {
-	SPI           uint16 `yaml:"spi" json:"spi"`
-	KeyVersion    uint32 `yaml:"key_version" json:"key_version"`
-	ReceiveKeyHex string `yaml:"receive_key_hex" json:"receive_key_hex"`
-	ReplayWindow  uint8  `yaml:"replay_window" json:"replay_window"`
+type MissionDownlinkProfile struct {
+	ActiveKEKSlot uint8  `yaml:"active_kek_slot" json:"active_kek_slot"`
+	KEKSetHex     string `yaml:"kek_set_hex" json:"kek_set_hex"`
 }
 
 // MissionAssociationIDs are stable persistence identifiers chosen by the
 // offline provisioning adapter. Profile validation and association construction
 // remain inside this module.
 type MissionAssociationIDs struct {
-	CurrentKey, NextKey, RecoveryKey, AOSKey string
-	CurrentSA, NextSA, RecoverySA, AOSSA     string
+	CurrentKey, NextKey, RecoveryKey string
+	CurrentSA, NextSA, RecoverySA    string
 }
 
 type MissionSecrets struct {
-	CurrentRoot, NextRoot, RecoveryRoot, AOSKey []byte
+	CurrentRoot, NextRoot, RecoveryRoot, KEKSet []byte
 }
 
 // DecodeMissionSecurityProfile accepts one strict YAML document. Unknown and
@@ -107,20 +105,19 @@ func (profile MissionSecurityProfile) Validate() error {
 		tc.RecoveryTransactionID == 0 {
 		return errors.New("ccsds: invalid TC epoch, root version, or recovery transaction")
 	}
-	if profile.AOS.KeyVersion == 0 || profile.AOS.ReplayWindow == 0 || profile.AOS.ReplayWindow > 64 {
-		return errors.New("ccsds: invalid AOS key version or replay window")
+	if profile.Downlink.ActiveKEKSlot > 7 {
+		return errors.New("ccsds: active downlink KEK slot must be 0..7")
 	}
 	nextSPI := NextSPI(tc.CurrentSPI)
-	if tc.RecoverySPI == tc.CurrentSPI || tc.RecoverySPI == nextSPI ||
-		profile.AOS.SPI == tc.CurrentSPI || profile.AOS.SPI == nextSPI || profile.AOS.SPI == tc.RecoverySPI {
-		return errors.New("ccsds: Current, Next, Recovery, and AOS SPIs must be distinct")
+	if tc.RecoverySPI == tc.CurrentSPI || tc.RecoverySPI == nextSPI {
+		return errors.New("ccsds: Current, Next, and Recovery SPIs must be distinct")
 	}
 	for name, value := range map[string]struct {
 		value  string
 		length int
 	}{
 		"current root": {tc.CurrentRootHex, 16}, "next root": {tc.NextRootHex, 16},
-		"recovery root": {tc.RecoveryRootHex, 16}, "AOS key": {profile.AOS.ReceiveKeyHex, 16},
+		"recovery root": {tc.RecoveryRootHex, 16}, "downlink KEK set": {profile.Downlink.KEKSetHex, 128},
 		"ordinary nonce prefix":   {tc.NoncePrefixHex, TCNoncePrefixLength},
 		"recovery nonce prefix":   {tc.RecoveryNoncePrefixHex, TCNoncePrefixLength},
 		"recovery primary header": {tc.RecoveryPrimaryHeaderHex, TCPrimaryHeaderLength},
@@ -150,15 +147,15 @@ func (profile MissionSecurityProfile) Secrets() (MissionSecrets, error) {
 	current, _ := decodeProfileHex(profile.TC.CurrentRootHex, 16)
 	next, _ := decodeProfileHex(profile.TC.NextRootHex, 16)
 	recovery, _ := decodeProfileHex(profile.TC.RecoveryRootHex, 16)
-	aos, _ := decodeProfileHex(profile.AOS.ReceiveKeyHex, 16)
-	return MissionSecrets{CurrentRoot: current, NextRoot: next, RecoveryRoot: recovery, AOSKey: aos}, nil
+	kekSet, _ := decodeProfileHex(profile.Downlink.KEKSetHex, 128)
+	return MissionSecrets{CurrentRoot: current, NextRoot: next, RecoveryRoot: recovery, KEKSet: kekSet}, nil
 }
 
 func (secrets *MissionSecrets) Zeroize() {
 	if secrets == nil {
 		return
 	}
-	for _, value := range [][]byte{secrets.CurrentRoot, secrets.NextRoot, secrets.RecoveryRoot, secrets.AOSKey} {
+	for _, value := range [][]byte{secrets.CurrentRoot, secrets.NextRoot, secrets.RecoveryRoot, secrets.KEKSet} {
 		for index := range value {
 			value[index] = 0
 		}
@@ -172,8 +169,8 @@ func (profile MissionSecurityProfile) Associations(ids MissionAssociationIDs, po
 		}
 		return nil, errors.New("ccsds: policy version is required")
 	}
-	for _, id := range []string{ids.CurrentKey, ids.NextKey, ids.RecoveryKey, ids.AOSKey,
-		ids.CurrentSA, ids.NextSA, ids.RecoverySA, ids.AOSSA} {
+	for _, id := range []string{ids.CurrentKey, ids.NextKey, ids.RecoveryKey,
+		ids.CurrentSA, ids.NextSA, ids.RecoverySA} {
 		if id == "" {
 			return nil, errors.New("ccsds: mission persistence identifiers are required")
 		}
@@ -192,12 +189,7 @@ func (profile MissionSecurityProfile) Associations(ids MissionAssociationIDs, po
 		Direction: DirectionTCRecoveryTx, KeyID: ids.RecoveryKey, KeyVersion: profile.TC.RecoveryRootVersion,
 		PolicyVersion: policyVersion, SuiteID: suite.SM4GCM.String(), State: AssociationActive,
 		Parameters: ManagedParameters{TransmittedIVLength: TCIVCounterLength, TagLength: TCRecoveryTagLength, NoncePrefix: recoveryPrefix}}
-	aos := SecurityAssociation{ID: ids.AOSSA, TenantID: profile.TenantID, SPI: profile.AOS.SPI,
-		Direction: DirectionAOSRx, KeyID: ids.AOSKey, KeyVersion: profile.AOS.KeyVersion,
-		PolicyVersion: policyVersion, SuiteID: suite.SM4GCM.String(), State: AssociationActive,
-		Parameters: ManagedParameters{SequenceNumberLength: 4, TransmittedIVLength: 12,
-			TagLength: 16, ReplayWindow: profile.AOS.ReplayWindow, NoncePrefix: []byte{}}}
-	associations := []SecurityAssociation{current, next, recovery, aos}
+	associations := []SecurityAssociation{current, next, recovery}
 	for _, association := range associations {
 		if err := association.Validate(); err != nil {
 			return nil, err

@@ -25,32 +25,15 @@ type Key struct {
 	UpdatedAt      time.Time
 }
 
-// KeyVersion holds only CRK-wrapped protocol key material.
+// KeyVersion holds only direct TPM-sealed protocol key material.
 type KeyVersion struct {
-	ID           string
-	KeyID        string
-	VersionNo    uint32
-	SuiteID      string
-	WrappedDEK   []byte
-	WrapMetadata []byte
-	Status       string
-	CreatedAt    time.Time
-}
-
-type CRKVersion struct {
-	ID        string
-	Version   uint32
-	Epoch     uint64
-	Status    string
-	CreatedAt time.Time
-}
-
-type CRKNodeEnvelope struct {
-	ID           string
-	CRKVersionID string
-	NodeID       string
-	Envelope     []byte
-	CreatedAt    time.Time
+	ID             string
+	KeyID          string
+	VersionNo      uint32
+	SuiteID        string
+	SealedMaterial []byte
+	Status         string
+	CreatedAt      time.Time
 }
 
 // AuditEvent is an append-only event in a per-chain hash chain.

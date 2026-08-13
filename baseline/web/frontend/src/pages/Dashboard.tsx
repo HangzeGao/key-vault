@@ -15,7 +15,7 @@ export function DashboardPage() {
         <div>
           <div className="operations-kicker"><Activity size={13} />MISSION CONTROL / LIVE STATUS</div>
           <h1 className="section-title">Mission Security Operations</h1>
-          <p className="section-subtitle">Operational readiness for TC uplink, AOS downlink, Recovery GCM, and durable ground state.</p>
+          <p className="section-subtitle">Operational readiness for TC uplink, raw downlink, Recovery GCM, and durable ground state.</p>
         </div>
         <button className="operations-refresh" type="button" onClick={() => query.refetch()} disabled={query.isFetching}>
           <RefreshCw size={14} className={query.isFetching ? "spinning" : ""} />Refresh status
@@ -45,8 +45,8 @@ export function DashboardPage() {
           <Link to="/ui/tc-security" className="operations-stat-card recovery">
             <ShieldCheck size={18} /><span>RECOVERY GCM</span><strong>{formatSPI(snapshot.tc.recovery?.spi)}</strong><small>{snapshot.tc.recovery?.suite_id ?? "Not configured"}</small><ArrowUpRight className="ops-card-arrow" size={14} />
           </Link>
-          <Link to="/ui/aos-security" className="operations-stat-card aos">
-            <RadioTower size={18} /><span>AOS DOWNLINK</span><strong>{snapshot.aos.length}</strong><small>{snapshot.aos_format.replaceAll("_", " ")}</small><ArrowUpRight className="ops-card-arrow" size={14} />
+          <Link to="/ui/downlink-security" className="operations-stat-card downlink">
+            <RadioTower size={18} /><span>RAW DOWNLINK</span><strong>1,024</strong><small>{snapshot.downlink_format}</small><ArrowUpRight className="ops-card-arrow" size={14} />
           </Link>
         </div>
 
@@ -57,7 +57,7 @@ export function DashboardPage() {
               <div><span>TC Current</span><strong>{snapshot.tc.current?.state ?? "MISSING"}</strong><small>{formatSPI(snapshot.tc.current?.spi)}</small></div>
               <div><span>TC Next</span><strong>{snapshot.tc.next?.state ?? "MISSING"}</strong><small>{formatSPI(snapshot.tc.next?.spi)}</small></div>
               <div><span>Recovery</span><strong>{snapshot.tc.recovery?.state ?? "MISSING"}</strong><small>{formatSPI(snapshot.tc.recovery?.spi)}</small></div>
-              <div><span>AOS Downlink</span><strong>{snapshot.aos.length > 0 ? "ACTIVE" : "MISSING"}</strong><small>{snapshot.aos_format.replaceAll("_", " ")} · {snapshot.aos.length} associations</small></div>
+              <div><span>Raw Downlink</span><strong>{snapshot.downlink_format}</strong><small>Current / Previous batch fallback</small></div>
             </div>
           </Panel>
           <Panel title="Ground / Flight Reconciliation">

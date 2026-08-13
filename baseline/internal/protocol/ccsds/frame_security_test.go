@@ -11,7 +11,6 @@ import (
 )
 
 type fakeCore struct {
-	aosNonce       []byte
 	lastDerivation protection.Derivation
 	lastAAD        []byte
 	protectErr     error
@@ -128,16 +127,6 @@ func prepareTestRotation(t *testing.T, store Store, current, next SecurityAssoci
 	}
 }
 
-func aosAssociation() SecurityAssociation {
-	return SecurityAssociation{
-		ID: "rx", TenantID: "tenant-1", SPI: 0x1002, Direction: DirectionAOSRx,
-		KeyID: "key-aos", KeyVersion: 1, PolicyVersion: 1,
-		SuiteID: suite.AES256GCM.String(), State: AssociationActive,
-		Parameters: ManagedParameters{SequenceNumberLength: 4, TransmittedIVLength: 12,
-			TagLength: 16, ReplayWindow: 32},
-	}
-}
-
 func newTestSecurity(t *testing.T, core ProtectionCore, associations ...SecurityAssociation) (*FrameSecurity, *MemoryStore) {
 	t.Helper()
 	store, err := NewMemoryStore(associations...)
@@ -157,9 +146,7 @@ func newTestSecurity(t *testing.T, core ProtectionCore, associations ...Security
 			t.Fatal(err)
 		}
 	}
-	security, err := New(core, store, Options{
-		AOSPrimaryHeaderLength: 6, MaxFrameLength: 2048, NodeID: "node-1", TCSpacecraftID: 0x1234,
-	})
+	security, err := New(core, store, Options{MaxFrameLength: 2048, NodeID: "node-1", TCSpacecraftID: 0x1234})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,51 +335,6 @@ func TestRootPrepareTransactionIsStrict(t *testing.T) {
 	}
 }
 
-func TestUnprotectAOSAndRejectReplay(t *testing.T) {
-	rx := aosAssociation()
-	core := &fakeCore{aosNonce: bytes.Repeat([]byte{0x11}, 12)}
-	security, _ := newTestSecurity(t, core, rx)
-	header := []byte{1, 2, 3, 4, 5, 6}
-	plain := []byte("command")
-	securityHeader, _ := encodeAOSSecurityHeader(rx.SPI, 7, rx.Parameters.SequenceNumberLength, core.aosNonce)
-	ciphertext := append([]byte(nil), plain...)
-	for i := range ciphertext {
-		ciphertext[i] ^= 0x5a
-	}
-	aos := join(header, securityHeader, ciphertext, bytes.Repeat([]byte{0xa5}, 16))
-	opened, err := security.UnprotectAOS(context.Background(), "tenant-1", aos)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(opened.Frame, join(header, plain)) {
-		t.Fatalf("AOS plaintext = %x", opened.Frame)
-	}
-	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", aos); !errors.Is(err, ErrReplay) {
-		t.Fatalf("replay error = %v, want %v", err, ErrReplay)
-	}
-}
-
-func TestFailedAuthenticationDoesNotAdvanceAOSReplayWindow(t *testing.T) {
-	rx := aosAssociation()
-	security, _ := newTestSecurity(t, &fakeCore{aosNonce: bytes.Repeat([]byte{0x11}, 12)}, rx)
-	header := []byte{1, 2, 3, 4, 5, 6}
-	securityHeader, _ := encodeAOSSecurityHeader(rx.SPI, 9, 4, bytes.Repeat([]byte{0x11}, 12))
-	bad := join(header, securityHeader, []byte("cipher"), bytes.Repeat([]byte{0x00}, 16))
-	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", bad); err == nil {
-		t.Fatal("bad authenticator accepted")
-	}
-	good := join(header, securityHeader, []byte("cipher"), bytes.Repeat([]byte{0xa5}, 16))
-	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", good); err != nil {
-		t.Fatalf("sequence was consumed by failed authentication: %v", err)
-	}
-	nilSecurity, _ := newTestSecurity(t, &fakeCore{nilUnprotect: true}, rx)
-	nilHeader, _ := encodeAOSSecurityHeader(rx.SPI, 10, 4, bytes.Repeat([]byte{0x11}, 12))
-	nilResultFrame := join(header, nilHeader, []byte("cipher"), bytes.Repeat([]byte{0xa5}, 16))
-	if _, err := nilSecurity.UnprotectAOS(context.Background(), "tenant-1", nilResultFrame); !errors.Is(err, ErrFrameInvalid) {
-		t.Fatalf("nil AOS result error = %v", err)
-	}
-}
-
 func TestTCProfilesAndStatesAreStrict(t *testing.T) {
 	sa := tcAssociation()
 	if err := sa.Validate(); err != nil {
@@ -507,36 +449,7 @@ func TestFrameSecurityPropagatesCoreAndBindingFailures(t *testing.T) {
 	}
 }
 
-func TestUnprotectAOSBoundaryFailures(t *testing.T) {
-	security, store := newTestSecurity(t, &fakeCore{})
-	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", nil); !errors.Is(err, ErrFrameInvalid) {
-		t.Fatalf("empty AOS frame = %v", err)
-	}
-	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", make([]byte, 2049)); !errors.Is(err, ErrFrameInvalid) {
-		t.Fatalf("oversized AOS frame = %v", err)
-	}
-	unknown := []byte{0, 0, 0, 0, 0, 0, 0x77, 0x77, 0}
-	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", unknown); !errors.Is(err, ErrAssociationNotFound) {
-		t.Fatalf("unknown AOS SPI = %v", err)
-	}
-	if _, err := New(&fakeCore{}, store, Options{}); err == nil {
-		t.Fatal("New accepted invalid options")
-	}
-
-	disabled := aosAssociation()
-	disabled.State = AssociationDisabled
-	security, _ = newTestSecurity(t, &fakeCore{}, disabled)
-	short := []byte{0, 0, 0, 0, 0, 0, 0x10, 0x02, 0}
-	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", short); !errors.Is(err, ErrAssociationState) {
-		t.Fatalf("disabled AOS association = %v", err)
-	}
-	security, _ = newTestSecurity(t, &fakeCore{}, aosAssociation())
-	if _, err := security.UnprotectAOS(context.Background(), "tenant-1", short); !errors.Is(err, ErrFrameInvalid) {
-		t.Fatalf("short AOS security fields = %v", err)
-	}
-}
-
-func TestTCFrameValidationAndSequenceBoundaries(t *testing.T) {
+func TestTCFrameValidationBoundaries(t *testing.T) {
 	if _, err := assembleTCFrame(nil, []byte{1}, TCMaxFrameLength); !errors.Is(err, ErrFrameInvalid) {
 		t.Fatalf("invalid assembly error = %v", err)
 	}
@@ -560,21 +473,6 @@ func TestTCFrameValidationAndSequenceBoundaries(t *testing.T) {
 		if err := validateTCFrame(invalid); err == nil {
 			t.Fatalf("invalid frame accepted: %x", invalid)
 		}
-	}
-	if _, err := encodeAOSSecurityHeader(1, 1, 0, nil); !errors.Is(err, ErrSequenceExhausted) {
-		t.Fatalf("zero sequence width = %v", err)
-	}
-	if _, err := encodeAOSSecurityHeader(1, 256, 1, nil); !errors.Is(err, ErrSequenceExhausted) {
-		t.Fatalf("overflow sequence = %v", err)
-	}
-	if got, err := decodeSequence([]byte{1, 2, 3, 4, 5, 6, 7, 8}); err != nil || got != 0x0102030405060708 {
-		t.Fatalf("decodeSequence = %x/%v", got, err)
-	}
-	if _, err := decodeSequence(nil); !errors.Is(err, ErrFrameInvalid) {
-		t.Fatalf("empty sequence = %v", err)
-	}
-	if _, err := decodeSequence(make([]byte, 9)); !errors.Is(err, ErrFrameInvalid) {
-		t.Fatalf("long sequence = %v", err)
 	}
 }
 
@@ -610,25 +508,8 @@ func TestAssociationAndOptionsValidationMatrix(t *testing.T) {
 		mutate(&sa)
 		expectInvalid(sa)
 	}
-	aos := aosAssociation()
-	if err := aos.Validate(); err != nil {
-		t.Fatal(err)
-	}
-	for _, mutate := range []func(*SecurityAssociation){
-		func(sa *SecurityAssociation) { sa.Parameters.SequenceNumberLength = 0 },
-		func(sa *SecurityAssociation) { sa.Parameters.SequenceNumberLength = 9 },
-		func(sa *SecurityAssociation) { sa.Parameters.TransmittedIVLength = 11 },
-		func(sa *SecurityAssociation) { sa.Parameters.NoncePrefix = []byte{1} },
-		func(sa *SecurityAssociation) { sa.Parameters.TagLength = 15 },
-		func(sa *SecurityAssociation) { sa.Parameters.ReplayWindow = 0 },
-		func(sa *SecurityAssociation) { sa.Parameters.ReplayWindow = 65 },
-	} {
-		candidate := aos
-		mutate(&candidate)
-		expectInvalid(candidate)
-	}
 	if (Options{}).validate() == nil ||
-		(Options{AOSPrimaryHeaderLength: 6, MaxFrameLength: 100, NodeID: "n"}).validate() != nil {
+		(Options{MaxFrameLength: 100, NodeID: "n"}).validate() != nil {
 		t.Fatal("options validation mismatch")
 	}
 	if _, err := New(nil, nil, Options{}); err == nil {

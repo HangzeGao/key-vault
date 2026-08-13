@@ -86,7 +86,7 @@ func TestTCDataPlaneAPIProducesFlightAcceptedVector(t *testing.T) {
 		}
 	}
 	security, err := protocol.New(e2eCore{root: decode("root"), suite: suiteID}, store, protocol.Options{
-		AOSPrimaryHeaderLength: 6, MaxFrameLength: 2048, NodeID: "e2e-ground",
+		MaxFrameLength: 2048, NodeID: "e2e-ground",
 		TCSpacecraftID: uint16(parse("spacecraft_id", 16, 16)),
 	})
 	if err != nil {

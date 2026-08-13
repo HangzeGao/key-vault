@@ -23,11 +23,11 @@ func (s *testStore) GetKeyVersionByNo(context.Context, string, uint32) (*models.
 
 type testLeaser struct{ key []byte }
 
-func (l testLeaser) IssueDEKLease(_ context.Context, keyVersionID, keyID string, version uint32,
-	suiteID suite.ID, tenantID, purpose, nodeID string) (*keyresolver.DEKLease, error) {
-	return &keyresolver.DEKLease{
+func (l testLeaser) IssueKey(_ context.Context, keyVersionID, keyID string, version uint32,
+	suiteID suite.ID, tenantID, purpose, nodeID string) (*keyresolver.KeyLease, error) {
+	return &keyresolver.KeyLease{
 		KeyVersionID: keyVersionID, KeyID: keyID, KeyVersion: version, SuiteID: suiteID,
-		TenantID: tenantID, Purpose: purpose, NodeID: nodeID, DEK: append([]byte(nil), l.key...),
+		TenantID: tenantID, Purpose: purpose, NodeID: nodeID, Key: append([]byte(nil), l.key...),
 	}, nil
 }
 

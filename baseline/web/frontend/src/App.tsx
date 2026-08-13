@@ -7,7 +7,7 @@ import { LoginPage } from "./pages/Login";
 import { DashboardPage } from "./pages/Dashboard";
 import { SystemAuditPage } from "./pages/SystemAudit";
 import { TCSecurityPage } from "./pages/TCSecurity";
-import { AOSSecurityPage } from "./pages/AOSSecurity";
+import { DownlinkSecurityPage } from "./pages/DownlinkSecurity";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -23,7 +23,7 @@ function ProtectedRoutes() {
     <Routes>
       <Route path="dashboard" element={<RouteErrorBoundary><DashboardPage /></RouteErrorBoundary>} />
       <Route path="tc-security" element={<RouteErrorBoundary><TCSecurityPage /></RouteErrorBoundary>} />
-      <Route path="aos-security" element={<RouteErrorBoundary><AOSSecurityPage /></RouteErrorBoundary>} />
+      <Route path="downlink-security" element={<RouteErrorBoundary><DownlinkSecurityPage /></RouteErrorBoundary>} />
       <Route path="system" element={<RouteErrorBoundary><SystemAuditPage /></RouteErrorBoundary>} />
       <Route path="*" element={<Navigate to="dashboard" replace />} />
     </Routes>

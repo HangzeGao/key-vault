@@ -1,6 +1,6 @@
 // Package ops exposes read-only health for the single-node CCSDS ground
 // system. It intentionally contains no generic database repair, lifecycle,
-// outbox, CRK mutation, or break-glass endpoints.
+// outbox, key mutation, or break-glass endpoints.
 package ops
 
 import (
@@ -54,12 +54,11 @@ func (h *Handler) health(w http.ResponseWriter, request *http.Request) {
 	} else {
 		checks["state"] = map[string]any{"status": "ok", "summary": "SQLite security state available"}
 	}
-	if h.resolver == nil || h.resolver.CRKVersion() == 0 {
-		checks["tpm_root"] = map[string]any{"status": "degraded", "summary": "TPM root envelope unavailable"}
+	if h.resolver == nil || !h.resolver.Ready() {
+		checks["tpm_storage"] = map[string]any{"status": "degraded", "summary": "TPM sealed-object storage unavailable"}
 		overall = "degraded"
 	} else {
-		checks["tpm_root"] = map[string]any{"status": "ok", "summary": "TPM root envelope loaded",
-			"crk_version": h.resolver.CRKVersion()}
+		checks["tpm_storage"] = map[string]any{"status": "ok", "summary": "TPM sealed-object storage available"}
 	}
 	policyReady := false
 	if h.policies != nil {
@@ -98,8 +97,8 @@ func (h *Handler) databaseStatus(w http.ResponseWriter, request *http.Request) {
 		"driver": "sqlite", "status": status, "observed_at": diagnostics.ObservedAt,
 		"connected":  true,
 		"connection": map[string]any{"status": status, "latency_ms": time.Since(started).Milliseconds()},
-		"schema": map[string]any{"status": map[bool]string{true: "ok", false: "degraded"}[diagnostics.Schema == 2],
-			"current": diagnostics.Schema, "expected": 2},
+		"schema": map[string]any{"status": map[bool]string{true: "ok", false: "degraded"}[diagnostics.Schema == 3],
+			"current": diagnostics.Schema, "expected": 3},
 		"storage": map[string]any{"database_bytes": diagnostics.DatabaseSize, "wal_bytes": diagnostics.WALSize,
 			"journal_mode": "WAL", "synchronous": "FULL"},
 		"records":   map[string]any{"security_associations": diagnostics.Associations, "audit_events": diagnostics.AuditEvents},

@@ -1,5 +1,5 @@
 // Package aad implements deterministic TLV canonical encoding for
-// system-internal AAD such as CRK protection. Data-plane caller AAD is opaque
+// system-internal TPM sealed-object context. Data-plane caller AAD is opaque
 // bytes supplied by the caller and is not canonicalized by this package.
 package aad
 
@@ -12,13 +12,12 @@ import (
 // Field IDs (uint8). Order in this list defines the canonical order.
 // Encode rejects out-of-order or repeated fields.
 const (
-	FieldClusterID   uint8 = 0x07 // CRK AAD only
-	FieldNodeID      uint8 = 0x08 // CRK AAD only
-	FieldPlaneRole   uint8 = 0x09 // CRK AAD only
-	FieldCRKVersion  uint8 = 0x0A // CRK AAD only
-	FieldNRWKName    uint8 = 0x0B // CRK AAD only
-	FieldBaselineDig uint8 = 0x0C // CRK AAD only
-	FieldPolicyDig   uint8 = 0x0D // CRK AAD only
+	FieldPurpose     uint8 = 0x07
+	FieldObjectID    uint8 = 0x08
+	FieldNodeID      uint8 = 0x09
+	FieldStorageName uint8 = 0x0A
+	FieldBaselineDig uint8 = 0x0B
+	FieldPolicyDig   uint8 = 0x0C
 )
 
 const (
@@ -114,27 +113,23 @@ func Decode(b []byte) ([]Field, error) {
 	return fields, nil
 }
 
-// CRKAAD is the AAD bound to a CRK envelope.
-type CRKAAD struct {
-	ClusterID      string
+// SealContext binds a TPM-sealed object to its one intended role and identity.
+type SealContext struct {
+	Purpose        string
+	ObjectID       string
 	NodeID         string
-	PlaneRole      string
-	CRKVersion     uint32
-	NRWKName       string
+	StorageName    string
 	BaselineDigest []byte
 	PolicyDigest   []byte
 }
 
-// Canonical returns the canonical TLV encoding of the CRK AAD.
-func (c CRKAAD) Canonical() ([]byte, error) {
-	cv := make([]byte, 4)
-	binary.BigEndian.PutUint32(cv, c.CRKVersion)
+// Canonical returns the canonical TLV encoding of the sealed-object context.
+func (c SealContext) Canonical() ([]byte, error) {
 	fields := []Field{
-		{ID: FieldClusterID, Value: []byte(c.ClusterID)},
+		{ID: FieldPurpose, Value: []byte(c.Purpose)},
+		{ID: FieldObjectID, Value: []byte(c.ObjectID)},
 		{ID: FieldNodeID, Value: []byte(c.NodeID)},
-		{ID: FieldPlaneRole, Value: []byte(c.PlaneRole)},
-		{ID: FieldCRKVersion, Value: cv},
-		{ID: FieldNRWKName, Value: []byte(c.NRWKName)},
+		{ID: FieldStorageName, Value: []byte(c.StorageName)},
 		{ID: FieldBaselineDig, Value: c.BaselineDigest},
 		{ID: FieldPolicyDig, Value: c.PolicyDigest},
 	}

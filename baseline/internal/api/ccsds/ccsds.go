@@ -15,26 +15,34 @@ import (
 
 	"github.com/kvlt/key-vault/internal/api/middleware"
 	"github.com/kvlt/key-vault/internal/auth/principal"
+	downlinkcrypto "github.com/kvlt/key-vault/internal/downlink"
 	"github.com/kvlt/key-vault/internal/errorsx"
 	protocol "github.com/kvlt/key-vault/internal/protocol/ccsds"
 )
 
 type Service interface {
 	ProtectTCFrame(ctx context.Context, tenantID string, frame []byte) (*protocol.ProtectedTCFrame, error)
-	UnprotectAOS(ctx context.Context, tenantID string, frame []byte) (*protocol.PlainAOSFrame, error)
 	OperationsStatus(ctx context.Context, tenantID string) (*protocol.OperationsStatus, error)
 	ObserveFlightSecurityStatus(ctx context.Context, tenantID string, status protocol.FlightSecurityStatus) error
 }
 
-type Handler struct {
-	service Service
+type RawDownlinkService interface {
+	UnprotectRaw(context.Context, []byte) ([]byte, error)
+	Status(context.Context) (downlinkcrypto.Status, error)
 }
 
-func New(service Service) *Handler { return &Handler{service: service} }
+type Handler struct {
+	service  Service
+	downlink RawDownlinkService
+}
+
+func New(service Service, downlink RawDownlinkService) *Handler {
+	return &Handler{service: service, downlink: downlink}
+}
 
 func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /ui/api/v1/ccsds/tc:protect", h.protectTC)
-	mux.HandleFunc("POST /ui/api/v1/ccsds/aos:unprotect", h.unprotectAOS)
+	mux.HandleFunc("POST /ui/api/v1/ccsds/downlink:unprotect", h.unprotectDownlink)
 	mux.HandleFunc("POST /ui/api/v1/ccsds/flight-status:observe", h.observeFlightStatus)
 }
 
@@ -71,13 +79,21 @@ type operationsStatusResponse struct {
 		Next     *associationStatusResponse `json:"next"`
 		Recovery *associationStatusResponse `json:"recovery"`
 	} `json:"tc"`
-	TCRotation           *tcRotationStatusResponse   `json:"tc_rotation"`
-	AOS                  []associationStatusResponse `json:"aos"`
-	AOSFormat            string                      `json:"aos_format"`
-	ProfileDigest        string                      `json:"profile_digest"`
-	Flight               *flightStatusResponse       `json:"flight"`
-	FlightReconciliation string                      `json:"flight_reconciliation"`
-	Warnings             []string                    `json:"warnings"`
+	TCRotation           *tcRotationStatusResponse `json:"tc_rotation"`
+	DownlinkFormat       string                    `json:"downlink_format"`
+	Downlink             downlinkStatusResponse    `json:"downlink"`
+	ProfileDigest        string                    `json:"profile_digest"`
+	Flight               *flightStatusResponse     `json:"flight"`
+	FlightReconciliation string                    `json:"flight_reconciliation"`
+	Warnings             []string                  `json:"warnings"`
+}
+
+type downlinkStatusResponse struct {
+	Provisioned        bool   `json:"provisioned"`
+	ActiveKEKSlot      uint8  `json:"active_kek_slot"`
+	CurrentGeneration  uint32 `json:"current_generation"`
+	CurrentObserved    bool   `json:"current_observed"`
+	PreviousGeneration uint32 `json:"previous_generation"`
 }
 
 type flightStatusResponse struct {
@@ -121,11 +137,32 @@ func (h *Handler) operationsStatus(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, err)
 		return
 	}
+	downlinkStatus, err := h.downlink.Status(r.Context())
+	if err != nil {
+		writeProtocolError(w, err)
+		return
+	}
 	response := operationsStatusResponse{
 		ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Status: status.Status,
-		Ready: status.Ready, AOS: make([]associationStatusResponse, 0, len(status.AOSActive)), AOSFormat: status.AOSFormat,
+		Ready: status.Ready, DownlinkFormat: status.DownlinkFormat,
 		Warnings:      append([]string{}, status.Warnings...),
 		ProfileDigest: status.ProfileDigest, FlightReconciliation: status.FlightReconciliation,
+	}
+	response.Downlink = downlinkStatusResponse{
+		Provisioned: downlinkStatus.Provisioned, ActiveKEKSlot: downlinkStatus.ActiveKEKSlot,
+		CurrentGeneration: downlinkStatus.CurrentGeneration, CurrentObserved: downlinkStatus.CurrentObserved,
+		PreviousGeneration: downlinkStatus.PreviousGeneration,
+	}
+	if !downlinkStatus.Provisioned {
+		response.Ready = false
+		response.Status = "UNCONFIGURED"
+		response.Warnings = append(response.Warnings, "Raw downlink KEK set is not provisioned.")
+	} else if downlinkStatus.CurrentGeneration == 0 {
+		response.Ready = false
+		response.Status = "DEGRADED"
+		response.Warnings = append(response.Warnings, "Raw downlink has no Current DEK batch.")
+	} else if !downlinkStatus.CurrentObserved {
+		response.Warnings = append(response.Warnings, "Current downlink DEK batch has not been observed; next generation is blocked.")
 	}
 	if status.FlightStatus != nil {
 		flight := status.FlightStatus
@@ -152,9 +189,6 @@ func (h *Handler) operationsStatus(w http.ResponseWriter, r *http.Request) {
 			NextSPI: status.TCRotation.NextSPI, CurrentRootVersion: status.TCRotation.CurrentRootVersion,
 			NextRootVersion: status.TCRotation.NextRootVersion, Evidence: evidence}
 	}
-	for i := range status.AOSActive {
-		response.AOS = append(response.AOS, *mapAssociationStatus(&status.AOSActive[i]))
-	}
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -177,7 +211,7 @@ type observeFlightStatusRequest struct {
 }
 
 func (h *Handler) observeFlightStatus(w http.ResponseWriter, r *http.Request) {
-	_, tenantID, ok := authorize(w, r, "ccsds:aos:unprotect")
+	_, tenantID, ok := authorize(w, r, "ccsds:downlink:unprotect")
 	if !ok {
 		return
 	}
@@ -224,9 +258,9 @@ type protectTCRequest struct {
 	Frame    string `json:"frame"`
 }
 
-type unprotectAOSRequest struct {
+type unprotectDownlinkRequest struct {
 	TenantID string `json:"tenant_id,omitempty"`
-	Frame    string `json:"frame"`
+	Package  string `json:"package"`
 }
 
 func (h *Handler) protectTC(w http.ResponseWriter, r *http.Request) {
@@ -261,12 +295,12 @@ func (h *Handler) protectTC(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) unprotectAOS(w http.ResponseWriter, r *http.Request) {
-	principal, tenantID, ok := authorize(w, r, "ccsds:aos:unprotect")
+func (h *Handler) unprotectDownlink(w http.ResponseWriter, r *http.Request) {
+	principal, tenantID, ok := authorize(w, r, "ccsds:downlink:unprotect")
 	if !ok {
 		return
 	}
-	var request unprotectAOSRequest
+	var request unprotectDownlinkRequest
 	if err := middleware.DecodeJSONStrict(middleware.BodyFromContext(r.Context()), &request); err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid json")
 		return
@@ -278,18 +312,18 @@ func (h *Handler) unprotectAOS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "tenant mismatch")
 		return
 	}
-	frame, err := base64.StdEncoding.DecodeString(request.Frame)
+	frame, err := base64.StdEncoding.DecodeString(request.Package)
 	if err != nil || len(frame) == 0 {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "frame must be non-empty base64")
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "package must be non-empty base64")
 		return
 	}
-	result, err := h.service.UnprotectAOS(r.Context(), tenantID, frame)
+	result, err := h.downlink.UnprotectRaw(r.Context(), frame)
 	if err != nil {
 		writeProtocolError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"plain_frame": base64.StdEncoding.EncodeToString(result.Frame),
+		"plaintext": base64.StdEncoding.EncodeToString(result),
 	})
 }
 
@@ -308,12 +342,17 @@ func authorize(w http.ResponseWriter, r *http.Request, scope string) (*principal
 
 func writeProtocolError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, downlinkcrypto.ErrInvalid):
+		writeError(w, http.StatusBadRequest, "DOWNLINK_INVALID", "invalid raw downlink package")
+	case errors.Is(err, downlinkcrypto.ErrAuthentication):
+		writeError(w, http.StatusUnprocessableEntity, "DOWNLINK_AUTHENTICATION_FAILED", "raw downlink authentication failed")
+	case errors.Is(err, downlinkcrypto.ErrNotProvisioned), errors.Is(err, downlinkcrypto.ErrNotObserved):
+		writeError(w, http.StatusConflict, "DOWNLINK_STATE_REJECTED", "downlink key state rejected operation")
 	case errors.Is(err, protocol.ErrFrameInvalid):
 		writeError(w, http.StatusBadRequest, "FRAME_INVALID", "invalid CCSDS frame data")
 	case errors.Is(err, protocol.ErrAssociationNotFound):
 		writeError(w, http.StatusNotFound, "ASSOCIATION_NOT_FOUND", "CCSDS association not found")
-	case errors.Is(err, protocol.ErrAssociationState), errors.Is(err, protocol.ErrCounterExhausted),
-		errors.Is(err, protocol.ErrSequenceExhausted), errors.Is(err, protocol.ErrReplay):
+	case errors.Is(err, protocol.ErrAssociationState), errors.Is(err, protocol.ErrCounterExhausted):
 		writeError(w, http.StatusConflict, "CCSDS_STATE_REJECTED", "CCSDS security state rejected operation")
 	default:
 		code := errorsx.AsCode(err)

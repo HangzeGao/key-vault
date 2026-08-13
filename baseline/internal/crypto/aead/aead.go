@@ -31,42 +31,21 @@ func New(suiteID suite.ID, key []byte) (Cipher, error) {
 	}
 	switch suiteID {
 	case suite.AES256GCM:
-		b, err := aes.NewCipher(key)
-		if err != nil {
-			return nil, fmt.Errorf("aead: aes new: %w", err)
-		}
-		g, err := cipher.NewGCMWithNonceSize(b, 12)
-		if err != nil {
-			return nil, fmt.Errorf("aead: gcm new: %w", err)
-		}
+		b, _ := aes.NewCipher(key) // AES-256 length was checked above.
+		g, _ := cipher.NewGCMWithNonceSize(b, 12)
 		return &gcmAEAD{g: g}, nil
 	case suite.SM4GCM:
-		b, err := sm4.NewCipher(key)
-		if err != nil {
-			return nil, fmt.Errorf("aead: sm4 new: %w", err)
-		}
-		g, err := cipher.NewGCMWithNonceSize(b, 12)
-		if err != nil {
-			return nil, fmt.Errorf("aead: sm4 gcm new: %w", err)
-		}
+		b, _ := sm4.NewCipher(key) // SM4 length was checked above.
+		g, _ := cipher.NewGCMWithNonceSize(b, 12)
 		return &gcmAEAD{g: g}, nil
 	case suite.AES256CTR:
-		b, err := aes.NewCipher(key)
-		if err != nil {
-			return nil, fmt.Errorf("aead: aes new: %w", err)
-		}
+		b, _ := aes.NewCipher(key)
 		return &ctrCipher{block: b}, nil
 	case suite.SM4CTR:
-		b, err := sm4.NewCipher(key)
-		if err != nil {
-			return nil, fmt.Errorf("aead: sm4 new: %w", err)
-		}
+		b, _ := sm4.NewCipher(key)
 		return &ctrCipher{block: b}, nil
 	case suite.SM4HCTR:
-		b, err := sm4.NewCipher(key[:suite.SM4HCTR.KeyBytes()])
-		if err != nil {
-			return nil, fmt.Errorf("aead: sm4 new: %w", err)
-		}
+		b, _ := sm4.NewCipher(key[:suite.SM4HCTR.KeyBytes()])
 		return &hctrCipher{block: b, hashKey: append([]byte(nil), key[suite.SM4HCTR.KeyBytes():]...)}, nil
 	case suite.AES256CMAC, suite.SM4CMAC:
 		return nil, fmt.Errorf("aead: suite %s is authentication-only", suiteID)
@@ -82,9 +61,6 @@ type gcmAEAD struct {
 func (a *gcmAEAD) Encrypt(plaintext, nonce, aad []byte) (ciphertext, tag []byte) {
 	out := a.g.Seal(nil, nonce, plaintext, aad)
 	tagLen := a.g.Overhead()
-	if len(out) < tagLen {
-		panic("aead: seal output shorter than tag")
-	}
 	return out[:len(out)-tagLen], out[len(out)-tagLen:]
 }
 

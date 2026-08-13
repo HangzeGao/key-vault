@@ -11,7 +11,7 @@ import (
 
 func TestLoadAccessTokensUsesOneStrictPlanePerToken(t *testing.T) {
 	t.Setenv("KVLT_ACCESS_TOKENS", `[
-		{"token":"data-token-012345678901234567890123456789","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:aos:unprotect"],"plane":"data"},
+		{"token":"data-token-012345678901234567890123456789","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:downlink:unprotect"],"plane":"data"},
 		{"token":"ops-token-0123456789012345678901234567890","tenant_id":"t-default","scopes":["audit:read","ops:read"],"plane":"ops"}
 	]`)
 	tokens, err := loadAccessTokens(config.Default())
@@ -40,7 +40,7 @@ func TestLoadAccessTokensRejectsLegacyOrWeakContracts(t *testing.T) {
 		`[{"token":"token-01234567890123456789012345678901","tenant_id":"t-default","scopes":["ops:read"],"plane":"management"}]`,
 		`[{"token":"token-01234567890123456789012345678901","tenant_id":"t-default","scopes":["ops:read"],"planes":["data","ops"]}]`,
 		`[{"token":"token-01234567890123456789012345678901","tenant_id":"t-default","scopes":["ops:read"],"plane":"ops"}] trailing`,
-		`[{"token":"data-token-012345678901234567890123456789","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:aos:unprotect"],"plane":"data"},{"token":"data-token-112345678901234567890123456789","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:aos:unprotect"],"plane":"data"}]`,
+		`[{"token":"data-token-012345678901234567890123456789","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:downlink:unprotect"],"plane":"data"},{"token":"data-token-112345678901234567890123456789","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:downlink:unprotect"],"plane":"data"}]`,
 		`[{"token":"data-token-012345678901234567890123456789","tenant_id":"t-default","scopes":["ops:read"],"plane":"data"},{"token":"ops-token-0123456789012345678901234567890","tenant_id":"t-default","scopes":["audit:read","ops:read"],"plane":"ops"}]`,
 	} {
 		t.Setenv("KVLT_ACCESS_TOKENS", raw)
@@ -54,7 +54,7 @@ func TestLoadAccessTokensReadsControlledFile(t *testing.T) {
 	t.Setenv("KVLT_ACCESS_TOKENS", "")
 	path := filepath.Join(t.TempDir(), "tokens.json")
 	if err := os.WriteFile(path, []byte(`[
-		{"token":"data-token-012345678901234567890123456789","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:aos:unprotect"],"plane":"data"},
+		{"token":"data-token-012345678901234567890123456789","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:downlink:unprotect"],"plane":"data"},
 		{"token":"ops-token-0123456789012345678901234567890","tenant_id":"t-default","scopes":["audit:read","ops:read"],"plane":"ops"}
 	]`), 0o600); err != nil {
 		t.Fatal(err)
@@ -69,7 +69,7 @@ func TestLoadAccessTokensReadsControlledFile(t *testing.T) {
 
 func TestLoadAccessTokensRequiresLongProductionSecrets(t *testing.T) {
 	t.Setenv("KVLT_ACCESS_TOKENS", `[
-		{"token":"data-token-012345678901234567890123456789","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:aos:unprotect"],"plane":"data"},
+		{"token":"data-token-012345678901234567890123456789","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:downlink:unprotect"],"plane":"data"},
 		{"token":"ops-token-0123456789012345678901234567890","tenant_id":"t-default","scopes":["audit:read","ops:read"],"plane":"ops"}
 	]`)
 	cfg := config.Default()

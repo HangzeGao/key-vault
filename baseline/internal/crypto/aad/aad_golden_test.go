@@ -5,15 +5,14 @@ import (
 	"testing"
 )
 
-func TestGoldenCanonicalCRKAAD(t *testing.T) {
+func TestGoldenCanonicalSealContext(t *testing.T) {
 	baseline := []byte{0xaa, 0xbb, 0xcc, 0xdd}
 	policy := []byte{0x11, 0x22, 0x33, 0x44}
-	c := CRKAAD{
-		ClusterID:      "cluster-prod",
+	c := SealContext{
+		Purpose:        "protocol-root",
+		ObjectID:       "root-v1",
 		NodeID:         "node-1",
-		PlaneRole:      "key-plane",
-		CRKVersion:     1,
-		NRWKName:       "nrwk-primary",
+		StorageName:    "seal-primary",
 		BaselineDigest: baseline,
 		PolicyDigest:   policy,
 	}
@@ -25,10 +24,10 @@ func TestGoldenCanonicalCRKAAD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if len(fields) != 7 {
-		t.Fatalf("expected 7 fields, got %d", len(fields))
+	if len(fields) != 6 {
+		t.Fatalf("expected 6 fields, got %d", len(fields))
 	}
-	expectedTags := []uint8{0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D}
+	expectedTags := []uint8{0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C}
 	for i, f := range fields {
 		if f.ID != expectedTags[i] {
 			t.Fatalf("field %d: tag 0x%02x, want 0x%02x", i, f.ID, expectedTags[i])

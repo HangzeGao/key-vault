@@ -15,7 +15,6 @@ type Direction string
 const (
 	DirectionTCTx         Direction = "TC_TX"
 	DirectionTCRecoveryTx Direction = "TC_RECOVERY_TX"
-	DirectionAOSRx        Direction = "AOS_RX"
 )
 
 // NextSPI returns the successor in the complete 16-bit SPI space. SPI is an
@@ -38,9 +37,7 @@ var (
 	ErrAssociationNotFound = errors.New("ccsds: security association not found")
 	ErrAssociationState    = errors.New("ccsds: security association state forbids operation")
 	ErrFrameInvalid        = errors.New("ccsds: invalid transfer frame")
-	ErrReplay              = errors.New("ccsds: replay rejected")
 	ErrCounterExhausted    = errors.New("ccsds: TC IV counter exhausted")
-	ErrSequenceExhausted   = errors.New("ccsds: AOS sequence does not fit configured field")
 )
 
 const (
@@ -54,9 +51,7 @@ const (
 	TCRecoveryAADLength    = TCPrimaryHeaderLength + TCSecurityHeaderLength
 )
 
-// ManagedParameters are direction-specific mission wire parameters. TC uses a
-// fixed four-byte counter plus an implicit six-byte prefix; AOS currently
-// transmits its full suite IV and retains a separate replay sequence.
+// ManagedParameters are direction-specific TC mission wire parameters.
 type ManagedParameters struct {
 	SequenceNumberLength int
 	TransmittedIVLength  int
@@ -86,7 +81,7 @@ func (sa SecurityAssociation) Validate() error {
 	if sa.ID == "" || sa.TenantID == "" || sa.KeyID == "" || sa.KeyVersion == 0 || sa.PolicyVersion == 0 {
 		return fmt.Errorf("%w: incomplete security association", ErrFrameInvalid)
 	}
-	if sa.Direction != DirectionTCTx && sa.Direction != DirectionTCRecoveryTx && sa.Direction != DirectionAOSRx {
+	if sa.Direction != DirectionTCTx && sa.Direction != DirectionTCRecoveryTx {
 		return fmt.Errorf("%w: unsupported direction %q", ErrFrameInvalid, sa.Direction)
 	}
 	if sa.Direction == DirectionTCTx {
@@ -97,7 +92,7 @@ func (sa SecurityAssociation) Validate() error {
 			return fmt.Errorf("%w: TC association state must be CURRENT, NEXT, or DISABLED", ErrFrameInvalid)
 		}
 	} else if sa.State != AssociationActive && sa.State != AssociationDisabled {
-		return fmt.Errorf("%w: recovery and AOS association state must be ACTIVE or DISABLED", ErrFrameInvalid)
+		return fmt.Errorf("%w: recovery association state must be ACTIVE or DISABLED", ErrFrameInvalid)
 	}
 	if sa.Direction != DirectionTCTx && sa.SecurityEpoch != 0 {
 		return fmt.Errorf("%w: security epoch is only valid for ordinary TC", ErrFrameInvalid)
@@ -131,19 +126,7 @@ func (sa SecurityAssociation) Validate() error {
 		}
 		return nil
 	}
-	if p.SequenceNumberLength < 1 || p.SequenceNumberLength > 8 {
-		return fmt.Errorf("%w: AOS sequence number length must be 1..8", ErrFrameInvalid)
-	}
-	if p.TransmittedIVLength != suiteID.NonceLen() || len(p.NoncePrefix) != 0 {
-		return fmt.Errorf("%w: AOS transmits the full suite IV and has no implicit prefix", ErrFrameInvalid)
-	}
-	if p.TagLength != suiteID.TagLen() {
-		return fmt.Errorf("%w: AOS tag length does not match suite", ErrFrameInvalid)
-	}
-	if p.ReplayWindow == 0 || p.ReplayWindow > 64 {
-		return fmt.Errorf("%w: AOS replay window must be 1..64", ErrFrameInvalid)
-	}
-	return nil
+	return fmt.Errorf("%w: unsupported direction", ErrFrameInvalid)
 }
 
 type OperationMetadata struct {
@@ -162,21 +145,15 @@ type ProtectedTCFrame struct {
 	Metadata OperationMetadata
 }
 
-type PlainAOSFrame struct {
-	Frame    []byte
-	Metadata OperationMetadata
-}
-
 type Options struct {
-	AOSPrimaryHeaderLength int
-	MaxFrameLength         int
-	NodeID                 string
-	TCSpacecraftID         uint16
+	MaxFrameLength int
+	NodeID         string
+	TCSpacecraftID uint16
 }
 
 func (o Options) validate() error {
-	if o.AOSPrimaryHeaderLength <= 0 || o.MaxFrameLength <= 0 || o.NodeID == "" {
-		return errors.New("ccsds: AOS primary header length, max frame length, and node ID are required")
+	if o.MaxFrameLength <= 0 || o.NodeID == "" {
+		return errors.New("ccsds: max frame length and node ID are required")
 	}
 	return nil
 }

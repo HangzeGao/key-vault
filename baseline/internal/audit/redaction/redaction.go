@@ -89,20 +89,20 @@ func redactValue(value any) any {
 // exactMarkers are field names that are always sensitive when matched exactly.
 var exactMarkers = []string{
 	"token", "authorization", "password", "secret", "plaintext",
-	"dek", "crk", "wrapped_material", "wrapped_crk", "key_bytes", "private_key",
+	"dek", "kek", "sealed_material", "key_bytes", "private_key",
 	"ciphertext", "envelope",
 	// common compound sensitive field names
 	"access_token", "refresh_token", "id_token", "auth_token", "csrf_token",
 	"bearer_token", "session_token", "api_key", "signing_key", "private_key",
-	"wrapped_dek", "wrapped_envelope", "core_envelope",
+	"kek_set", "wrapped_envelope", "core_envelope",
 }
 
 // suffixMarkers are markers where any field ending in "_<marker>" is sensitive.
 // Only include markers with low false-positive risk (e.g. "_password" is always
 // sensitive; "_envelope" is not because envelope_format is not secret material).
 var suffixMarkers = []string{
-	"password", "secret", "plaintext", "dek", "crk",
-	"key_bytes", "private_key", "wrapped_material", "wrapped_crk",
+	"password", "secret", "plaintext", "dek", "kek",
+	"key_bytes", "private_key", "sealed_material",
 	"authorization", "token",
 }
 

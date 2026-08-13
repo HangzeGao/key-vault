@@ -21,7 +21,7 @@ type NativeOptions struct {
 	PCRs []int
 }
 
-// NativeProvider talks directly to TPM 2.0 using go-tpm. CRK plaintext is
+// NativeProvider talks directly to TPM 2.0 using go-tpm. Secret plaintext is
 // passed only in the TPM command buffer and is never written to disk.
 type NativeProvider struct {
 	mu   sync.Mutex
@@ -98,29 +98,29 @@ func newNativeProviderWithTransport(rw io.ReadWriteCloser, pcrs []int) (*NativeP
 	return &NativeProvider{rw: rw, pcrs: append([]int(nil), pcrs...)}, nil
 }
 
-func (p *NativeProvider) EnsureNRWK(ctx context.Context, name string) (*TPMObjectRef, error) {
+func (p *NativeProvider) EnsureStorage(ctx context.Context, name string) (*TPMObjectRef, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if name == "" {
-		return nil, errors.New("provider: empty NRWK name")
+		return nil, errors.New("provider: empty storage name")
 	}
 	// The deterministic storage primary is recreated on demand. Its sensitive
 	// material never leaves the TPM; the reference intentionally has no bytes.
 	return &TPMObjectRef{Name: name}, nil
 }
 
-func (p *NativeProvider) SealCRK(ctx context.Context, nrwk *TPMObjectRef, crk []byte, contextAAD aad.CRKAAD) (*CRKEnvelope, error) {
+func (p *NativeProvider) Seal(ctx context.Context, storage *TPMObjectRef, plaintext []byte, sealContext aad.SealContext) (*SealedObject, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := validateNativeInputs(ctx, nrwk, contextAAD); err != nil {
+	if err := validateNativeInputs(ctx, storage, sealContext); err != nil {
 		return nil, err
 	}
 	primary, err := p.ensureStorageRootKey()
 	if err != nil {
 		return nil, err
 	}
-	password, err := nativeContextPassword(contextAAD)
+	password, err := nativeContextPassword(sealContext)
 	if err != nil {
 		return nil, err
 	}
@@ -131,37 +131,37 @@ func (p *NativeProvider) SealCRK(ctx context.Context, nrwk *TPMObjectRef, crk []
 		return nil, err
 	}
 	_ = legacy.FlushContext(p.rw, session)
-	private, public, err := legacy.Seal(p.rw, primary, "", password, policy, crk)
+	private, public, err := legacy.Seal(p.rw, primary, "", password, policy, plaintext)
 	if err != nil {
-		return nil, fmt.Errorf("provider: seal CRK in native TPM: %w", err)
+		return nil, fmt.Errorf("provider: seal secret in native TPM: %w", err)
 	}
 	bundle, err := json.Marshal(nativeSealedBundle{Public: public, Private: private, PCRs: p.pcrs})
 	if err != nil {
 		return nil, fmt.Errorf("provider: encode native sealed object: %w", err)
 	}
-	return &CRKEnvelope{
-		NodeID: contextAAD.NodeID, ClusterID: contextAAD.ClusterID, PlaneRole: contextAAD.PlaneRole,
-		CRKVersion: contextAAD.CRKVersion, NRWKName: nrwk.Name, WrappedCRK: bundle,
-		BaselineDigest: append([]byte(nil), contextAAD.BaselineDigest...), PolicyDigest: append([]byte(nil), contextAAD.PolicyDigest...),
-		CRKAADDigest: aadDigestHex(contextAAD),
+	return &SealedObject{
+		NodeID: sealContext.NodeID, Purpose: sealContext.Purpose, ObjectID: sealContext.ObjectID,
+		StorageName: storage.Name, Blob: bundle,
+		BaselineDigest: append([]byte(nil), sealContext.BaselineDigest...), PolicyDigest: append([]byte(nil), sealContext.PolicyDigest...),
+		ContextDigest: contextDigestHex(sealContext),
 	}, nil
 }
 
-func (p *NativeProvider) UnsealCRK(ctx context.Context, nrwk *TPMObjectRef, env *CRKEnvelope, contextAAD aad.CRKAAD) ([]byte, error) {
+func (p *NativeProvider) Unseal(ctx context.Context, storage *TPMObjectRef, object *SealedObject, sealContext aad.SealContext) ([]byte, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := validateNativeInputs(ctx, nrwk, contextAAD); err != nil {
+	if err := validateNativeInputs(ctx, storage, sealContext); err != nil {
 		return nil, err
 	}
-	if env.NRWKName != nrwk.Name {
-		return nil, errors.New("provider: NRWK name mismatch")
+	if object.StorageName != storage.Name {
+		return nil, errors.New("provider: storage name mismatch")
 	}
-	if err := validateCRKEnvelopeAAD(env, contextAAD); err != nil {
+	if err := validateSealedObjectContext(object, sealContext); err != nil {
 		return nil, err
 	}
 	var bundle nativeSealedBundle
-	if err := json.Unmarshal(env.WrappedCRK, &bundle); err != nil || len(bundle.Public) == 0 || len(bundle.Private) == 0 {
-		return nil, errors.New("provider: corrupt native CRK envelope")
+	if err := json.Unmarshal(object.Blob, &bundle); err != nil || len(bundle.Public) == 0 || len(bundle.Private) == 0 {
+		return nil, errors.New("provider: corrupt native sealed object")
 	}
 	if !equalInts(bundle.PCRs, p.pcrs) {
 		return nil, errors.New("provider: TPM policy PCR set mismatch")
@@ -170,12 +170,12 @@ func (p *NativeProvider) UnsealCRK(ctx context.Context, nrwk *TPMObjectRef, env 
 	if err != nil {
 		return nil, err
 	}
-	object, _, err := legacy.Load(p.rw, primary, "", bundle.Public, bundle.Private)
+	objectHandle, _, err := legacy.Load(p.rw, primary, "", bundle.Public, bundle.Private)
 	if err != nil {
 		return nil, fmt.Errorf("provider: load native sealed object: %w", err)
 	}
-	defer legacy.FlushContext(p.rw, object)
-	password, err := nativeContextPassword(contextAAD)
+	defer legacy.FlushContext(p.rw, objectHandle)
+	password, err := nativeContextPassword(sealContext)
 	if err != nil {
 		return nil, err
 	}
@@ -184,9 +184,9 @@ func (p *NativeProvider) UnsealCRK(ctx context.Context, nrwk *TPMObjectRef, env 
 		return nil, err
 	}
 	defer legacy.FlushContext(p.rw, session)
-	plaintext, err := legacy.UnsealWithSession(p.rw, session, object, password)
+	plaintext, err := legacy.UnsealWithSession(p.rw, session, objectHandle, password)
 	if err != nil {
-		return nil, errors.New("provider: TPM policy refused CRK unseal")
+		return nil, errors.New("provider: TPM policy refused secret unseal")
 	}
 	return plaintext, nil
 }
@@ -215,7 +215,7 @@ func (p *NativeProvider) policySession(password string) (tpmutil.Handle, []byte,
 	return session, digest, nil
 }
 
-func nativeContextPassword(a aad.CRKAAD) (string, error) {
+func nativeContextPassword(a aad.SealContext) (string, error) {
 	b, err := a.Canonical()
 	if err != nil {
 		return "", fmt.Errorf("provider: canonical context: %w", err)
@@ -226,14 +226,14 @@ func nativeContextPassword(a aad.CRKAAD) (string, error) {
 	return string(sum[:]), nil
 }
 
-func validateNativeInputs(ctx context.Context, nrwk *TPMObjectRef, a aad.CRKAAD) error {
+func validateNativeInputs(ctx context.Context, storage *TPMObjectRef, a aad.SealContext) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if nrwk == nil || nrwk.Name == "" {
-		return errors.New("provider: missing NRWK reference")
+	if storage == nil || storage.Name == "" {
+		return errors.New("provider: missing storage reference")
 	}
-	if a.ClusterID == "" || a.NodeID == "" || a.PlaneRole == "" || len(a.BaselineDigest) == 0 || len(a.PolicyDigest) == 0 {
+	if a.Purpose == "" || a.ObjectID == "" || a.NodeID == "" || a.StorageName == "" || len(a.BaselineDigest) == 0 || len(a.PolicyDigest) == 0 {
 		return errors.New("provider: incomplete TPM policy context")
 	}
 	return nil

@@ -8,12 +8,9 @@ import (
 
 func TestCCSDSFrameBoundariesAreExplicitAndValidated(t *testing.T) {
 	cfg := Default()
-	if cfg.CCSDS.AOSPrimaryHeaderLength != 6 {
-		t.Fatalf("unexpected CCSDS defaults: %+v", cfg.CCSDS)
-	}
-	cfg.CCSDS.MaxFrameLength = cfg.CCSDS.AOSPrimaryHeaderLength
+	cfg.CCSDS.MaxFrameLength = 0
 	if err := cfg.Validate(); err == nil {
-		t.Fatal("CCSDS max frame length not exceeding the header was accepted")
+		t.Fatal("zero CCSDS max frame length was accepted")
 	}
 }
 

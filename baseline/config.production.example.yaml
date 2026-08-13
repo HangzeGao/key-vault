@@ -44,7 +44,6 @@ traffic_guard:
 # These values are mission-profile inputs. Validate them against the selected
 # CCSDS 355.0-B-2 transfer-frame profile before deployment.
 ccsds:
-  aos_primary_header_length: 6
   max_frame_length: 65536
   tc_spacecraft_id: 0
 

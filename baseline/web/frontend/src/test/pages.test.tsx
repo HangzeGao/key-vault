@@ -6,7 +6,7 @@ import { api, HttpError } from "../lib/api";
 import { DashboardPage } from "../pages/Dashboard";
 import { SystemAuditPage } from "../pages/SystemAudit";
 import { TCSecurityPage } from "../pages/TCSecurity";
-import { AOSSecurityPage } from "../pages/AOSSecurity";
+import { DownlinkSecurityPage } from "../pages/DownlinkSecurity";
 import { LoginPage } from "../pages/Login";
 import { useAuth } from "../lib/store";
 
@@ -30,15 +30,15 @@ const emptyResponse = (path: string) => {
       recovery: { id: "tc-recovery", spi: 28673, direction: "TC_RECOVERY_TX", state: "ACTIVE", suite_id: "SM4_GCM", security_epoch: 0, key_version: 1, policy_version: 1, sequence_number_length: 0, transmitted_iv_length: 4, tag_length: 16, replay_window: 0, next_iv_counter: 3, replay_seen: false },
     },
     tc_rotation: { phase: "PREPARED", transaction_id: "9", current_spi: 4097, next_spi: 4098, current_root_version: 2, next_root_version: 3, evidence: "RECOVERY_FRAME_PRODUCED" },
-    aos_format: "NOT_FROZEN",
-    aos: [{ id: "aos-active", spi: 8193, direction: "AOS_RX", state: "ACTIVE", suite_id: "SM4_GCM", security_epoch: 0, key_version: 4, policy_version: 1, sequence_number_length: 4, transmitted_iv_length: 12, tag_length: 16, replay_window: 32, replay_highest: 88, replay_seen: true }],
+    downlink_format: "RAW",
+    downlink: { provisioned: true, active_kek_slot: 3, current_generation: 8, current_observed: true, previous_generation: 7 },
   };
   if (path.endsWith("/ops/db/status")) return {
     driver: "sqlite", status: "ok", observed_at: new Date().toISOString(), connected: true,
     connection: { status: "ok", latency_ms: 3 },
-    schema: { status: "ok", current: 2, expected: 2 },
+    schema: { status: "ok", current: 3, expected: 3 },
     storage: { database_bytes: 4096, wal_bytes: 512, journal_mode: "WAL", synchronous: "FULL" },
-    records: { security_associations: 4, audit_events: 12 },
+    records: { security_associations: 3, audit_events: 12 },
     backup: { status: "operator_managed", rule: "restore only with a new operational SPI/epoch" },
     integrity: { status: "ok" },
   };
@@ -64,7 +64,7 @@ describe("operations console page contracts", () => {
     ["Mission Security Operations", <DashboardPage />],
     ["System & Audit", <SystemAuditPage />],
     ["TC Uplink", <TCSecurityPage />],
-    ["AOS Downlink", <AOSSecurityPage />],
+    ["Raw Downlink", <DownlinkSecurityPage />],
   ])("renders %s", async (heading, page) => {
     renderPage(page);
     expect(await screen.findByRole("heading", { name: heading })).toBeInTheDocument();
@@ -88,10 +88,12 @@ describe("operations console page contracts", () => {
     expect(get.mock.calls.map(([path]) => path).some((path) => path.includes("/keys"))).toBe(false);
   });
 
-  it("keeps AOS symmetric while marking its frame contract as not frozen", async () => {
-    renderPage(<AOSSecurityPage />);
-    expect(await screen.findByRole("heading", { name: "AOS Downlink" })).toBeInTheDocument();
-    expect(await screen.findByText("NOT FROZEN")).toBeInTheDocument();
+  it("shows the fixed raw downlink contract", async () => {
+    renderPage(<DownlinkSecurityPage />);
+    expect(await screen.findByRole("heading", { name: "Raw Downlink" })).toBeInTheDocument();
+    expect(await screen.findByText("Current first; Previous once only after Current fails")).toBeInTheDocument();
+    expect(await screen.findByText("Current / 8")).toBeInTheDocument();
+    expect(await screen.findByText("Previous / 7")).toBeInTheDocument();
   });
 
   it("validates console credentials before completing login", async () => {

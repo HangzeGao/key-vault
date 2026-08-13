@@ -13,27 +13,23 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/kvlt/key-vault/internal/application/protection"
 	"github.com/kvlt/key-vault/internal/audit/redaction"
 	"github.com/kvlt/key-vault/internal/auditchain"
 	"github.com/kvlt/key-vault/internal/auth/principal"
 	"github.com/kvlt/key-vault/internal/config"
-	"github.com/kvlt/key-vault/internal/crypto/aad"
 	"github.com/kvlt/key-vault/internal/domain/policy"
+	"github.com/kvlt/key-vault/internal/downlink"
 	"github.com/kvlt/key-vault/internal/policysig"
 	"github.com/kvlt/key-vault/internal/protocol/ccsds"
-	"github.com/kvlt/key-vault/internal/repository/models"
 	"github.com/kvlt/key-vault/internal/resolver/keyresolver"
 	"github.com/kvlt/key-vault/internal/securitystate"
 	"github.com/kvlt/key-vault/internal/tpm/provider"
 )
 
 const (
-	clusterID = "ccsds-ground-v1"
-	nrwkName  = "ccsds-root-wrap-v1"
-	planeRole = "ground"
+	storageName = "ccsds-ground-seal-v1"
 )
 
 // App contains only the modules used by the CCSDS ground system.
@@ -42,6 +38,8 @@ type App struct {
 	Store              *securitystate.Store
 	TPM                provider.Provider
 	Resolver           *keyresolver.Resolver
+	Downlink           *downlink.Service
+	DownlinkSealer     *downlink.TPMSealer
 	Policies           *policy.Engine
 	PolicyMgr          *policysig.Manager
 	CCSDSFrameSecurity *ccsds.FrameSecurity
@@ -78,23 +76,36 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 			_ = store.Close()
 		}
 	}()
+	if err := ensureTenants(ctx, store, accessTokens); err != nil {
+		return nil, fmt.Errorf("bootstrap: tenants: %w", err)
+	}
 
 	tpm, err := buildTPM(cfg)
 	if err != nil {
 		return nil, err
 	}
 	policies := policy.NewEngine()
-	resolver := keyresolver.New(tpm, nrwkName, 5*time.Minute)
-	if err := bootstrapRoot(ctx, cfg, store, tpm, resolver, accessTokens); err != nil {
-		return nil, fmt.Errorf("bootstrap: root: %w", err)
+	baseline := hashBaseline(cfg.Baseline)
+	policyDigest := sha256.Sum256([]byte("ccsds-default-policy-v1"))
+	resolver := keyresolver.New(tpm)
+	if err := resolver.Init(ctx, storageName, cfg.Server.NodeID, baseline, policyDigest[:]); err != nil {
+		return nil, fmt.Errorf("bootstrap: protocol key resolver: %w", err)
 	}
-	resolver.SetFetchDEKHook(func(ctx context.Context, keyVersionID string) ([]byte, []byte, error) {
+	resolver.SetFetchHook(func(ctx context.Context, keyVersionID string) ([]byte, error) {
 		version, err := store.GetKeyVersion(ctx, keyVersionID)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return version.WrappedDEK, version.WrapMetadata, nil
+		return version.SealedMaterial, nil
 	})
+	downlinkSealer, err := downlink.NewTPMSealer(ctx, tpm, storageName, cfg.Server.NodeID, baseline, policyDigest[:])
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap: downlink TPM sealer: %w", err)
+	}
+	downlinkService := downlink.NewService(store, downlinkSealer)
+	if err := downlinkService.Load(ctx); err != nil {
+		return nil, fmt.Errorf("bootstrap: load downlink keys: %w", err)
+	}
 
 	auditChain := auditchain.New(store)
 	policyMgr := policysig.New(policies, &policyAuditAdapter{audit: auditChain})
@@ -104,17 +115,17 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 
 	protectionCore := protection.New(store, resolver, policies, cfg.CCSDS.MaxFrameLength)
 	frameSecurity, err := ccsds.New(protectionCore, store, ccsds.Options{
-		AOSPrimaryHeaderLength: cfg.CCSDS.AOSPrimaryHeaderLength,
-		MaxFrameLength:         cfg.CCSDS.MaxFrameLength,
-		NodeID:                 cfg.Server.NodeID,
-		TCSpacecraftID:         cfg.CCSDS.TCSpacecraftID,
+		MaxFrameLength: cfg.CCSDS.MaxFrameLength,
+		NodeID:         cfg.Server.NodeID,
+		TCSpacecraftID: cfg.CCSDS.TCSpacecraftID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap: CCSDS frame security: %w", err)
 	}
 
 	return &App{
-		Cfg: cfg, Store: store, TPM: tpm, Resolver: resolver, Policies: policies, PolicyMgr: policyMgr,
+		Cfg: cfg, Store: store, TPM: tpm, Resolver: resolver, Downlink: downlinkService, DownlinkSealer: downlinkSealer,
+		Policies: policies, PolicyMgr: policyMgr,
 		CCSDSFrameSecurity: frameSecurity, CCSDSStore: store,
 		AccessTokens: accessTokens, AuditChain: auditChain,
 	}, nil
@@ -147,8 +158,7 @@ func buildTPM(cfg *config.Config) (provider.Provider, error) {
 	}
 }
 
-func bootstrapRoot(ctx context.Context, cfg *config.Config, store *securitystate.Store,
-	tpm provider.Provider, resolver *keyresolver.Resolver, accessTokens map[string]*principal.Principal) error {
+func ensureTenants(ctx context.Context, store *securitystate.Store, accessTokens map[string]*principal.Principal) error {
 	if err := store.EnsureTenant(ctx, "t-default", "default"); err != nil {
 		return err
 	}
@@ -166,52 +176,6 @@ func bootstrapRoot(ctx context.Context, cfg *config.Config, store *securitystate
 			return err
 		}
 	}
-	baseline := hashBaseline(cfg.Baseline)
-	policyDigest := sha256.Sum256([]byte("ccsds-default-policy-v1"))
-	if err := resolver.Init(ctx, clusterID, cfg.Server.NodeID, planeRole, baseline, policyDigest[:]); err != nil {
-		return err
-	}
-
-	_, record, err := store.LoadLatestCRK(ctx, cfg.Server.NodeID)
-	if err == nil {
-		var envelope provider.CRKEnvelope
-		if err := json.Unmarshal(record.Envelope, &envelope); err != nil {
-			return fmt.Errorf("decode CRK envelope: %w", err)
-		}
-		resolver.SetCRKEnvelope(&envelope)
-		return nil
-	}
-	if !errors.Is(err, securitystate.ErrNotFound) {
-		return err
-	}
-
-	root := make([]byte, 32)
-	if _, err := rand.Read(root); err != nil {
-		return fmt.Errorf("generate CRK: %w", err)
-	}
-	defer zeroize(root)
-	nrwk, err := tpm.EnsureNRWK(ctx, nrwkName)
-	if err != nil {
-		return err
-	}
-	envelope, err := tpm.SealCRK(ctx, nrwk, root, aad.CRKAAD{
-		ClusterID: clusterID, NodeID: cfg.Server.NodeID, PlaneRole: planeRole, CRKVersion: 1,
-		NRWKName: nrwkName, BaselineDigest: baseline, PolicyDigest: policyDigest[:],
-	})
-	if err != nil {
-		return fmt.Errorf("seal CRK: %w", err)
-	}
-	encoded, err := json.Marshal(envelope)
-	if err != nil {
-		return fmt.Errorf("encode CRK envelope: %w", err)
-	}
-	version := &models.CRKVersion{ID: "crk-v1", Version: 1, Status: "active", CreatedAt: time.Now().UTC()}
-	record = &models.CRKNodeEnvelope{ID: "crkenv-" + cfg.Server.NodeID, CRKVersionID: version.ID,
-		NodeID: cfg.Server.NodeID, Envelope: encoded, CreatedAt: time.Now().UTC()}
-	if err := store.SaveCRK(ctx, version, record); err != nil {
-		return err
-	}
-	resolver.SetCRKEnvelope(envelope)
 	return nil
 }
 
@@ -345,7 +309,7 @@ func loadAccessTokens(cfg *config.Config) (map[string]*principal.Principal, erro
 
 func requiredScopes(plane principal.Plane) []string {
 	if plane == principal.PlaneData {
-		return []string{"ccsds:tc:protect", "ccsds:aos:unprotect"}
+		return []string{"ccsds:tc:protect", "ccsds:downlink:unprotect"}
 	}
 	return []string{"audit:read", "ops:read"}
 }
@@ -372,10 +336,4 @@ func exactScopes(got, want []string) bool {
 func hashBaseline(value config.BaselineConfig) []byte {
 	digest := sha256.Sum256([]byte(fmt.Sprintf("%v", value)))
 	return digest[:]
-}
-
-func zeroize(value []byte) {
-	for index := range value {
-		value[index] = 0
-	}
 }

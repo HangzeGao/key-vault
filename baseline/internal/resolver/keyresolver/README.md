@@ -1,3 +1,3 @@
 # Key Resolver
 
-The resolver is the only application path to CRK-backed DEK wrap/unwrap and short-lived DEK leases. Data-plane handlers must not call TPM providers directly. CRK envelope replacement is synchronized; plaintext leases must be zeroized by consumers immediately after use.
+The resolver is the only application path to directly TPM-sealed TC protocol roots. There is no intermediate CRK or software wrapping key. Data-plane handlers do not call TPM providers directly, and callers zeroize each returned key after one operation.

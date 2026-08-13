@@ -27,10 +27,10 @@ type Store interface {
 }
 
 // KeyLeaser exposes the resolver seam without allowing protocol modules to
-// access CRK envelopes or wrapped key material.
+// access TPM sealed objects.
 type KeyLeaser interface {
-	IssueDEKLease(ctx context.Context, keyVersionID, keyID string, keyVersion uint32,
-		suiteID suite.ID, tenantID, purpose, nodeID string) (*keyresolver.DEKLease, error)
+	IssueKey(ctx context.Context, keyVersionID, keyID string, keyVersion uint32,
+		suiteID suite.ID, tenantID, purpose, nodeID string) (*keyresolver.KeyLease, error)
 }
 
 // ProtectRequest contains protocol-canonical bytes. AAD is used only by GCM;
@@ -154,15 +154,15 @@ func (s *Service) protect(ctx context.Context, req ProtectRequest, derivation *D
 	if !keystate.KVCanEncrypt(keystate.KeyVersionStatus(kv.Status)) {
 		return nil, errorsx.New(errorsx.CodeKeyDisabled, "key version unavailable for protection", false)
 	}
-	lease, err := s.leaser.IssueDEKLease(ctx, kv.ID, k.ID, kv.VersionNo, suiteID,
+	lease, err := s.leaser.IssueKey(ctx, kv.ID, k.ID, kv.VersionNo, suiteID,
 		req.TenantID, suiteID.KeyPurpose(), req.NodeID)
 	if err != nil {
 		return nil, errorsx.Wrap(errorsx.CodeTPMUnavailable, "key lease failed", true, err)
 	}
-	defer zeroize(lease.DEK)
-	keyMaterial := lease.DEK
+	defer zeroize(lease.Key)
+	keyMaterial := lease.Key
 	if derivation != nil {
-		keyMaterial, err = kdf.CMACCounter(lease.DEK, suiteID, derivation.Label, derivation.Context)
+		keyMaterial, err = kdf.CMACCounter(lease.Key, suiteID, derivation.Label, derivation.Context)
 		if err != nil {
 			return nil, errorsx.Wrap(errorsx.CodeInternal, "working key derivation failed", false, err)
 		}
@@ -241,18 +241,18 @@ func (s *Service) Unprotect(ctx context.Context, req UnprotectRequest) (*Unprote
 	if err != nil || !policy.CanConsume(policySuite.Status) {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "suite unavailable for unprotection", false)
 	}
-	lease, err := s.leaser.IssueDEKLease(ctx, kv.ID, k.ID, kv.VersionNo, suiteID,
+	lease, err := s.leaser.IssueKey(ctx, kv.ID, k.ID, kv.VersionNo, suiteID,
 		req.TenantID, suiteID.KeyPurpose(), req.NodeID)
 	if err != nil {
 		return nil, errorsx.Wrap(errorsx.CodeTPMUnavailable, "key lease failed", true, err)
 	}
-	defer zeroize(lease.DEK)
+	defer zeroize(lease.Key)
 
 	result := &UnprotectResult{SuiteID: suiteID, ServiceType: suiteID.ServiceType()}
 	switch suiteID.ServiceType() {
 	case suite.ServiceAuthOnly:
 		var valid bool
-		valid, err = cryptomac.VerifyRaw(suiteID, lease.DEK, req.AuthenticationInput, req.Tag)
+		valid, err = cryptomac.VerifyRaw(suiteID, lease.Key, req.AuthenticationInput, req.Tag)
 		if err == nil && !valid {
 			return nil, errorsx.New(errorsx.CodeAADMismatch, "authentication failed", false)
 		}
@@ -262,7 +262,7 @@ func (s *Service) Unprotect(ctx context.Context, req UnprotectRequest) (*Unprote
 			return nil, errorsx.New(errorsx.CodeInvalidArgument, "nonce or tag length mismatch", false)
 		}
 		var primitive aead.Cipher
-		primitive, err = aead.New(suiteID, lease.DEK)
+		primitive, err = aead.New(suiteID, lease.Key)
 		if err == nil {
 			result.Data, err = primitive.Decrypt(req.Data, req.Tag, req.Nonce, req.AAD)
 		}

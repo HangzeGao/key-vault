@@ -1,3 +1,0 @@
-name,key_id,suite_id,external_key,expires_at
-orders-demo-aes,demo-orders-aes,AES_256_GCM,MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=,
-ledger-demo-sm4,demo-ledger-sm4,SM4_GCM,MDEyMzQ1Njc4OWFiY2RlZg==,2030-01-01T00:00:00Z

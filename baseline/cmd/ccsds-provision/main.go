@@ -88,6 +88,8 @@ func run(ctx context.Context, options provisionOptions) error {
 	if err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
+	defer app.Downlink.Close()
+	defer app.TPM.Close()
 	defer app.Store.Close()
 	if err := app.Store.BindMissionProfile(ctx, profile.TenantID, digest); err != nil {
 		return fmt.Errorf("bind mission profile digest: %w", err)
@@ -98,7 +100,6 @@ func run(ctx context.Context, options provisionOptions) error {
 		{id: ids.CurrentKey, name: "CCSDS TC current operational root", suite: "SM4_HCTR", version: profile.TC.CurrentRootVersion, material: secrets.CurrentRoot},
 		{id: ids.NextKey, name: "CCSDS TC next operational root", suite: "SM4_HCTR", version: profile.TC.NextRootVersion, material: secrets.NextRoot},
 		{id: ids.RecoveryKey, name: "CCSDS TC Recovery root", suite: "SM4_GCM", version: profile.TC.RecoveryRootVersion, material: secrets.RecoveryRoot},
-		{id: ids.AOSKey, name: "CCSDS AOS receive key", suite: "SM4_GCM", version: profile.AOS.KeyVersion, material: secrets.AOSKey},
 	}
 	for _, spec := range keySpecs {
 		if err := ensureProtocolKey(ctx, app, profile.TenantID, hex.EncodeToString(digest[:]), spec); err != nil {
@@ -121,6 +122,9 @@ func run(ctx context.Context, options provisionOptions) error {
 		slog.Info("CCSDS association ready", "association_id", association.ID,
 			"direction", association.Direction, "state", association.State,
 			"spi", fmt.Sprintf("0x%04X", association.SPI), "result", result)
+	}
+	if err := app.Downlink.Provision(ctx, secrets.KEKSet, profile.Downlink.ActiveKEKSlot); err != nil {
+		return fmt.Errorf("provision downlink KEK set: %w", err)
 	}
 	command, primaryHeader, err := profile.RootPrepareCommand()
 	if err != nil {
@@ -164,7 +168,7 @@ func ensureProtocolKey(ctx context.Context, app *bootstrap.App, tenantID, profil
 		if err != nil {
 			return fmt.Errorf("read protocol key version %s: %w", spec.id, err)
 		}
-		plaintext, err := app.Resolver.UnwrapDEK(ctx, version.WrappedDEK, version.WrapMetadata, version.ID)
+		plaintext, err := app.Resolver.UnsealKey(ctx, version.SealedMaterial, version.ID)
 		if err != nil {
 			return fmt.Errorf("verify protocol key %s: %w", spec.id, err)
 		}
@@ -182,9 +186,9 @@ func ensureProtocolKey(ctx context.Context, app *bootstrap.App, tenantID, profil
 		return err
 	}
 	versionID := fmt.Sprintf("%s-v%d", spec.id, spec.version)
-	material, err := app.Resolver.WrapExternalKey(ctx, suiteID, versionID, spec.material)
+	material, err := app.Resolver.SealExternalKey(ctx, suiteID, versionID, spec.material)
 	if err != nil {
-		return fmt.Errorf("wrap protocol key %s: %w", spec.id, err)
+		return fmt.Errorf("seal protocol key %s: %w", spec.id, err)
 	}
 	now := time.Now().UTC()
 	key := &models.Key{ID: spec.id, TenantID: tenantID, Name: spec.name, Purpose: "encrypt_decrypt",
@@ -192,7 +196,7 @@ func ensureProtocolKey(ctx context.Context, app *bootstrap.App, tenantID, profil
 		CurrentVersion: spec.version, Status: "ACTIVE", Tags: map[string]string{"owner": "ccsds",
 			"provisioning": "mission-profile", "mission_profile_sha256": profileDigest}, CreatedAt: now, UpdatedAt: now}
 	version := &models.KeyVersion{ID: versionID, KeyID: spec.id, VersionNo: spec.version, SuiteID: spec.suite,
-		WrappedDEK: material.WrappedDEK, WrapMetadata: material.WrapMetadata, Status: "ACTIVE", CreatedAt: now}
+		SealedMaterial: material.SealedMaterial, Status: "ACTIVE", CreatedAt: now}
 	if err := app.Store.CreateProtocolKey(ctx, key, version); err != nil {
 		return fmt.Errorf("create protocol key %s: %w", spec.id, err)
 	}
@@ -208,10 +212,10 @@ func provisionIDs(tenantID string, currentVersion, nextVersion uint32) provision
 	return provisionedIDs{
 		CurrentKey:  fmt.Sprintf("%s-tc-root-v%d", prefix, currentVersion),
 		NextKey:     fmt.Sprintf("%s-tc-root-v%d", prefix, nextVersion),
-		RecoveryKey: prefix + "-tc-recovery-root", AOSKey: prefix + "-aos-receive-key",
-		CurrentSA:  fmt.Sprintf("%s-tc-sa-v%d", prefix, currentVersion),
-		NextSA:     fmt.Sprintf("%s-tc-sa-v%d", prefix, nextVersion),
-		RecoverySA: prefix + "-tc-recovery", AOSSA: prefix + "-aos-receive",
+		RecoveryKey: prefix + "-tc-recovery-root",
+		CurrentSA:   fmt.Sprintf("%s-tc-sa-v%d", prefix, currentVersion),
+		NextSA:      fmt.Sprintf("%s-tc-sa-v%d", prefix, nextVersion),
+		RecoverySA:  prefix + "-tc-recovery",
 	}
 }
 

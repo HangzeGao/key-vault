@@ -1,5 +1,5 @@
 // Package securitystate owns the durable ground-side security state required
-// by the CCSDS TC/AOS profile. It deliberately does not expose generic key
+// by the CCSDS TC and raw-downlink profile. It deliberately does not expose generic key
 // vault, cluster, lease, upload/download, or outbox persistence.
 package securitystate
 
@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 var (
 	ErrNotFound = errors.New("securitystate: not found")
@@ -120,9 +120,9 @@ func (s *Store) migrate(ctx context.Context) error {
 var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS schema_meta (
 		singleton INTEGER PRIMARY KEY CHECK (singleton=1),
-		version INTEGER NOT NULL CHECK (version=2)
+		version INTEGER NOT NULL CHECK (version=3)
 	) STRICT`,
-	`INSERT INTO schema_meta(singleton, version) VALUES(1, 2) ON CONFLICT(singleton) DO NOTHING`,
+	`INSERT INTO schema_meta(singleton, version) VALUES(1, 3) ON CONFLICT(singleton) DO NOTHING`,
 	`CREATE TABLE IF NOT EXISTS tenants (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -173,31 +173,34 @@ var schemaStatements = []string{
 		key_id TEXT NOT NULL REFERENCES protocol_keys(id) ON DELETE CASCADE,
 		version_no INTEGER NOT NULL CHECK (version_no>0),
 		suite_id TEXT NOT NULL,
-		wrapped_key BLOB NOT NULL CHECK (length(wrapped_key)>0),
-		wrap_metadata BLOB NOT NULL CHECK (length(wrap_metadata)>0),
+		sealed_material BLOB NOT NULL CHECK (length(sealed_material)>0),
 		status TEXT NOT NULL CHECK (status IN ('ACTIVE','PRE_ACTIVE','DECRYPT_ONLY','DESTROYED')),
 		created_at TEXT NOT NULL,
 		UNIQUE(key_id, version_no)
 	) STRICT`,
-	`CREATE TABLE IF NOT EXISTS crk_versions (
-		id TEXT PRIMARY KEY,
-		version INTEGER NOT NULL UNIQUE CHECK (version>0),
-		status TEXT NOT NULL CHECK (status='active'),
-		created_at TEXT NOT NULL
-	) STRICT`,
-	`CREATE TABLE IF NOT EXISTS crk_envelopes (
-		id TEXT PRIMARY KEY,
-		crk_version_id TEXT NOT NULL REFERENCES crk_versions(id) ON DELETE CASCADE,
-		node_id TEXT NOT NULL,
-		envelope BLOB NOT NULL CHECK (length(envelope)>0),
-		created_at TEXT NOT NULL,
-		UNIQUE(crk_version_id, node_id)
+	`CREATE TABLE IF NOT EXISTS downlink_key_state (
+		singleton INTEGER PRIMARY KEY CHECK (singleton=1),
+		active_kek_slot INTEGER NOT NULL CHECK (active_kek_slot BETWEEN 0 AND 7),
+		sealed_kek_set BLOB NOT NULL CHECK (length(sealed_kek_set)>0),
+		current_generation INTEGER,
+		current_observed INTEGER NOT NULL DEFAULT 0 CHECK (current_observed IN (0,1)),
+		current_package BLOB,
+		current_digest BLOB,
+		previous_generation INTEGER,
+		previous_package BLOB,
+		previous_digest BLOB,
+		updated_at TEXT NOT NULL,
+		CHECK ((current_generation IS NULL AND current_package IS NULL AND current_digest IS NULL) OR
+			(current_generation BETWEEN 1 AND 4294967295 AND length(current_package)=16417 AND length(current_digest)=32)),
+		CHECK ((previous_generation IS NULL AND previous_package IS NULL AND previous_digest IS NULL) OR
+			(previous_generation BETWEEN 1 AND 4294967295 AND length(previous_package)=16417 AND length(previous_digest)=32)),
+		CHECK (previous_generation IS NULL OR previous_generation < current_generation)
 	) STRICT`,
 	`CREATE TABLE IF NOT EXISTS security_associations (
 		id TEXT PRIMARY KEY,
 		tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
 		spi INTEGER NOT NULL CHECK (spi BETWEEN 0 AND 65535),
-		direction TEXT NOT NULL CHECK (direction IN ('TC_TX','TC_RECOVERY_TX','AOS_RX')),
+		direction TEXT NOT NULL CHECK (direction IN ('TC_TX','TC_RECOVERY_TX')),
 		key_id TEXT NOT NULL REFERENCES protocol_keys(id),
 		key_version INTEGER NOT NULL CHECK (key_version>0),
 		security_epoch INTEGER NOT NULL CHECK (security_epoch>=0),
@@ -231,13 +234,6 @@ var schemaStatements = []string{
 		next_spi INTEGER NOT NULL CHECK (next_spi BETWEEN 0 AND 65535),
 		current_root_version INTEGER NOT NULL CHECK (current_root_version>0),
 		next_root_version INTEGER NOT NULL CHECK (next_root_version>current_root_version),
-		updated_at TEXT NOT NULL
-	) STRICT`,
-	`CREATE TABLE IF NOT EXISTS rx_states (
-		association_id TEXT PRIMARY KEY REFERENCES security_associations(id) ON DELETE CASCADE,
-		highest_sequence TEXT NOT NULL DEFAULT '0',
-		bitmap BLOB NOT NULL DEFAULT X'0000000000000000' CHECK (length(bitmap)=8),
-		seen INTEGER NOT NULL DEFAULT 0 CHECK (seen IN (0,1)),
 		updated_at TEXT NOT NULL
 	) STRICT`,
 	`CREATE TABLE IF NOT EXISTS audit_chain_heads (
@@ -308,9 +304,9 @@ func (s *Store) CreateProtocolKey(ctx context.Context, key *models.Key, version 
 		return conflict("create protocol key", err)
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO protocol_key_versions
-		(id,key_id,version_no,suite_id,wrapped_key,wrap_metadata,status,created_at)
-		VALUES(?,?,?,?,?,?,?,?)`, version.ID, version.KeyID, version.VersionNo, version.SuiteID,
-		version.WrappedDEK, version.WrapMetadata, version.Status, formatTime(version.CreatedAt))
+		(id,key_id,version_no,suite_id,sealed_material,status,created_at)
+		VALUES(?,?,?,?,?,?,?)`, version.ID, version.KeyID, version.VersionNo, version.SuiteID,
+		version.SealedMaterial, version.Status, formatTime(version.CreatedAt))
 	if err != nil {
 		return conflict("create protocol key version", err)
 	}
@@ -344,13 +340,13 @@ func (s *Store) GetKey(ctx context.Context, tenantID, keyID string) (*models.Key
 }
 
 func (s *Store) GetKeyVersion(ctx context.Context, versionID string) (*models.KeyVersion, error) {
-	return scanKeyVersion(s.db.QueryRowContext(ctx, `SELECT id,key_id,version_no,suite_id,wrapped_key,
-		wrap_metadata,status,created_at FROM protocol_key_versions WHERE id=?`, versionID))
+	return scanKeyVersion(s.db.QueryRowContext(ctx, `SELECT id,key_id,version_no,suite_id,sealed_material,
+		status,created_at FROM protocol_key_versions WHERE id=?`, versionID))
 }
 
 func (s *Store) GetKeyVersionByNo(ctx context.Context, keyID string, version uint32) (*models.KeyVersion, error) {
-	return scanKeyVersion(s.db.QueryRowContext(ctx, `SELECT id,key_id,version_no,suite_id,wrapped_key,
-		wrap_metadata,status,created_at FROM protocol_key_versions WHERE key_id=? AND version_no=?`, keyID, version))
+	return scanKeyVersion(s.db.QueryRowContext(ctx, `SELECT id,key_id,version_no,suite_id,sealed_material,
+		status,created_at FROM protocol_key_versions WHERE key_id=? AND version_no=?`, keyID, version))
 }
 
 type rowScanner interface{ Scan(...any) error }
@@ -358,8 +354,8 @@ type rowScanner interface{ Scan(...any) error }
 func scanKeyVersion(row rowScanner) (*models.KeyVersion, error) {
 	var version models.KeyVersion
 	var created string
-	if err := row.Scan(&version.ID, &version.KeyID, &version.VersionNo, &version.SuiteID, &version.WrappedDEK,
-		&version.WrapMetadata, &version.Status, &created); err != nil {
+	if err := row.Scan(&version.ID, &version.KeyID, &version.VersionNo, &version.SuiteID, &version.SealedMaterial,
+		&version.Status, &created); err != nil {
 		return nil, notFound("get protocol key version", err)
 	}
 	var err error
@@ -368,58 +364,6 @@ func scanKeyVersion(row rowScanner) (*models.KeyVersion, error) {
 		return nil, err
 	}
 	return &version, nil
-}
-
-func (s *Store) LoadLatestCRK(ctx context.Context, nodeID string) (*models.CRKVersion, *models.CRKNodeEnvelope, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT v.id,v.version,v.status,v.created_at,e.id,e.node_id,e.envelope,e.created_at
-		FROM crk_versions v JOIN crk_envelopes e ON e.crk_version_id=v.id
-		WHERE e.node_id=? ORDER BY v.version DESC LIMIT 1`, nodeID)
-	var version models.CRKVersion
-	var envelope models.CRKNodeEnvelope
-	var versionCreated, envelopeCreated string
-	if err := row.Scan(&version.ID, &version.Version, &version.Status, &versionCreated,
-		&envelope.ID, &envelope.NodeID, &envelope.Envelope, &envelopeCreated); err != nil {
-		return nil, nil, notFound("load CRK", err)
-	}
-	envelope.CRKVersionID = version.ID
-	var err error
-	version.CreatedAt, err = parseTime(versionCreated)
-	if err != nil {
-		return nil, nil, err
-	}
-	envelope.CreatedAt, err = parseTime(envelopeCreated)
-	if err != nil {
-		return nil, nil, err
-	}
-	return &version, &envelope, nil
-}
-
-func (s *Store) SaveCRK(ctx context.Context, version *models.CRKVersion, envelope *models.CRKNodeEnvelope) error {
-	if version == nil || envelope == nil || version.ID == "" || envelope.CRKVersionID != version.ID || envelope.NodeID == "" {
-		return errors.New("securitystate: invalid CRK state")
-	}
-	now := time.Now().UTC()
-	if version.CreatedAt.IsZero() {
-		version.CreatedAt = now
-	}
-	if envelope.CreatedAt.IsZero() {
-		envelope.CreatedAt = now
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return wrap("begin CRK save", err)
-	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO crk_versions(id,version,status,created_at) VALUES(?,?,?,?)`,
-		version.ID, version.Version, version.Status, formatTime(version.CreatedAt)); err != nil {
-		return conflict("save CRK version", err)
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO crk_envelopes(id,crk_version_id,node_id,envelope,created_at)
-		VALUES(?,?,?,?,?)`, envelope.ID, envelope.CRKVersionID, envelope.NodeID, envelope.Envelope,
-		formatTime(envelope.CreatedAt)); err != nil {
-		return conflict("save CRK envelope", err)
-	}
-	return wrap("commit CRK", tx.Commit())
 }
 
 func (s *Store) Diagnostics(ctx context.Context) (*Diagnostics, error) {

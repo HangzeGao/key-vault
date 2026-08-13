@@ -18,7 +18,7 @@ services:
       TPM2TOOLS_TCTI: "device:/dev/tpmrm0"
       KVLT_LOG_LEVEL: "INFO"
       KVLT_ACCESS_TOKENS: >-
-        [{"token":"mission-data-token-baseline-000001","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:aos:unprotect"],"plane":"data"},{"token":"mission-console-token-baseline-0001","tenant_id":"t-default","scopes":["audit:read","ops:read"],"plane":"ops"}]
+        [{"token":"mission-data-token-baseline-000001","tenant_id":"t-default","scopes":["ccsds:tc:protect","ccsds:downlink:unprotect"],"plane":"data"},{"token":"mission-console-token-baseline-0001","tenant_id":"t-default","scopes":["audit:read","ops:read"],"plane":"ops"}]
     devices:
       - "/dev/tpmrm0:/dev/tpmrm0"
     volumes:

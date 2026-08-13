@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"strconv"
@@ -40,8 +39,6 @@ func (s *Store) CreateAssociation(ctx context.Context, association ccsds.Securit
 	switch association.Direction {
 	case ccsds.DirectionTCTx, ccsds.DirectionTCRecoveryTx:
 		_, err = tx.ExecContext(ctx, `INSERT INTO tx_states(association_id,next_iv,updated_at) VALUES(?,0,?)`, association.ID, now)
-	case ccsds.DirectionAOSRx:
-		_, err = tx.ExecContext(ctx, `INSERT INTO rx_states(association_id,updated_at) VALUES(?,?)`, association.ID, now)
 	}
 	if err != nil {
 		return wrap("create association runtime state", err)
@@ -93,10 +90,9 @@ func scanAssociation(row rowScanner) (*ccsds.SecurityAssociation, error) {
 func (s *Store) ReadOperationsState(ctx context.Context, tenantID string) ([]ccsds.AssociationRuntimeState, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT sa.id,sa.spi,sa.direction,sa.state,sa.suite_id,sa.security_epoch,
 		sa.key_version,sa.policy_version,sa.sequence_number_length,sa.transmitted_iv_length,sa.tag_length,
-		sa.replay_window,tx.next_iv,rx.highest_sequence,rx.seen
+		sa.replay_window,tx.next_iv
 		FROM security_associations sa
 		LEFT JOIN tx_states tx ON tx.association_id=sa.id
-		LEFT JOIN rx_states rx ON rx.association_id=sa.id
 		WHERE sa.tenant_id=? AND sa.state<>'DISABLED' ORDER BY sa.direction,sa.spi`, tenantID)
 	if err != nil {
 		return nil, wrap("read operations state", err)
@@ -117,11 +113,9 @@ func scanOperationsState(row rowScanner) (*ccsds.AssociationRuntimeState, error)
 	var state ccsds.AssociationRuntimeState
 	var direction, associationState string
 	var nextIV sql.NullInt64
-	var replayHighest sql.NullString
-	var replaySeen sql.NullInt64
 	if err := row.Scan(&state.ID, &state.SPI, &direction, &associationState, &state.SuiteID, &state.SecurityEpoch,
 		&state.KeyVersion, &state.PolicyVersion, &state.SequenceNumberLength, &state.TransmittedIVLength,
-		&state.TagLength, &state.ReplayWindow, &nextIV, &replayHighest, &replaySeen); err != nil {
+		&state.TagLength, &state.ReplayWindow, &nextIV); err != nil {
 		return nil, wrap("scan operations state", err)
 	}
 	state.Direction = ccsds.Direction(direction)
@@ -129,14 +123,6 @@ func scanOperationsState(row rowScanner) (*ccsds.AssociationRuntimeState, error)
 	if nextIV.Valid {
 		value := uint64(nextIV.Int64)
 		state.NextIVCounter = &value
-	}
-	state.ReplaySeen = replaySeen.Valid && replaySeen.Int64 == 1
-	if state.ReplaySeen && replayHighest.Valid {
-		value, err := strconv.ParseUint(replayHighest.String, 10, 64)
-		if err != nil {
-			return nil, fmt.Errorf("securitystate: decode replay highest: %w", err)
-		}
-		state.ReplayHighest = &value
 	}
 	return &state, nil
 }
@@ -403,76 +389,4 @@ func (s *Store) NextTransmitCounter(ctx context.Context, associationID string) (
 		return 0, ccsds.ErrCounterExhausted
 	}
 	return 0, ccsds.ErrAssociationState
-}
-
-func (s *Store) CheckReplay(ctx context.Context, associationID string, sequence uint64, window uint8) error {
-	state, err := s.loadReplay(ctx, s.db, associationID)
-	if err != nil {
-		return err
-	}
-	return state.Check(sequence, window)
-}
-
-func (s *Store) CommitReplay(ctx context.Context, associationID string, sequence uint64, window uint8) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return wrap("begin replay commit", err)
-	}
-	defer tx.Rollback()
-	state, err := s.loadReplay(ctx, tx, associationID)
-	if err != nil {
-		return err
-	}
-	if err := state.Commit(sequence, window); err != nil {
-		return err
-	}
-	bitmap := make([]byte, 8)
-	binary.BigEndian.PutUint64(bitmap, state.Bitmap)
-	result, err := tx.ExecContext(ctx, `UPDATE rx_states SET highest_sequence=?,bitmap=?,seen=?,updated_at=? WHERE association_id=?`,
-		strconv.FormatUint(state.Highest, 10), bitmap, boolInt(state.Seen), formatTime(time.Now()), associationID)
-	if err != nil {
-		return wrap("update replay state", err)
-	}
-	if count, _ := result.RowsAffected(); count != 1 {
-		return ccsds.ErrAssociationState
-	}
-	return wrap("commit replay state", tx.Commit())
-}
-
-type queryRower interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}
-
-func (s *Store) loadReplay(ctx context.Context, query queryRower, associationID string) (ccsds.ReplayState, error) {
-	var state ccsds.ReplayState
-	var highest string
-	var bitmap []byte
-	var seen int
-	err := query.QueryRowContext(ctx, `SELECT rx.highest_sequence,rx.bitmap,rx.seen FROM rx_states rx
-		JOIN security_associations sa ON sa.id=rx.association_id
-		WHERE rx.association_id=? AND sa.direction='AOS_RX' AND sa.state='ACTIVE'`, associationID).
-		Scan(&highest, &bitmap, &seen)
-	if errors.Is(err, sql.ErrNoRows) {
-		return state, ccsds.ErrAssociationState
-	}
-	if err != nil {
-		return state, wrap("load replay state", err)
-	}
-	if len(bitmap) != 8 {
-		return state, fmt.Errorf("securitystate: invalid replay bitmap length %d", len(bitmap))
-	}
-	state.Highest, err = strconv.ParseUint(highest, 10, 64)
-	if err != nil {
-		return state, fmt.Errorf("securitystate: decode replay sequence: %w", err)
-	}
-	state.Bitmap = binary.BigEndian.Uint64(bitmap)
-	state.Seen = seen == 1
-	return state, nil
-}
-
-func boolInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
 }

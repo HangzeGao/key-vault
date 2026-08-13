@@ -6,7 +6,7 @@ import (
 )
 
 func TestMaybeRedactJSONRecurses(t *testing.T) {
-	out, err := MaybeRedactJSON(map[string]any{"safe": "ok", "nested": []any{map[string]any{"token": "bearer-secret", "wrapped_crk": "blob", "plaintext": "hello"}}})
+	out, err := MaybeRedactJSON(map[string]any{"safe": "ok", "nested": []any{map[string]any{"token": "bearer-secret", "sealed_material": "blob", "plaintext": "hello"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,7 +23,7 @@ func TestMaybeRedactJSONRecurses(t *testing.T) {
 
 func TestSensitiveKeyExactMatches(t *testing.T) {
 	sensitive := []string{
-		"token", "password", "secret", "plaintext", "dek", "crk",
+		"token", "password", "secret", "plaintext", "dek", "kek",
 		"ciphertext", "envelope", "private_key", "key_bytes",
 		"access_token", "refresh_token", "auth_token", "csrf_token",
 		"api_key", "wrapped_envelope",
@@ -38,7 +38,7 @@ func TestSensitiveKeyExactMatches(t *testing.T) {
 func TestSensitiveKeySuffixMatches(t *testing.T) {
 	sensitive := []string{
 		"user_password", "api_secret", "data_plaintext",
-		"tenant_dek", "root_crk", "auth_token",
+		"tenant_dek", "downlink_kek", "auth_token",
 	}
 	for _, key := range sensitive {
 		if !sensitiveKey(key) {

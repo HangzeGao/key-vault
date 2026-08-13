@@ -1,6 +1,6 @@
 // Package auditchain implements the engineering baseline audit hash chain service.
 //
-// High-risk operations (CRK/Key lifecycle, node state, policy publish, destroy
+// High-risk operations (key lifecycle, node state, policy publish, destroy
 // approval) write to the local WAL or same-transaction audit record BEFORE
 // changing business state. Each event is canonicalized, then
 // current_hash = H(prev_hash || canonical_event). Chains are per-tenant with

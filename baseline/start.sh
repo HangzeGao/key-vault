@@ -25,7 +25,7 @@ if [ -z "${KVLT_ACCESS_TOKENS:-}" ]; then
     {
       "token": "mission-data-token-baseline-000001",
       "tenant_id": "t-default",
-      "scopes": ["ccsds:tc:protect", "ccsds:aos:unprotect"],
+      "scopes": ["ccsds:tc:protect", "ccsds:downlink:unprotect"],
       "plane": "data"
     },
     {
@@ -62,7 +62,16 @@ fi
 echo "building frontend..."
 (
   cd web/frontend
-  npm run build
+  if command -v pnpm >/dev/null 2>&1; then
+    pnpm_cmd=(pnpm)
+  elif command -v corepack >/dev/null 2>&1; then
+    pnpm_cmd=(corepack pnpm)
+  else
+    echo "pnpm or corepack is required to build the frontend" >&2
+    exit 1
+  fi
+  "${pnpm_cmd[@]}" install --frozen-lockfile --ignore-scripts
+  "${pnpm_cmd[@]}" run build
 )
 
 echo "building backend..."

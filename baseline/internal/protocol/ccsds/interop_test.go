@@ -70,7 +70,7 @@ func TestGroundOrdinaryTCMatchesFlightCVectors(t *testing.T) {
 				t.Fatal(err)
 			}
 			security, err := New(vectorCore{root: vector.root, suiteID: vector.suiteID}, store,
-				Options{AOSPrimaryHeaderLength: 6, MaxFrameLength: 2048, NodeID: "ground-test", TCSpacecraftID: vector.spacecraftID})
+				Options{MaxFrameLength: 2048, NodeID: "ground-test", TCSpacecraftID: vector.spacecraftID})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -116,7 +116,7 @@ func TestGroundRootPrepareMatchesFlightCVectors(t *testing.T) {
 				t.Fatal(err)
 			}
 			security, err := New(vectorCore{root: vector.root, suiteID: vector.suiteID}, store,
-				Options{AOSPrimaryHeaderLength: 6, MaxFrameLength: 2048, NodeID: "ground-test", TCSpacecraftID: vector.spacecraftID})
+				Options{MaxFrameLength: 2048, NodeID: "ground-test", TCSpacecraftID: vector.spacecraftID})
 			if err != nil {
 				t.Fatal(err)
 			}

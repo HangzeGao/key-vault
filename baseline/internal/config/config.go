@@ -89,9 +89,8 @@ type BaselineConfig struct {
 // CCSDSConfig defines mission-fixed frame boundaries. Per-association wire
 // parameters remain in the CCSDS Security Association store.
 type CCSDSConfig struct {
-	AOSPrimaryHeaderLength int    `yaml:"aos_primary_header_length"`
-	MaxFrameLength         int    `yaml:"max_frame_length"`
-	TCSpacecraftID         uint16 `yaml:"tc_spacecraft_id"`
+	MaxFrameLength int    `yaml:"max_frame_length"`
+	TCSpacecraftID uint16 `yaml:"tc_spacecraft_id"`
 }
 
 // Diagnostic is a non-secret, user-facing configuration assessment emitted at
@@ -149,9 +148,8 @@ func Default() *Config {
 			SwtpmIsolated:  false,
 		},
 		CCSDS: CCSDSConfig{
-			AOSPrimaryHeaderLength: 6,
-			MaxFrameLength:         65536,
-			TCSpacecraftID:         0,
+			MaxFrameLength: 65536,
+			TCSpacecraftID: 0,
 		},
 		LogLevel: "INFO",
 	}
@@ -325,14 +323,8 @@ func (c *Config) Validate() error {
 	if c.TrafficGuard.RateSigmaThreshold <= 0 {
 		c.TrafficGuard.RateSigmaThreshold = 3.0
 	}
-	if c.CCSDS.AOSPrimaryHeaderLength <= 0 || c.CCSDS.AOSPrimaryHeaderLength > 64 {
-		return fmt.Errorf("config: ccsds.aos_primary_header_length must be 1..64")
-	}
 	if c.CCSDS.MaxFrameLength <= 0 || c.CCSDS.MaxFrameLength > 16*1024*1024 {
 		return fmt.Errorf("config: ccsds.max_frame_length must be 1..16777216")
-	}
-	if c.CCSDS.MaxFrameLength <= c.CCSDS.AOSPrimaryHeaderLength {
-		return fmt.Errorf("config: ccsds.max_frame_length must exceed the AOS primary header length")
 	}
 	if c.CCSDS.TCSpacecraftID > 0x03ff {
 		return fmt.Errorf("config: ccsds.tc_spacecraft_id must fit the 10-bit TC spacecraft ID")

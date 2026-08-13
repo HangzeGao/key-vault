@@ -1152,7 +1152,7 @@ input[type="range"]::-moz-range-thumb {
 .operations-stat-card > strong { font: 600 21px var(--font-mono); }
 .operations-stat-card > small { color: var(--text-tertiary); font-size: 9px; }
 .operations-stat-card.recovery > svg { color: var(--success); }
-.operations-stat-card.aos > svg { color: var(--info); }
+.operations-stat-card.downlink > svg { color: var(--info); }
 .operations-stat-card .ops-card-arrow { grid-row: 1; grid-column: 3; color: var(--text-tertiary); }
 
 .ops-dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(340px, .8fr); gap: 14px; }

@@ -9,9 +9,9 @@ import (
 	"github.com/kvlt/key-vault/internal/crypto/aad"
 )
 
-func testPolicyContext() aad.CRKAAD {
-	return aad.CRKAAD{ClusterID: "cluster-a", NodeID: "node-a", PlaneRole: "ground", CRKVersion: 1,
-		NRWKName: "nrwk-a", BaselineDigest: bytes.Repeat([]byte{1}, 32), PolicyDigest: bytes.Repeat([]byte{2}, 32)}
+func testPolicyContext() aad.SealContext {
+	return aad.SealContext{Purpose: "test", ObjectID: "object-a", NodeID: "node-a",
+		StorageName: "seal-a", BaselineDigest: bytes.Repeat([]byte{1}, 32), PolicyDigest: bytes.Repeat([]byte{2}, 32)}
 }
 
 func TestNativeProviderSealUnsealAndRestart(t *testing.T) {
@@ -26,31 +26,31 @@ func TestNativeProviderSealUnsealAndRestart(t *testing.T) {
 	defer p.Close()
 	ctx := context.Background()
 	a := testPolicyContext()
-	nrwk, err := p.EnsureNRWK(ctx, a.NRWKName)
+	storage, err := p.EnsureStorage(ctx, a.StorageName)
 	if err != nil {
 		t.Fatal(err)
 	}
 	secret := bytes.Repeat([]byte{0x5a}, 32)
-	env, err := p.SealCRK(ctx, nrwk, secret, a)
+	env, err := p.Seal(ctx, storage, secret, a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := p.UnsealCRK(ctx, nrwk, env, a)
+	got, err := p.Unseal(ctx, storage, env, a)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got, secret) {
-		t.Fatal("unsealed CRK mismatch")
+		t.Fatal("unsealed secret mismatch")
 	}
 	if err := sim.Reset(); err != nil {
 		t.Fatal(err)
 	}
-	got, err = p.UnsealCRK(ctx, nrwk, env, a)
+	got, err = p.Unseal(ctx, storage, env, a)
 	if err != nil {
 		t.Fatalf("unseal after restart: %v", err)
 	}
 	if !bytes.Equal(got, secret) {
-		t.Fatal("restart CRK mismatch")
+		t.Fatal("restart secret mismatch")
 	}
 }
 
@@ -65,25 +65,25 @@ func TestNativeProviderRejectsWrongContextAndCorruption(t *testing.T) {
 	}
 	defer p.Close()
 	a := testPolicyContext()
-	nrwk, _ := p.EnsureNRWK(context.Background(), a.NRWKName)
-	env, err := p.SealCRK(context.Background(), nrwk, []byte("secret"), a)
+	storage, _ := p.EnsureStorage(context.Background(), a.StorageName)
+	env, err := p.Seal(context.Background(), storage, []byte("secret"), a)
 	if err != nil {
 		t.Fatal(err)
 	}
 	wrong := a
 	wrong.PolicyDigest = bytes.Repeat([]byte{9}, 32)
-	if _, err := p.UnsealCRK(context.Background(), nrwk, env, wrong); err == nil {
+	if _, err := p.Unseal(context.Background(), storage, env, wrong); err == nil {
 		t.Fatal("wrong policy context accepted")
 	}
-	env.WrappedCRK[0] ^= 0xff
-	if _, err := p.UnsealCRK(context.Background(), nrwk, env, a); err == nil {
+	env.Blob[0] ^= 0xff
+	if _, err := p.Unseal(context.Background(), storage, env, a); err == nil {
 		t.Fatal("corrupt envelope accepted")
 	}
 }
 
 func TestNativeProviderRejectsIncompletePolicyContext(t *testing.T) {
 	p := &NativeProvider{}
-	if err := validateNativeInputs(context.Background(), &TPMObjectRef{Name: "n"}, aad.CRKAAD{}); err == nil {
+	if err := validateNativeInputs(context.Background(), &TPMObjectRef{Name: "n"}, aad.SealContext{}); err == nil {
 		t.Fatal("incomplete context accepted")
 	}
 	_ = p

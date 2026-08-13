@@ -1,11 +1,10 @@
-import { AlertTriangle, CheckCircle2, RadioTower } from "lucide-react";
+import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import type { CCSDSAssociationStatus, CCSDSOperationsStatus } from "./queries";
 
 const warningCopy: Record<string, string> = {
   TC_CURRENT_MISSING: "No TC Current association is available. Ordinary uplink protection is unavailable.",
   TC_NEXT_MISSING: "No TC Next association is staged. The next operational epoch is not ready.",
   TC_RECOVERY_MISSING: "No active Recovery GCM association is available.",
-  AOS_ACTIVE_MISSING: "No active AOS receive association is available. Downlink unprotection is unavailable.",
   TC_IV_NEAR_EXHAUSTION: "The TC Current IV counter is above 90%. Prepare the next epoch before exhaustion.",
   TC_CURRENT_AMBIGUOUS: "More than one TC Current association exists. Transmit state is ambiguous.",
   TC_NEXT_AMBIGUOUS: "More than one TC Next association exists. Staged state is ambiguous.",
@@ -90,19 +89,5 @@ export function AssociationCard({ title, association, counter = false }: {
         </div>
       )}
     </article>
-  );
-}
-
-export function AOSAssociationRow({ association }: { association: CCSDSAssociationStatus }) {
-  return (
-    <tr>
-      <td><span className="table-direction"><RadioTower size={13} />AOS RX</span></td>
-      <td className="font-mono">{formatSPI(association.spi)}</td>
-      <td><span className="runtime-state active">{association.state}</span></td>
-      <td className="font-mono">{association.suite_id}</td>
-      <td>{association.replay_window}</td>
-      <td>{association.replay_seen ? formatCounter(association.replay_highest) : "No accepted frame"}</td>
-      <td>{association.transmitted_iv_length} B / {association.tag_length} B</td>
-    </tr>
   );
 }

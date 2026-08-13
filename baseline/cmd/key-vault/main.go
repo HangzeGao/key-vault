@@ -50,8 +50,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer app.Store.Close()
+	defer app.Downlink.Close()
+	defer app.TPM.Close()
 
-	ccsdsH := ccsdsapi.New(app.CCSDSFrameSecurity)
+	ccsdsH := ccsdsapi.New(app.CCSDSFrameSecurity, app.Downlink)
 	auditH := auditapi.New(app.AuditChain)
 	opsH := ops.New(ops.Deps{
 		Store: app.Store, Resolver: app.Resolver, Policies: app.Policies,

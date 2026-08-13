@@ -3,7 +3,6 @@ package ccsds
 import (
 	"context"
 	"encoding/hex"
-	"sort"
 )
 
 const tcCounterCapacity = uint64(1) << 32
@@ -57,8 +56,7 @@ type OperationsStatus struct {
 	TCNext               *AssociationRuntimeState
 	TCRecovery           *AssociationRuntimeState
 	TCRotation           *TCRotationState
-	AOSActive            []AssociationRuntimeState
-	AOSFormat            string
+	DownlinkFormat       string
 	ProfileDigest        string
 	FlightStatus         *ObservedFlightSecurityStatus
 	FlightReconciliation string
@@ -72,8 +70,8 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 	if err != nil {
 		return nil, err
 	}
-	status := &OperationsStatus{Status: "UNCONFIGURED", AOSActive: make([]AssociationRuntimeState, 0),
-		AOSFormat: "NOT_FROZEN", FlightReconciliation: "NOT_OBSERVED", Warnings: make([]string, 0)}
+	status := &OperationsStatus{Status: "UNCONFIGURED", DownlinkFormat: "RAW",
+		FlightReconciliation: "NOT_OBSERVED", Warnings: make([]string, 0)}
 	digest, digestErr := s.store.ReadMissionProfileDigest(ctx, tenantID)
 	if digestErr == nil {
 		status.ProfileDigest = hex.EncodeToString(digest[:])
@@ -109,8 +107,6 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 			} else {
 				status.Warnings = append(status.Warnings, "TC_RECOVERY_AMBIGUOUS")
 			}
-		case association.Direction == DirectionAOSRx && association.State == AssociationActive:
-			status.AOSActive = append(status.AOSActive, association)
 		}
 	}
 	if status.TCCurrent == nil {
@@ -133,9 +129,6 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 	}
 	if status.TCRecovery == nil {
 		status.Warnings = append(status.Warnings, "TC_RECOVERY_MISSING")
-	}
-	if len(status.AOSActive) == 0 {
-		status.Warnings = append(status.Warnings, "AOS_ACTIVE_MISSING")
 	}
 	flight, flightErr := s.store.ReadFlightSecurityStatus(ctx, tenantID)
 	if flightErr == nil {
@@ -166,8 +159,7 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 	} else {
 		return nil, flightErr
 	}
-	sort.Slice(status.AOSActive, func(i, j int) bool { return status.AOSActive[i].SPI < status.AOSActive[j].SPI })
-	status.Ready = status.TCCurrent != nil && status.TCNext != nil && status.TCRecovery != nil && len(status.AOSActive) > 0 && len(status.Warnings) == 0
+	status.Ready = status.TCCurrent != nil && status.TCNext != nil && status.TCRecovery != nil && len(status.Warnings) == 0
 	if status.Ready {
 		status.Status = "READY"
 	} else if len(associations) > 0 {
