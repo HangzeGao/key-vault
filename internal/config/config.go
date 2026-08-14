@@ -302,16 +302,17 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("config: production requires a unique node_id")
 		}
 		requiredFiles := []struct {
-			name string
-			path string
+			name       string
+			path       string
+			restricted bool
 		}{
-			{"tls_cert_file", c.Server.TLSCertFile},
-			{"tls_key_file", c.Server.TLSKeyFile},
-			{"auth.access_tokens_file", c.Auth.AccessTokensFile},
-			{"policy.trusted_keys_path", c.Policy.TrustedKeysPath},
-			{"policy.signed_policy_path", c.Policy.SignedPolicyPath},
-			{"audit.redaction_pepper_file", c.Audit.RedactionPepperFile},
-			{"recovery.restore_drill_evidence_file", c.Recovery.RestoreDrillEvidenceFile},
+			{"tls_cert_file", c.Server.TLSCertFile, false},
+			{"tls_key_file", c.Server.TLSKeyFile, true},
+			{"auth.access_tokens_file", c.Auth.AccessTokensFile, true},
+			{"policy.trusted_keys_path", c.Policy.TrustedKeysPath, false},
+			{"policy.signed_policy_path", c.Policy.SignedPolicyPath, false},
+			{"audit.redaction_pepper_file", c.Audit.RedactionPepperFile, true},
+			{"recovery.restore_drill_evidence_file", c.Recovery.RestoreDrillEvidenceFile, true},
 		}
 		for _, required := range requiredFiles {
 			if strings.TrimSpace(required.path) == "" {
@@ -319,6 +320,11 @@ func (c *Config) Validate() error {
 			}
 			if err := validateReadableRegularFile(required.path); err != nil {
 				return fmt.Errorf("config: production %s must reference a readable regular file: %w", required.name, err)
+			}
+			if required.restricted {
+				if err := validateRestrictedFile(required.path); err != nil {
+					return fmt.Errorf("config: production %s must be an owner-only, non-symlink file: %w", required.name, err)
+				}
 			}
 		}
 	}
@@ -365,4 +371,18 @@ func validateReadableRegularFile(path string) error {
 		return fmt.Errorf("not a regular file")
 	}
 	return nil
+}
+
+func validateRestrictedFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("symbolic links are forbidden")
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file")
+	}
+	return validateRestrictedFilePlatform(info)
 }

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -68,6 +69,9 @@ func TestProductionRejectsNonDurableOrFallbackSecurityBoundaries(t *testing.T) {
 		})
 	}
 	cfg := productionConfig(t)
+	if runtime.GOOS == "windows" {
+		t.Skip("production owner-only file validation requires POSIX ownership semantics")
+	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("safe production config rejected: %v", err)
 	}

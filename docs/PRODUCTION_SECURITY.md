@@ -14,6 +14,13 @@ Configuration fails closed unless production supplies:
 - signed policy trust files, an audit-redaction pepper, and restore-drill evidence;
 - separate Data and Ops listener addresses in the single runtime process.
 
+The TLS private key, access-token file, audit-redaction pepper, and
+restore-drill evidence must be regular non-symlink files owned by the service
+account with no group or other permission bits (`0600` or stricter). The
+certificate, signed policy, and policy trust keys are public verification
+material and only require readable regular files. Production startup fails on
+platforms where the service cannot verify POSIX ownership and mode bits.
+
 Example tokens, software/shell TPM providers, plain HTTP, wildcard CORS,
 unknown configuration fields, and relative production state paths are rejected.
 
