@@ -92,18 +92,22 @@ func listenerHandler(mux *http.ServeMux, deps Deps, plane principal.Plane) http.
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 	auth := middleware.Auth(middleware.AuthConfig{AccessTokens: deps.AccessTokens})
-	admitted := middleware.CapacityGuard(middleware.CapacityConfig{Window: deps.Cfg.TrafficGuard.RateWindow,
-		SigmaThreshold: deps.Cfg.TrafficGuard.RateSigmaThreshold})(mux)
+	capacityCfg := middleware.CapacityConfig{Window: deps.Cfg.TrafficGuard.RateWindow,
+		SigmaThreshold: deps.Cfg.TrafficGuard.RateSigmaThreshold}
+	var endpoint http.Handler = mux
+	endpoint = middleware.ReadBody(endpoint)
+	endpoint = middleware.BodyLimit(deps.Cfg.Server.MaxRequestBody)(endpoint)
+	admitted := middleware.CapacityGuard(capacityCfg)(endpoint)
 	protected := middleware.APIAccess(middleware.RequirePlane(plane)(admitted))
+	authenticated := auth(protected)
+	preAuthenticated := middleware.PreAuthCapacityGuard(capacityCfg)(authenticated)
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {
 			mux.ServeHTTP(w, r)
 			return
 		}
-		auth(protected).ServeHTTP(w, r)
+		preAuthenticated.ServeHTTP(w, r)
 	})
-	handler = middleware.ReadBody(handler)
-	handler = middleware.BodyLimit(deps.Cfg.Server.MaxRequestBody)(handler)
 	handler = middleware.RequestID(handler)
 	return transportSecurity(handler)
 }

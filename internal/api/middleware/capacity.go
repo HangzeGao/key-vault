@@ -1,12 +1,15 @@
 package middleware
 
 import (
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+const maxCapacityBuckets = 4096
 
 // CapacityConfig controls the in-process admission guard. Multi-node
 // deployments should additionally enforce a distributed/global limit at the
@@ -24,6 +27,16 @@ type rateBucket struct {
 // CapacityGuard bounds expensive API classes and hot-key traffic. It emits
 // standard Retry-After and rate-limit headers and never logs request bodies.
 func CapacityGuard(cfg CapacityConfig) func(http.Handler) http.Handler {
+	return capacityGuard(cfg, false)
+}
+
+// PreAuthCapacityGuard bounds unauthenticated work by remote IP before any
+// credential processing or request-body read. Its state is strictly bounded.
+func PreAuthCapacityGuard(cfg CapacityConfig) func(http.Handler) http.Handler {
+	return capacityGuard(cfg, true)
+}
+
+func capacityGuard(cfg CapacityConfig, preAuth bool) func(http.Handler) http.Handler {
 	if cfg.Window <= 0 {
 		cfg.Window = time.Minute
 	}
@@ -41,14 +54,31 @@ func CapacityGuard(cfg CapacityConfig) func(http.Handler) http.Handler {
 			}
 			// Sigma is intentionally consumed as a conservative burst multiplier.
 			limit += int(cfg.SigmaThreshold)
-			identity := r.RemoteAddr
-			if p := PrincipalFromContext(r.Context()); p != nil && p.ID != "" {
-				identity = p.ID
+			identity := remoteIdentity(r.RemoteAddr)
+			if !preAuth {
+				if p := PrincipalFromContext(r.Context()); p != nil && p.ID != "" {
+					identity = p.ID
+				}
 			}
 			key := identity + "\x00" + r.Method + "\x00" + r.URL.Path
 			now := time.Now()
 			mu.Lock()
 			bucket := buckets[key]
+			if bucket.windowStart.IsZero() && len(buckets) >= maxCapacityBuckets {
+				for existingKey, existing := range buckets {
+					if now.Sub(existing.windowStart) >= cfg.Window {
+						delete(buckets, existingKey)
+					}
+				}
+				if len(buckets) >= maxCapacityBuckets {
+					mu.Unlock()
+					w.Header().Set("Retry-After", strconv.Itoa(max(int(cfg.Window.Seconds()), 1)))
+					WriteJSON(w, http.StatusTooManyRequests, map[string]any{"error": map[string]any{
+						"code": "RATE_LIMITED", "message": "admission capacity exhausted", "retryable": true,
+					}})
+					return
+				}
+			}
 			if bucket.windowStart.IsZero() || now.Sub(bucket.windowStart) >= cfg.Window {
 				bucket = rateBucket{windowStart: now}
 			}
@@ -69,6 +99,14 @@ func CapacityGuard(cfg CapacityConfig) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func remoteIdentity(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	return remoteAddr
 }
 
 func routeLimit(method, path string) int {
