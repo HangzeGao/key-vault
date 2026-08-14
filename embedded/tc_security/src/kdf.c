@@ -57,6 +57,15 @@ static void cmac(const uint8_t *key, const uint8_t *message,
     zeroize(state, sizeof(state)); zeroize(block, sizeof(block));
 }
 
+#if defined(TCSEC_TEST_CRYPTO_PRIMITIVES)
+int tcsec_test_sm4_cmac(const uint8_t key[16], const uint8_t *message,
+                        size_t length, uint8_t tag[16]) {
+    if (key == NULL || tag == NULL || (message == NULL && length != 0u)) return -1;
+    cmac(key, message, length, tag);
+    return 0;
+}
+#endif
+
 static void write_u16(uint8_t output[2], uint16_t value) {
     output[0] = (uint8_t)(value >> 8); output[1] = (uint8_t)value;
 }

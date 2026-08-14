@@ -17,6 +17,7 @@ BUILD_DIR := build
 TEST_BIN := $(BUILD_DIR)/test_tc_security
 DISPATCH_TEST_BIN := $(BUILD_DIR)/test_sm4_dispatch
 SELFTEST_FAILURE_BIN := $(BUILD_DIR)/test_selftest_failure
+EXTERNAL_VECTOR_TEST_BIN := $(BUILD_DIR)/test_external_vectors
 C_SOURCES := src/tc_security.c src/tc_security_nvm.c src/selftest.c src/sm4.c src/hctr.c src/gcm.c src/kdf.c tests/test_tc_security.c
 ASM_SOURCES :=
 ifeq ($(ARMV7_NEON),1)
@@ -44,11 +45,18 @@ $(SELFTEST_FAILURE_BIN): src/tc_security.c src/selftest.c src/tc_security_nvm.c 
 		src/tc_security.c src/selftest.c src/tc_security_nvm.c src/sm4.c src/hctr.c src/gcm.c src/kdf.c \
 		tests/test_selftest_failure.c $(LDFLAGS) -o $(SELFTEST_FAILURE_BIN)
 
-test: $(TEST_BIN) $(DISPATCH_TEST_BIN) $(SELFTEST_FAILURE_BIN)
+$(EXTERNAL_VECTOR_TEST_BIN): src/sm4.c src/hctr.c src/gcm.c src/kdf.c tests/test_external_vectors.c
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DTCSEC_TEST_CRYPTO_PRIMITIVES=1 \
+		src/sm4.c src/hctr.c src/gcm.c src/kdf.c tests/test_external_vectors.c \
+		$(LDFLAGS) -o $(EXTERNAL_VECTOR_TEST_BIN)
+
+test: $(TEST_BIN) $(DISPATCH_TEST_BIN) $(SELFTEST_FAILURE_BIN) $(EXTERNAL_VECTOR_TEST_BIN)
 	$(TEST_BIN) ../../testdata/ccsds_tc_sm4_hctr.txt \
 		../../testdata/ccsds_tc_sm4_gcm_recovery.txt
 	$(DISPATCH_TEST_BIN)
 	$(SELFTEST_FAILURE_BIN)
+	$(EXTERNAL_VECTOR_TEST_BIN) ../../testdata/crypto/cryptography-sm4-v1.tsv
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -104,7 +104,7 @@ expected_status, generator, generator_version, sha256
 - 认证失败输出长度为 0，输出缓冲区清零，replay/NVM 状态不推进；
 - 相同 key 下 nonce 不得重复；并发、重启和计数器边界测试必须证明该约束。
 
-应使用一个固定版本、明确支持 `SM4-GCM` 的独立库作为差分 Oracle。当前首选 OpenSSL EVP；门禁启动时必须先探测算法能力，不得静默跳过。
+固定独立 Oracle 为 `pyca/cryptography 49.0.0`（其捆绑 OpenSSL 4.0.1 后端）。门禁使用已提交的离线向量，不在测试时联网；重新生成时必须先验证固定版本确实支持 SM4、CMAC 与 SM4-GCM，能力或版本不符直接失败，不得静默跳过。RFC 8998 Appendix A.1 仍是 SM4-GCM 的规范锚点，独立库向量不能替代该规范向量。
 
 ### 5.3 SM4-CMAC
 
@@ -310,7 +310,6 @@ SM4 block KAT
 统一发布入口为：
 
 ```bash
-cd baseline
 make release-gate
 ```
 
@@ -339,9 +338,10 @@ make release-gate
 | Replay、Next promotion、Recovery、NVM 双槽负向测试 | 已有 |
 | Go/C 95% 覆盖率门禁、运维 CLI/API 测试、发布哈希证据 | 已有 |
 | GB/T/GM/T SM4 单分组权威 KAT | 已有；启动自检和单元测试共同覆盖 |
-| RFC 8998 SM4-GCM 权威 KAT | **待补 P0** |
-| SM4-GCM 独立 OpenSSL Oracle 差分 | **待补 P0** |
-| 与产品无共享实现的 HCTR 参考模型和批量差分 | **待补 P0** |
+| RFC 8998 SM4-GCM 权威 KAT | 已有；Go/C 共用固定向量并逐字节验证 ciphertext/tag |
+| SM4/CMAC/GCM 独立开源 Oracle 差分 | 已有；`pyca/cryptography 49.0.0` / OpenSSL 4.0.1 生成固定边界向量 |
+| 与产品无共享实现的 HCTR 参考模型和批量差分 | 已有；独立 Python 组合模型仅调用外部 SM4 分组原语，覆盖 16/17/31/32/33/64/1011 字节 |
+| SP 800-108/SM4-CMAC 独立参考向量 | 已有；16/32 字节输出由外部 CMAC 原语生成并由 Go/C 共同验证 |
 | ASan/UBSan 自动门禁和有界 fuzz runner | **待补 P0** |
 | 星载启动 KAT 与失败锁定 | 已有；实际选中后端执行，失败锁定 receive/reset |
 | 自动 context/NVM/状态 bit-flip campaign | **待补 P1** |
@@ -351,6 +351,8 @@ make release-gate
 | 完整 AOS 帧测试 | 等待任务 AOS 格式冻结 |
 
 因此当前证据可支持“星地功能互操作与已有代码覆盖率达标”，尚不能表述为“密码算法已完成权威验证”“星载实现已完成侧信道评估”或“产品已通过 GM/T 检测认证”。
+
+其中“密码算法已完成权威验证”仍不可作为总体结论：当前已经补齐 SM4、SM4-GCM 的规范锚点以及 SM4/CMAC/GCM/HCTR/KDF 的独立软件交叉验证，但 ASan/UBSan、fuzz、目标板侧信道和外部检测认证仍是独立门禁。
 
 ## 14. 完成定义
 
@@ -383,6 +385,14 @@ make release-gate
 QEMU 运行完整 TC Current/Next/Recovery 套件。缺少交叉编译器、sysroot 或
 QEMU 直接失败，不再允许以 x86 结果替代汇编后端证据。真实目标板 WCET、
 物理 NVM 和侧信道证据仍是发布验收项。
+
+`scripts/external_vector_gate.sh` 是独立开源实现门禁：先校验
+`testdata/crypto/cryptography-sm4-v1.tsv` 的文件 SHA-256，再由地面 Go 和
+星载 C 分别消费 28 条固定记录。记录包含 GB/T 32907 SM4 KAT、RFC 8998
+SM4-GCM A.1、外部 SM4-CMAC/GCM 边界向量、独立 HCTR 组合向量和
+SP 800-108/SM4-CMAC 派生向量。向量文件同时固定生成器源码 SHA-256；任一
+算法类别数量不足、文件/记录/生成器哈希错误、来源或固定版本漂移、Go/C 输出
+不一致都直接失败。
 
 ## 15. 规范和测试依据
 

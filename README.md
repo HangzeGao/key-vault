@@ -7,6 +7,7 @@ This repository implements one strict pre-production contract:
 - direct TPM sealing of TC roots and the downlink KEK set, without CRK/SWK compatibility layers;
 - separate Data and Ops planes with bearer-token scopes;
 - a release gate requiring Go and flight-C tests, 95% coverage, operations CLI tests, ARMv7 checks, and ground-to-flight vectors.
+- independent open-source SM4/CMAC/GCM/HCTR/KDF vectors consumed by both ground Go and flight C, anchored by RFC 8998 SM4-GCM.
 
 Operations are intentionally browser-free. Use the loopback-only `kvltctl`
 interface documented in [docs/OPERATIONS_CLI.md](docs/OPERATIONS_CLI.md).

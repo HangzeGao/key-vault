@@ -13,6 +13,8 @@ cd "$ROOT_DIR"
 "$go_bin" test -count=1 -run '^TestTCDataPlaneAPIProducesFlightAcceptedVector$' ./internal/api/ccsds
 "$go_bin" test -count=1 -run '^TestDownlinkBatchToAuthenticatedHTTPPlaintext$' ./internal/api/ccsds
 
+GO_BIN="$go_bin" bash scripts/external_vector_gate.sh
+
 GO_BIN="$go_bin" bash scripts/armv7_gate.sh
 
 coverage_output="$(bash scripts/coverage_gate.sh)"
@@ -36,9 +38,11 @@ source_manifest_hash="$({
 } | LC_ALL=C sort | xargs sha256sum | sha256sum | awk '{print $1}')"
 ordinary_hash="$(sha256sum testdata/ccsds_tc_sm4_hctr.txt | awk '{print $1}')"
 recovery_hash="$(sha256sum testdata/ccsds_tc_sm4_gcm_recovery.txt | awk '{print $1}')"
+external_vector_hash="$(sha256sum testdata/crypto/cryptography-sm4-v1.tsv | awk '{print $1}')"
+external_generator_hash="$(sha256sum scripts/oracle/cryptography_vector_generator.py | awk '{print $1}')"
 cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
 {
-  "format_version": 3,
+  "format_version": 4,
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_commit": "$commit",
   "dirty_worktree": $dirty,
@@ -47,6 +51,12 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "ground_tc_go_statement_coverage": $go_coverage,
   "ordinary_vector_sha256": "$ordinary_hash",
   "recovery_vector_sha256": "$recovery_hash",
+  "external_vector_generator": "pyca/cryptography 49.0.0 (OpenSSL 4.0.1) + RFC 8998 Appendix A.1",
+  "external_vector_generator_sha256": "$external_generator_hash",
+  "external_vector_sha256": "$external_vector_hash",
+  "external_vector_records": 28,
+  "rfc8998_sm4_gcm": "passed",
+  "external_sm4_block_cmac_gcm_hctr_kdf": "passed",
   "api_to_flight_vector": "passed",
   "downlink_batch_to_http_plaintext": "passed",
   "armv7_cross_compile": "passed",
