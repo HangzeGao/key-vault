@@ -30,4 +30,15 @@ go test ./...
 make release-gate
 ```
 
+The only supported service launcher requires an explicit configuration and
+never creates credentials or TPM fallbacks:
+
+```bash
+bash start.sh serve /etc/key-vault/config.yaml
+```
+
+Use [config.production.example.yaml](config.production.example.yaml) as the
+field reference. Install the service under a dedicated non-root account; do not
+run it through the removed Docker/Compose development path.
+
 The database accepts schema version 3 only. Because the system is not in production, obsolete databases are deliberately rejected and must be reprovisioned from the controlled Mission Security Profile.

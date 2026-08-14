@@ -14,6 +14,16 @@ Configuration fails closed unless production supplies:
 - signed policy trust files, an audit-redaction pepper, and restore-drill evidence;
 - separate Data and Ops listener addresses in the single runtime process.
 
+The native TPM provider runs only as a dedicated non-root service account. Its
+TCTI is a raw absolute character-device path (normally `/dev/tpmrm0`), never a
+symlink; the device may be owned by the service account or by a dedicated group
+containing only that account, and must have no permissions for other users.
+PCR policy is mandatory and non-empty. The process no longer uses a publicly
+derivable context value as a TPM password: sealed objects are protected by the
+PCR policy and this host access boundary. Host root remains part of the trusted
+computing base; excluding a hostile root would require an external approval
+factor or a hardware boundary with independently administered authorization.
+
 The TLS private key, access-token file, audit-redaction pepper, and
 restore-drill evidence must be regular non-symlink files owned by the service
 account with no group or other permission bits (`0600` or stricter). The

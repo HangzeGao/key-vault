@@ -1,7 +1,11 @@
 # TPM Providers
 
-- `native`/`tss`/`esapi`: in-process go-tpm production provider; no shell or plaintext temporary files. `PolicyPCR` binds configured PCRs, while a TPM object authorization derived from canonical cluster/node/plane/baseline/policy context binds the remaining context.
-- `tpm2-tools`: hardened engineering fallback only.
-- `software`/`swtpm`: local tests only and rejected in production configuration.
+- `native`: the only production provider. It uses in-process go-tpm with no
+  shell or plaintext temporary files. A mandatory `PolicyPCR` binds the object;
+  a dedicated non-root service account and restricted raw TPM device enforce
+  the local host boundary.
+- `swtpm`: the only test provider and always rejected in production.
 
-Native startup fails closed for invalid transports. Tests cover vTPM seal/unseal, context mismatch, restart, and corrupted envelopes when CGO simulator support is available.
+Native startup fails closed for invalid devices, root execution, obsolete
+sealed-object formats, PCR mismatch, context mismatch, and corrupted envelopes.
+The retired tpm2-tools and provider-alias paths are not accepted.

@@ -133,21 +133,13 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 
 func buildTPM(cfg *config.Config) (provider.Provider, error) {
 	switch cfg.TPM.Provider {
-	case "swtpm", "software":
+	case "swtpm":
 		value, err := provider.NewSoftwareProvider(cfg.TPM.StateDir)
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap: TPM: %w", err)
 		}
 		return value, nil
-	case "tpm2", "hardware", "tpm2-tools":
-		value, err := provider.NewHardwareProviderWithOptions(provider.HardwareOptions{
-			StateDir: cfg.TPM.StateDir, ToolDir: cfg.TPM.ToolDir, TCTI: cfg.TPM.TCTI,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("bootstrap: TPM: %w", err)
-		}
-		return value, nil
-	case "tss", "esapi", "native":
+	case "native":
 		value, err := provider.NewNativeProvider(provider.NativeOptions{TCTI: cfg.TPM.TCTI, PCRs: cfg.TPM.PolicyPCRs})
 		if err != nil {
 			return nil, fmt.Errorf("bootstrap: TPM: %w", err)

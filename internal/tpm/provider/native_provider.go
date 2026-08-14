@@ -2,7 +2,6 @@ package provider
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,8 +13,8 @@ import (
 	"github.com/kvlt/key-vault/internal/crypto/aad"
 )
 
-// NativeOptions configures the in-process TPM 2.0 provider. TCTI is a device
-// path or supported platform transport name; no external command is executed.
+// NativeOptions configures the in-process TPM 2.0 provider. On POSIX, TCTI is
+// the absolute raw character-device path; no external command is executed.
 type NativeOptions struct {
 	TCTI string
 	PCRs []int
@@ -30,12 +29,16 @@ type NativeProvider struct {
 }
 
 type nativeSealedBundle struct {
-	Public  []byte `json:"public"`
-	Private []byte `json:"private"`
-	PCRs    []int  `json:"pcrs"`
+	FormatVersion uint32 `json:"format_version"`
+	Public        []byte `json:"public"`
+	Private       []byte `json:"private"`
+	PCRs          []int  `json:"pcrs"`
 }
 
-const nativeSRKPersistentHandle tpmutil.Handle = 0x81000001
+const (
+	nativeSRKPersistentHandle tpmutil.Handle = 0x81000001
+	nativeBundleFormatVersion uint32         = 2
+)
 
 func newNativeSRKTemplate() legacy.Public {
 	return legacy.Public{
@@ -120,22 +123,19 @@ func (p *NativeProvider) Seal(ctx context.Context, storage *TPMObjectRef, plaint
 	if err != nil {
 		return nil, err
 	}
-	password, err := nativeContextPassword(sealContext)
-	if err != nil {
-		return nil, err
-	}
-	// The policy session is used here to calculate the object policy digest;
-	// unseal recreates the same PolicyPCR + PolicyPassword session.
-	session, policy, err := p.policySession(password)
+	// The policy session calculates the explicit PCR policy digest. Host access
+	// is enforced by the dedicated non-root service account and TPM device ACL;
+	// a deterministic context-derived password would not add a secret factor.
+	session, policy, err := p.policySession()
 	if err != nil {
 		return nil, err
 	}
 	_ = legacy.FlushContext(p.rw, session)
-	private, public, err := legacy.Seal(p.rw, primary, "", password, policy, plaintext)
+	private, public, err := legacy.Seal(p.rw, primary, "", "", policy, plaintext)
 	if err != nil {
 		return nil, fmt.Errorf("provider: seal secret in native TPM: %w", err)
 	}
-	bundle, err := json.Marshal(nativeSealedBundle{Public: public, Private: private, PCRs: p.pcrs})
+	bundle, err := json.Marshal(nativeSealedBundle{FormatVersion: nativeBundleFormatVersion, Public: public, Private: private, PCRs: p.pcrs})
 	if err != nil {
 		return nil, fmt.Errorf("provider: encode native sealed object: %w", err)
 	}
@@ -160,7 +160,8 @@ func (p *NativeProvider) Unseal(ctx context.Context, storage *TPMObjectRef, obje
 		return nil, err
 	}
 	var bundle nativeSealedBundle
-	if err := json.Unmarshal(object.Blob, &bundle); err != nil || len(bundle.Public) == 0 || len(bundle.Private) == 0 {
+	if err := json.Unmarshal(object.Blob, &bundle); err != nil ||
+		bundle.FormatVersion != nativeBundleFormatVersion || len(bundle.Public) == 0 || len(bundle.Private) == 0 {
 		return nil, errors.New("provider: corrupt native sealed object")
 	}
 	if !equalInts(bundle.PCRs, p.pcrs) {
@@ -175,23 +176,19 @@ func (p *NativeProvider) Unseal(ctx context.Context, storage *TPMObjectRef, obje
 		return nil, fmt.Errorf("provider: load native sealed object: %w", err)
 	}
 	defer legacy.FlushContext(p.rw, objectHandle)
-	password, err := nativeContextPassword(sealContext)
-	if err != nil {
-		return nil, err
-	}
-	session, _, err := p.policySession(password)
+	session, _, err := p.policySession()
 	if err != nil {
 		return nil, err
 	}
 	defer legacy.FlushContext(p.rw, session)
-	plaintext, err := legacy.UnsealWithSession(p.rw, session, objectHandle, password)
+	plaintext, err := legacy.UnsealWithSession(p.rw, session, objectHandle, "")
 	if err != nil {
 		return nil, errors.New("provider: TPM policy refused secret unseal")
 	}
 	return plaintext, nil
 }
 
-func (p *NativeProvider) policySession(password string) (tpmutil.Handle, []byte, error) {
+func (p *NativeProvider) policySession() (tpmutil.Handle, []byte, error) {
 	session, _, err := legacy.StartAuthSession(p.rw, legacy.HandleNull, legacy.HandleNull, make([]byte, 16), nil, legacy.SessionPolicy, legacy.AlgNull, legacy.AlgSHA256)
 	if err != nil {
 		return legacy.HandleNull, nil, fmt.Errorf("provider: start TPM policy session: %w", err)
@@ -203,27 +200,12 @@ func (p *NativeProvider) policySession(password string) (tpmutil.Handle, []byte,
 			return legacy.HandleNull, nil, fmt.Errorf("provider: apply PolicyPCR: %w", err)
 		}
 	}
-	if err := legacy.PolicyPassword(p.rw, session); err != nil {
-		_ = legacy.FlushContext(p.rw, session)
-		return legacy.HandleNull, nil, fmt.Errorf("provider: apply PolicyPassword: %w", err)
-	}
 	digest, err := legacy.PolicyGetDigest(p.rw, session)
 	if err != nil {
 		_ = legacy.FlushContext(p.rw, session)
 		return legacy.HandleNull, nil, fmt.Errorf("provider: read policy digest: %w", err)
 	}
 	return session, digest, nil
-}
-
-func nativeContextPassword(a aad.SealContext) (string, error) {
-	b, err := a.Canonical()
-	if err != nil {
-		return "", fmt.Errorf("provider: canonical context: %w", err)
-	}
-	sum := sha256.Sum256(append([]byte("kvlt-tpm-policy-context-v1\x00"), b...))
-	// TPM2B_AUTH for an object using SHA-256 NameAlg is limited to the
-	// algorithm digest size. Keep the full 256 bits without hex expansion.
-	return string(sum[:]), nil
 }
 
 func validateNativeInputs(ctx context.Context, storage *TPMObjectRef, a aad.SealContext) error {

@@ -3,6 +3,7 @@ package provider
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/go-tpm-tools/simulator"
@@ -75,6 +76,20 @@ func TestNativeProviderRejectsWrongContextAndCorruption(t *testing.T) {
 	if _, err := p.Unseal(context.Background(), storage, env, wrong); err == nil {
 		t.Fatal("wrong policy context accepted")
 	}
+	var obsolete nativeSealedBundle
+	if err := json.Unmarshal(env.Blob, &obsolete); err != nil {
+		t.Fatal(err)
+	}
+	obsolete.FormatVersion--
+	obsoleteBlob, err := json.Marshal(obsolete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obsoleteObject := *env
+	obsoleteObject.Blob = obsoleteBlob
+	if _, err := p.Unseal(context.Background(), storage, &obsoleteObject, a); err == nil {
+		t.Fatal("obsolete native sealed-object format accepted")
+	}
 	env.Blob[0] ^= 0xff
 	if _, err := p.Unseal(context.Background(), storage, env, a); err == nil {
 		t.Fatal("corrupt envelope accepted")
@@ -87,14 +102,4 @@ func TestNativeProviderRejectsIncompletePolicyContext(t *testing.T) {
 		t.Fatal("incomplete context accepted")
 	}
 	_ = p
-}
-
-func TestNativeContextPasswordFitsSHA256AuthValue(t *testing.T) {
-	password, err := nativeContextPassword(testPolicyContext())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(password) != 32 {
-		t.Fatalf("native TPM auth length = %d, want 32", len(password))
-	}
 }

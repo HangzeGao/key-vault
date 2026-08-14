@@ -48,7 +48,6 @@ type DatabaseConfig struct {
 type TPMConfig struct {
 	Provider   string `yaml:"provider"`
 	StateDir   string `yaml:"state_dir"`
-	ToolDir    string `yaml:"tool_dir"`
 	TCTI       string `yaml:"tcti"`
 	PolicyPCRs []int  `yaml:"policy_pcrs"`
 }
@@ -111,8 +110,8 @@ func (c *Config) Diagnostics() []Diagnostic {
 	} else {
 		findings = append(findings, Diagnostic{"warn", "non_production", "development/test safeguards are active; this profile must not hold production data"})
 	}
-	if c.TPM.Provider == "software" || c.TPM.Provider == "swtpm" || c.TPM.Provider == "tpm2-tools" || c.TPM.Provider == "hardware" {
-		findings = append(findings, Diagnostic{"warn", "tpm_fallback", "a non-native TPM provider is active; use native TSS/ESAPI for production"})
+	if c.TPM.Provider == "swtpm" {
+		findings = append(findings, Diagnostic{"warn", "tpm_fallback", "the test-only software TPM provider is active; use native for production"})
 	}
 	return findings
 }
@@ -205,9 +204,6 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("KVLT_TPM_STATE_DIR"); v != "" {
 		c.TPM.StateDir = v
 	}
-	if v := os.Getenv("KVLT_TPM_TOOL_DIR"); v != "" {
-		c.TPM.ToolDir = v
-	}
 	if v := os.Getenv("KVLT_TPM_TCTI"); v != "" {
 		c.TPM.TCTI = v
 	}
@@ -279,24 +275,38 @@ func (c *Config) Validate() error {
 	// A native TPM configuration is a production fingerprint. Refuse to run it
 	// under development/test safeguards by accident.
 	if c.Environment != "production" {
-		nativeTPM := c.TPM.Provider == "native" || c.TPM.Provider == "tss" || c.TPM.Provider == "esapi"
-		if nativeTPM {
+		if c.TPM.Provider == "native" {
 			return fmt.Errorf("config: native TPM configuration requires environment: production")
+		}
+		if c.TPM.Provider != "swtpm" {
+			return fmt.Errorf("config: development and test require the swtpm provider")
 		}
 	}
 	if c.Environment == "production" {
 		if !filepath.IsAbs(c.Database.Path) {
 			return fmt.Errorf("config: production database.path must be absolute")
 		}
-		switch c.TPM.Provider {
-		case "software", "swtpm", "tpm2", "hardware", "tpm2-tools":
-			return fmt.Errorf("config: production requires native tss/esapi TPM provider")
-		}
-		if c.TPM.Provider != "native" && c.TPM.Provider != "tss" && c.TPM.Provider != "esapi" {
-			return fmt.Errorf("config: production requires native tss/esapi TPM provider")
+		if c.TPM.Provider != "native" {
+			return fmt.Errorf("config: production requires the native TPM provider")
 		}
 		if strings.TrimSpace(c.TPM.TCTI) == "" {
 			return fmt.Errorf("config: production requires an explicit TPM TCTI")
+		}
+		if !filepath.IsAbs(c.TPM.TCTI) {
+			return fmt.Errorf("config: production TPM TCTI must be an absolute device path")
+		}
+		if len(c.TPM.PolicyPCRs) == 0 {
+			return fmt.Errorf("config: production requires at least one TPM policy PCR")
+		}
+		seenPCRs := make(map[int]struct{}, len(c.TPM.PolicyPCRs))
+		for _, pcr := range c.TPM.PolicyPCRs {
+			if pcr < 0 || pcr > 23 {
+				return fmt.Errorf("config: TPM policy PCR %d is out of range", pcr)
+			}
+			if _, duplicate := seenPCRs[pcr]; duplicate {
+				return fmt.Errorf("config: TPM policy PCR %d is duplicated", pcr)
+			}
+			seenPCRs[pcr] = struct{}{}
 		}
 		if c.Server.NodeID == "" || c.Server.NodeID == "node-development" {
 			return fmt.Errorf("config: production requires a unique node_id")

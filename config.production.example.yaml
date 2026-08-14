@@ -20,7 +20,9 @@ database:
 
 tpm:
   provider: native
-  tcti: device:/dev/tpmrm0
+  # Raw character-device path. Run as a dedicated non-root account whose
+  # private TPM group has read/write access; do not share that group.
+  tcti: /dev/tpmrm0
   policy_pcrs: [7]
 
 auth:

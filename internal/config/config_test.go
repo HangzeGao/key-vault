@@ -52,11 +52,23 @@ func TestProductionRejectsNonDurableOrFallbackSecurityBoundaries(t *testing.T) {
 		{"relative state path", func(c *Config) {
 			c.Database.Path = "relative/security.db"
 		}},
-		{"software TPM", func(c *Config) {
-			c.TPM.Provider = "software"
+		{"test TPM", func(c *Config) {
+			c.TPM.Provider = "swtpm"
 		}},
 		{"shared listener", func(c *Config) {
 			c.Server.DataListenAddr = c.Server.OpsListenAddr
+		}},
+		{"TPM transport URI", func(c *Config) {
+			c.TPM.TCTI = "device:/dev/tpmrm0"
+		}},
+		{"missing TPM PCR policy", func(c *Config) {
+			c.TPM.PolicyPCRs = nil
+		}},
+		{"duplicate TPM PCR", func(c *Config) {
+			c.TPM.PolicyPCRs = []int{7, 7}
+		}},
+		{"invalid TPM PCR", func(c *Config) {
+			c.TPM.PolicyPCRs = []int{24}
 		}},
 	}
 	for _, tt := range tests {
@@ -88,7 +100,7 @@ func productionConfig(t *testing.T) *Config {
 	cfg.Environment = "production"
 	cfg.Server.OpsListenAddr = "127.0.0.1:8443"
 	cfg.Database = DatabaseConfig{Path: filepath.Join(dir, "security-state.db")}
-	cfg.TPM = TPMConfig{Provider: "native", TCTI: "device:/dev/tpmrm0"}
+	cfg.TPM = TPMConfig{Provider: "native", TCTI: "/dev/tpmrm0", PolicyPCRs: []int{7}}
 	cfg.Server.NodeID = "node-01"
 	cfg.Server.DataListenAddr = ":8443"
 	cfg.Server.OpsListenAddr = "127.0.0.1:8444"

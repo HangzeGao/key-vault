@@ -9,6 +9,7 @@ go_bin="$(command -v go || true)"
 if [[ -z "$go_bin" && -x /usr/local/go/bin/go ]]; then go_bin=/usr/local/go/bin/go; fi
 if [[ -z "$go_bin" ]]; then echo "release gate failed: Go toolchain not found" >&2; exit 1; fi
 cd "$ROOT_DIR"
+bash -n start.sh
 GO_BIN="$go_bin" bash scripts/go_security_gate.sh
 GO_BIN="$go_bin" bash scripts/c_hardening_gate.sh
 "$go_bin" test -count=1 -run '^TestTCDataPlaneAPIProducesFlightAcceptedVector$' ./internal/api/ccsds
