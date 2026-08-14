@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,9 +26,7 @@ import (
 type Store interface {
 	AppendAuditEvent(ctx context.Context, e *models.AuditEvent) error
 	ListAuditEvents(ctx context.Context, chainName string, limit int) ([]*models.AuditEvent, error)
-	DeleteAuditEvents(ctx context.Context, chainName string) (int, error)
 	GetAuditChainHead(ctx context.Context, chainName string) (*models.AuditChainHead, error)
-	ListAuditChainHeads(ctx context.Context) ([]*models.AuditChainHead, error)
 	VerifyAuditChain(ctx context.Context, chainName string) (brokenSeq uint64, err error)
 }
 
@@ -83,22 +82,25 @@ func (s *Service) Record(ctx context.Context, req RecordRequest) error {
 	return s.store.AppendAuditEvent(ctx, e)
 }
 
-// ListEvents returns audit events, optionally filtered by chain.
-func (s *Service) ListEvents(ctx context.Context, chainName string, limit int) ([]*models.AuditEvent, error) {
+// ListTenantEvents returns only the authenticated tenant's audit chain.
+func (s *Service) ListTenantEvents(ctx context.Context, tenantID string, limit int) ([]*models.AuditEvent, error) {
+	chainName, err := tenantChainName(tenantID)
+	if err != nil {
+		return nil, err
+	}
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 	return s.store.ListAuditEvents(ctx, chainName, limit)
 }
 
-// DeleteEvents deletes audit events for a chain, or all chains when chainName is empty.
-func (s *Service) DeleteEvents(ctx context.Context, chainName string) (int, error) {
-	return s.store.DeleteAuditEvents(ctx, chainName)
-}
-
-// ListChainHeads returns all chain heads (for monitoring).
-func (s *Service) ListChainHeads(ctx context.Context) ([]*models.AuditChainHead, error) {
-	return s.store.ListAuditChainHeads(ctx)
+// GetTenantChainHead returns only the authenticated tenant's chain head.
+func (s *Service) GetTenantChainHead(ctx context.Context, tenantID string) (*models.AuditChainHead, error) {
+	chainName, err := tenantChainName(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.GetAuditChainHead(ctx, chainName)
 }
 
 // VerifyResult is the outcome of a chain verification.
@@ -109,8 +111,12 @@ type VerifyResult struct {
 	Error     string `json:"error,omitempty"`
 }
 
-// VerifyChain verifies a single chain and returns the result.
-func (s *Service) VerifyChain(ctx context.Context, chainName string) (*VerifyResult, error) {
+// VerifyTenantChain verifies only the authenticated tenant's chain.
+func (s *Service) VerifyTenantChain(ctx context.Context, tenantID string) (*VerifyResult, error) {
+	chainName, err := tenantChainName(tenantID)
+	if err != nil {
+		return nil, err
+	}
 	broken, err := s.store.VerifyAuditChain(ctx, chainName)
 	if err != nil {
 		return &VerifyResult{
@@ -126,18 +132,11 @@ func (s *Service) VerifyChain(ctx context.Context, chainName string) (*VerifyRes
 	}, nil
 }
 
-// VerifyAllChains verifies all known chains.
-func (s *Service) VerifyAllChains(ctx context.Context) ([]*VerifyResult, error) {
-	heads, err := s.store.ListAuditChainHeads(ctx)
-	if err != nil {
-		return nil, err
+func tenantChainName(tenantID string) (string, error) {
+	if tenantID == "" {
+		return "", errors.New("audit chain requires tenant identity")
 	}
-	var results []*VerifyResult
-	for _, h := range heads {
-		r, _ := s.VerifyChain(ctx, h.ChainName)
-		results = append(results, r)
-	}
-	return results, nil
+	return "tenant:" + tenantID, nil
 }
 
 // hashTruncate returns a truncated SHA-256 hash for privacy (design §15.1).

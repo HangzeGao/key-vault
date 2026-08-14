@@ -168,20 +168,15 @@ func auditCommand(ctx context.Context, c client, args []string, inheritedJSON bo
 	case "verify":
 		fs := flag.NewFlagSet("audit verify", flag.ContinueOnError)
 		fs.SetOutput(stderr)
-		chain := fs.String("chain", "", "optional chain name")
 		asJSON := fs.Bool("json", inheritedJSON, "emit JSON")
 		if err := fs.Parse(args[1:]); err != nil {
 			return exitConfiguration
 		}
-		path := "/ops/v1/audit/verify"
-		if *chain != "" {
-			path += "?chain=" + url.QueryEscape(*chain)
-		}
 		var value json.RawMessage
-		if code := c.get(ctx, path, &value, stderr); code != exitReady {
+		if code := c.get(ctx, "/ops/v1/audit/verify", &value, stderr); code != exitReady {
 			return code
 		}
-		intact := auditIntact(value, *chain != "")
+		intact := auditIntact(value)
 		if *asJSON {
 			fmt.Fprintln(stdout, string(value))
 		} else {
@@ -251,11 +246,7 @@ func readToken(path string) (string, error) {
 	return token, nil
 }
 
-func auditIntact(raw []byte, single bool) bool {
-	if single {
-		var value auditchain.VerifyResult
-		return json.Unmarshal(raw, &value) == nil && value.Intact
-	}
+func auditIntact(raw []byte) bool {
 	var value struct {
 		Results []*auditchain.VerifyResult `json:"results"`
 	}

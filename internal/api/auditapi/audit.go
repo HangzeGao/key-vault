@@ -10,6 +10,7 @@ import (
 
 	"github.com/kvlt/key-vault/internal/api/middleware"
 	"github.com/kvlt/key-vault/internal/auditchain"
+	"github.com/kvlt/key-vault/internal/auth/principal"
 )
 
 type Handler struct{ audit *auditchain.Service }
@@ -23,13 +24,18 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 }
 
 func (h *Handler) events(w http.ResponseWriter, request *http.Request) {
-	if !authorize(w, request) {
+	actor, ok := authorize(w, request)
+	if !ok {
 		return
 	}
 	query := request.URL.Query()
+	if query.Has("chain") {
+		writeInvalidQuery(w, "chain is derived from the authenticated tenant")
+		return
+	}
 	limit := parseBounded(query.Get("limit"), 100, 1, 500)
 	offset := parseBounded(query.Get("cursor"), 0, 0, 1_000_000)
-	values, err := h.audit.ListEvents(request.Context(), query.Get("chain"), 1000)
+	values, err := h.audit.ListTenantEvents(request.Context(), actor.TenantID, 500)
 	if err != nil {
 		writeError(w)
 		return
@@ -60,50 +66,54 @@ func (h *Handler) events(w http.ResponseWriter, request *http.Request) {
 }
 
 func (h *Handler) verify(w http.ResponseWriter, request *http.Request) {
-	if !authorize(w, request) {
+	actor, ok := authorize(w, request)
+	if !ok {
 		return
 	}
-	chain := request.URL.Query().Get("chain")
-	if chain != "" {
-		result, err := h.audit.VerifyChain(request.Context(), chain)
-		if err != nil {
-			writeError(w)
-			return
-		}
-		writeJSON(w, http.StatusOK, result)
+	if request.URL.Query().Has("chain") {
+		writeInvalidQuery(w, "chain is derived from the authenticated tenant")
 		return
 	}
-	results, err := h.audit.VerifyAllChains(request.Context())
+	result, err := h.audit.VerifyTenantChain(request.Context(), actor.TenantID)
 	if err != nil {
 		writeError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+	writeJSON(w, http.StatusOK, map[string]any{"results": []*auditchain.VerifyResult{result}})
 }
 
 func (h *Handler) heads(w http.ResponseWriter, request *http.Request) {
-	if !authorize(w, request) {
+	actor, ok := authorize(w, request)
+	if !ok {
 		return
 	}
-	heads, err := h.audit.ListChainHeads(request.Context())
+	if request.URL.Query().Has("chain") {
+		writeInvalidQuery(w, "chain is derived from the authenticated tenant")
+		return
+	}
+	head, err := h.audit.GetTenantChainHead(request.Context(), actor.TenantID)
 	if err != nil {
 		writeError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"heads": heads})
+	writeJSON(w, http.StatusOK, map[string]any{"heads": []any{head}})
 }
 
-func authorize(w http.ResponseWriter, request *http.Request) bool {
+func authorize(w http.ResponseWriter, request *http.Request) (*principal.Principal, bool) {
 	actor := middleware.PrincipalFromContext(request.Context())
 	if actor == nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "AUTH_FAILED", "message": "no principal"}})
-		return false
+		return nil, false
 	}
 	if !actor.HasScope("audit:read") && !actor.HasScope("audit:manage") && !actor.HasScope("ops:read") {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "PERMISSION_DENIED", "message": "missing audit scope"}})
-		return false
+		return nil, false
 	}
-	return true
+	if actor.TenantID == "" {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "PERMISSION_DENIED", "message": "missing tenant identity"}})
+		return nil, false
+	}
+	return actor, true
 }
 
 func contains(value, filter string) bool {
@@ -126,6 +136,10 @@ func parseBounded(raw string, fallback, minimum, maximum int) int {
 
 func writeError(w http.ResponseWriter) {
 	writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "AUDIT_UNAVAILABLE", "message": "audit state unavailable"}})
+}
+
+func writeInvalidQuery(w http.ResponseWriter, message string) {
+	writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "INVALID_ARGUMENT", "message": message}})
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {
