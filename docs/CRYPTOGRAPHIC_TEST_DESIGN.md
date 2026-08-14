@@ -342,7 +342,7 @@ make release-gate
 | SM4/CMAC/GCM 独立开源 Oracle 差分 | 已有；`pyca/cryptography 49.0.0` / OpenSSL 4.0.1 生成固定边界向量 |
 | 与产品无共享实现的 HCTR 参考模型和批量差分 | 已有；独立 Python 组合模型仅调用外部 SM4 分组原语，覆盖 16/17/31/32/33/64/1011 字节 |
 | SP 800-108/SM4-CMAC 独立参考向量 | 已有；16/32 字节输出由外部 CMAC 原语生成并由 Go/C 共同验证 |
-| ASan/UBSan 自动门禁和有界 fuzz runner | **待补 P0** |
+| ASan/UBSan 自动门禁和有界 fuzz runner | 已纳入 `make release-gate`；固定 seed、4096 次有界变异覆盖 `tcsec_receive`、`tcsec_nvm_decode` 和 `tcsec_nvm_select_latest` |
 | 星载启动 KAT 与失败锁定 | 已有；实际选中后端执行，失败锁定 receive/reset |
 | 自动 context/NVM/状态 bit-flip campaign | **待补 P1** |
 | 目标板 WCET、栈高水位、编译器交叉验证 | **待补 P1（飞行发布前）** |

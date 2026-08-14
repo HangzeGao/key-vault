@@ -9,7 +9,8 @@ go_bin="$(command -v go || true)"
 if [[ -z "$go_bin" && -x /usr/local/go/bin/go ]]; then go_bin=/usr/local/go/bin/go; fi
 if [[ -z "$go_bin" ]]; then echo "release gate failed: Go toolchain not found" >&2; exit 1; fi
 cd "$ROOT_DIR"
-"$go_bin" test ./...
+GO_BIN="$go_bin" bash scripts/go_security_gate.sh
+GO_BIN="$go_bin" bash scripts/c_hardening_gate.sh
 "$go_bin" test -count=1 -run '^TestTCDataPlaneAPIProducesFlightAcceptedVector$' ./internal/api/ccsds
 "$go_bin" test -count=1 -run '^TestDownlinkBatchToAuthenticatedHTTPPlaintext$' ./internal/api/ccsds
 
@@ -42,11 +43,20 @@ external_vector_hash="$(sha256sum testdata/crypto/cryptography-sm4-v1.tsv | awk 
 external_generator_hash="$(sha256sum scripts/oracle/cryptography_vector_generator.py | awk '{print $1}')"
 cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
 {
-  "format_version": 4,
+  "format_version": 5,
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_commit": "$commit",
   "dirty_worktree": $dirty,
   "source_manifest_sha256": "$source_manifest_hash",
+  "go_toolchain": "$("$go_bin" env GOVERSION)",
+  "c_compiler": "$("${CC:-cc}" --version | head -1)",
+  "go_race": "passed",
+  "govulncheck_version": "v1.7.0",
+  "reachable_go_vulnerabilities": 0,
+  "c_sanitizers": "address,undefined",
+  "c_smoke_fuzz_seed": "0x4b564c54",
+  "c_smoke_fuzz_iterations": 4096,
+  "c_smoke_fuzz_crashes": 0,
   "flight_c_line_coverage": $c_coverage,
   "ground_tc_go_statement_coverage": $go_coverage,
   "ordinary_vector_sha256": "$ordinary_hash",
