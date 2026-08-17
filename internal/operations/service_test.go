@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/domain/policy"
 	"github.com/kvlt/key-vault/internal/downlink"
 	protocol "github.com/kvlt/key-vault/internal/protocol/ccsds"
@@ -46,9 +47,11 @@ type fakeDownlink struct{ value downlink.Status }
 func (f fakeDownlink) Status(context.Context) (downlink.Status, error) { return f.value, nil }
 
 func TestSnapshotAggregatesReadyStateWithoutSecrets(t *testing.T) {
-	service := New(Deps{Store: fakeStore{}, Resolver: fakeResolver(true), Policies: fakePolicies{}, TC: fakeTC{true}, Downlink: fakeDownlink{downlink.Status{Provisioned: true, CurrentGeneration: 8, CurrentObserved: true}}})
+	counters := &access.Counters{}
+	counters.RejectToken()
+	service := New(Deps{Store: fakeStore{}, Resolver: fakeResolver(true), Policies: fakePolicies{}, TC: fakeTC{true}, Downlink: fakeDownlink{downlink.Status{Provisioned: true, CurrentGeneration: 8, CurrentObserved: true}}, Access: counters})
 	value, err := service.Snapshot(context.Background(), "tenant")
-	if err != nil || !value.Ready || value.Status != "READY" || value.TC.Current.SPI != 1 || value.TCRotation.TransactionID != "18446744073709551615" {
+	if err != nil || !value.Ready || value.Status != "READY" || value.TC.Current.SPI != 1 || value.TCRotation.TransactionID != "18446744073709551615" || value.AccessRejections.TokenRejected != 1 {
 		t.Fatalf("value=%+v err=%v", value, err)
 	}
 }

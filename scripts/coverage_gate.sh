@@ -89,7 +89,9 @@ readonly GO_PROFILE="$COVERAGE_DIR/go-tc.out"
 
 (
   cd "$ROOT_DIR"
-	"$GO_BIN" test ./cmd/key-vault ./cmd/ccsds-provision ./cmd/downlink-keyctl ./examples/downlink-hardware-simulator
+	"$GO_BIN" test ./cmd/key-vault ./cmd/ccsds-provision ./cmd/downlink-keyctl \
+	  ./cmd/kvlt-authgen ./cmd/kvltctl ./examples/downlink-hardware-simulator \
+	  ./examples/tc-protect-client
   "$GO_BIN" test -count=1 -covermode=atomic -coverpkg="$go_coverpkg" \
     -coverprofile="$GO_PROFILE" "${GO_PACKAGES[@]}"
 )
@@ -112,3 +114,15 @@ if [[ -z "$downlink_coverage" ]]; then
   exit 1
 fi
 assert_coverage "Ground downlink Go statement" "$downlink_coverage"
+
+readonly ACCESS_PROFILE="$COVERAGE_DIR/go-access.out"
+(
+  cd "$ROOT_DIR"
+  "$GO_BIN" test -count=1 -covermode=atomic -coverprofile="$ACCESS_PROFILE" ./internal/auth/access
+)
+access_coverage="$(cd "$ROOT_DIR" && "$GO_BIN" tool cover -func="$ACCESS_PROFILE" | awk '/^total:/ { gsub(/%/, "", $3); print $3 }')"
+if [[ -z "$access_coverage" ]]; then
+  echo "Ground access coverage gate failed: go tool cover did not report a total" >&2
+  exit 1
+fi
+assert_coverage "Ground access Go statement" "$access_coverage"

@@ -11,7 +11,7 @@ import (
 
 	ccsdsapi "github.com/kvlt/key-vault/internal/api/ccsds"
 	"github.com/kvlt/key-vault/internal/api/middleware"
-	"github.com/kvlt/key-vault/internal/auth/principal"
+	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/crypto/suite"
 	"github.com/kvlt/key-vault/internal/downlink"
 	protocol "github.com/kvlt/key-vault/internal/protocol/ccsds"
@@ -62,11 +62,11 @@ func (service *fakeService) OperationsStatus(_ context.Context, tenantID string)
 
 func TestTCAPIConsumesAndReturnsCompleteFrames(t *testing.T) {
 	service := &fakeService{}
-	handler := authenticatedHandler(service, "ccsds:tc:protect")
+	handler := authenticatedHandler(service)
 	plainFrame := []byte{0x20, 0x01, 0, 0, 7, 0xca, 0xfe, 0, 0}
 	body := []byte(`{"frame":"` + base64.StdEncoding.EncodeToString(plainFrame) + `"}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/tc:protect", bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Authorization", "Bearer "+testDataToken())
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || service.tenant != "tenant-1" || !bytes.Equal(service.input, plainFrame) {
@@ -85,10 +85,10 @@ func TestTCAPIConsumesAndReturnsCompleteFrames(t *testing.T) {
 
 func TestTCAPIRejectsObsoleteDataOnlyContract(t *testing.T) {
 	service := &fakeService{}
-	handler := authenticatedHandler(service, "ccsds:tc:protect")
+	handler := authenticatedHandler(service)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/tc:protect",
 		bytes.NewReader([]byte(`{"data":"AQID"}`)))
-	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Authorization", "Bearer "+testDataToken())
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusBadRequest || len(service.input) != 0 {
@@ -96,26 +96,13 @@ func TestTCAPIRejectsObsoleteDataOnlyContract(t *testing.T) {
 	}
 }
 
-func TestDownlinkAPIHasSeparateLeastPrivilegeScope(t *testing.T) {
-	service := &fakeService{}
-	handler := authenticatedHandler(service, "ccsds:tc:protect")
-	body := []byte(`{"frame":"AQID"}`)
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect", bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer test-token")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden || len(service.input) != 0 {
-		t.Fatalf("status=%d input=%x", response.Code, service.input)
-	}
-}
-
 func TestDownlinkAPIConsumesRawPackageAndReturnsPlaintext(t *testing.T) {
 	service := &fakeService{}
-	handler := authenticatedHandler(service, "ccsds:downlink:unprotect")
+	handler := authenticatedHandler(service)
 	raw := append([]byte{0, 17}, bytes.Repeat([]byte{1}, 12+16)...)
 	body := []byte(`{"package":"` + base64.StdEncoding.EncodeToString(raw) + `"}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect", bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Authorization", "Bearer "+testDataToken())
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !bytes.Equal(service.input, raw) ||
@@ -135,10 +122,10 @@ func TestDownlinkAPIErrorsFailClosed(t *testing.T) {
 		{downlink.ErrNotProvisioned, http.StatusConflict, "DOWNLINK_STATE_REJECTED"},
 	} {
 		service := &fakeService{downlinkErr: tc.err}
-		handler := authenticatedHandler(service, "ccsds:downlink:unprotect")
+		handler := authenticatedHandler(service)
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect",
 			bytes.NewReader([]byte(`{"package":"AQID"}`)))
-		request.Header.Set("Authorization", "Bearer test-token")
+		request.Header.Set("Authorization", "Bearer "+testDataToken())
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		if response.Code != tc.status || !bytes.Contains(response.Body.Bytes(), []byte(tc.code)) {
@@ -149,13 +136,13 @@ func TestDownlinkAPIErrorsFailClosed(t *testing.T) {
 
 func TestFlightStatusObservationUsesDownlinkScopeAndStrictSemantic(t *testing.T) {
 	service := &fakeService{}
-	handler := authenticatedHandler(service, "ccsds:downlink:unprotect")
+	handler := authenticatedHandler(service)
 	body := []byte(`{"format_version":1,"profile_digest":"` + string(bytes.Repeat([]byte("01"), 32)) +
 		`","self_test":"PASSED","crypto_backend":"ARMV7_NEON","current_spi":4097,"next_spi":4098,` +
 		`"recovery_spi":28673,"security_epoch":5,"root_version":2,"pending_root_present":false,` +
 		`"receive_count":10,"last_receive_us":20,"max_receive_us":30,"cycle_limit_exceeded_count":0,"clock_anomaly_count":0}`)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/flight-status:observe", bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Authorization", "Bearer "+testDataToken())
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusNoContent || service.flight.CurrentSPI != 4097 || service.flight.ProfileDigest[0] != 1 {
@@ -163,12 +150,18 @@ func TestFlightStatusObservationUsesDownlinkScopeAndStrictSemantic(t *testing.T)
 	}
 }
 
-func authenticatedHandler(service ccsdsapi.Service, scopes ...string) http.Handler {
+func authenticatedHandler(service ccsdsapi.Service) http.Handler {
 	mux := http.NewServeMux()
 	downlink, _ := service.(ccsdsapi.RawDownlinkService)
 	ccsdsapi.New(service, downlink).Routes(mux)
-	auth := middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{
-		"test-token": {ID: "measurement", TenantID: "tenant-1", Plane: principal.PlaneData, Scopes: scopes},
-	}})
+	verifier, _ := access.NewVerifier("tenant-1", testDataToken(), testOpsToken())
+	auth := middleware.Auth(middleware.AuthConfig{Verifier: verifier})
 	return middleware.ReadBody(auth(middleware.APIAccess(mux)))
+}
+
+func testDataToken() string {
+	return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, access.TokenBytes))
+}
+func testOpsToken() string {
+	return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{2}, access.TokenBytes))
 }

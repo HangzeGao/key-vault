@@ -9,26 +9,25 @@ import (
 type Code string
 
 const (
-	CodeAuthFailed           Code = "AUTH_FAILED"
-	CodePermissionDenied     Code = "PERMISSION_DENIED"
-	CodeKeyNotFound          Code = "KEY_NOT_FOUND"
-	CodeKeyDisabled          Code = "KEY_DISABLED"
-	CodeKeyDestroyed         Code = "KEY_DESTROYED"
-	CodePolicyDenied         Code = "POLICY_DENIED"
-	CodeAADMismatch          Code = "AAD_MISMATCH"
-	CodeEnvelopeInvalid      Code = "ENVELOPE_INVALID"
-	CodeNonceExhausted       Code = "NONCE_EXHAUSTED"
-	CodeTPMUnavailable       Code = "TPM_UNAVAILABLE"
-	CodeDBConflict           Code = "DB_CONFLICT"
-	CodeIdempotencyKeyReused Code = "IDEMPOTENCY_KEY_REUSED"
-	CodeAuditUnavailable     Code = "AUDIT_UNAVAILABLE"
-	CodeRateLimited          Code = "RATE_LIMITED"
-	CodeBadRequest           Code = "BAD_REQUEST"
-	CodeInternal             Code = "INTERNAL"
-	CodeNodeNotReady         Code = "NODE_NOT_READY"
-	CodeNodeFrozen           Code = "NODE_FROZEN"
-	CodeBaselineCheckFailed  Code = "BASELINE_CHECK_FAILED"
-	CodeInvalidArgument      Code = "INVALID_ARGUMENT"
+	CodeAuthFailed          Code = "AUTH_FAILED"
+	CodePermissionDenied    Code = "PERMISSION_DENIED"
+	CodeKeyNotFound         Code = "KEY_NOT_FOUND"
+	CodeKeyDisabled         Code = "KEY_DISABLED"
+	CodeKeyDestroyed        Code = "KEY_DESTROYED"
+	CodePolicyDenied        Code = "POLICY_DENIED"
+	CodeAADMismatch         Code = "AAD_MISMATCH"
+	CodeEnvelopeInvalid     Code = "ENVELOPE_INVALID"
+	CodeNonceExhausted      Code = "NONCE_EXHAUSTED"
+	CodeTPMUnavailable      Code = "TPM_UNAVAILABLE"
+	CodeDBConflict          Code = "DB_CONFLICT"
+	CodeAuditUnavailable    Code = "AUDIT_UNAVAILABLE"
+	CodeRateLimited         Code = "RATE_LIMITED"
+	CodeBadRequest          Code = "BAD_REQUEST"
+	CodeInternal            Code = "INTERNAL"
+	CodeNodeNotReady        Code = "NODE_NOT_READY"
+	CodeNodeFrozen          Code = "NODE_FROZEN"
+	CodeBaselineCheckFailed Code = "BASELINE_CHECK_FAILED"
+	CodeInvalidArgument     Code = "INVALID_ARGUMENT"
 )
 
 // Error is the structured error type returned by all layers.
@@ -101,7 +100,7 @@ func HTTPStatus(code Code) int {
 		return 401
 	case CodePermissionDenied, CodeKeyNotFound, CodeKeyDestroyed:
 		return 403 // cross-tenant 404/403 unified per HA-11
-	case CodeKeyDisabled, CodeDBConflict, CodeIdempotencyKeyReused:
+	case CodeKeyDisabled, CodeDBConflict:
 		return 409
 	case CodeBadRequest, CodePolicyDenied, CodeAADMismatch, CodeEnvelopeInvalid, CodeInvalidArgument:
 		return 400

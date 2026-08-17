@@ -45,7 +45,7 @@ func request(t *testing.T, handler *Handler, authenticated bool) *httptest.Respo
 	handler.Routes(mux)
 	var target http.Handler = mux
 	if authenticated {
-		target = middleware.ReadBody(middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{"test-token": {ID: "ops", TenantID: "t-default", Plane: principal.PlaneOps, Scopes: []string{"ops:read"}}}})(middleware.APIAccess(mux)))
+		target = middleware.ReadBody(middleware.Auth(middleware.AuthConfig{Verifier: opsVerifier{}})(middleware.APIAccess(mux)))
 	}
 	req := httptest.NewRequest(http.MethodGet, "/ops/v1/status", nil)
 	if authenticated {
@@ -54,6 +54,15 @@ func request(t *testing.T, handler *Handler, authenticated bool) *httptest.Respo
 	recorder := httptest.NewRecorder()
 	target.ServeHTTP(recorder, req)
 	return recorder
+}
+
+type opsVerifier struct{}
+
+func (opsVerifier) Authenticate(token string) *principal.Principal {
+	if token != "test-token" {
+		return nil
+	}
+	return &principal.Principal{ID: "ops", TenantID: "t-default", Plane: principal.PlaneOps, Scopes: []string{"ops:read"}}
 }
 func contains(value, fragment string) bool {
 	for index := 0; index+len(fragment) <= len(value); index++ {

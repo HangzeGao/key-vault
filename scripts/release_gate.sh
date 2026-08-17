@@ -23,7 +23,8 @@ coverage_output="$(bash scripts/coverage_gate.sh)"
 printf '%s\n' "$coverage_output"
 c_coverage="$(printf '%s\n' "$coverage_output" | awk '/Flight C line coverage gate passed/ {gsub(/%/,"",$7); print $7}')"
 go_coverage="$(printf '%s\n' "$coverage_output" | awk '/Ground TC Go statement coverage gate passed/ {gsub(/%/,"",$8); print $8}')"
-if [[ -z "$c_coverage" || -z "$go_coverage" ]]; then echo "release gate failed: coverage evidence missing" >&2; exit 1; fi
+access_coverage="$(printf '%s\n' "$coverage_output" | awk '/Ground access Go statement coverage gate passed/ {gsub(/%/,"",$8); print $8}')"
+if [[ -z "$c_coverage" || -z "$go_coverage" || -z "$access_coverage" ]]; then echo "release gate failed: coverage evidence missing" >&2; exit 1; fi
 
 mkdir -p "$EVIDENCE_DIR"
 commit=unavailable
@@ -34,7 +35,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then dirty=true; fi
 fi
 source_manifest_hash="$({
-  find cmd internal scripts embedded/tc_security/src embedded/tc_security/include \
+  find cmd examples internal scripts embedded/tc_security/src embedded/tc_security/include \
     embedded/tc_security/tests -type f -print
   printf '%s\n' Makefile go.mod go.sum
 } | LC_ALL=C sort | xargs sha256sum | sha256sum | awk '{print $1}')"
@@ -44,7 +45,7 @@ external_vector_hash="$(sha256sum testdata/crypto/cryptography-sm4-v1.tsv | awk 
 external_generator_hash="$(sha256sum scripts/oracle/cryptography_vector_generator.py | awk '{print $1}')"
 cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
 {
-  "format_version": 5,
+  "format_version": 6,
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_commit": "$commit",
   "dirty_worktree": $dirty,
@@ -60,6 +61,7 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "c_smoke_fuzz_crashes": 0,
   "flight_c_line_coverage": $c_coverage,
   "ground_tc_go_statement_coverage": $go_coverage,
+  "ground_access_go_statement_coverage": $access_coverage,
   "ordinary_vector_sha256": "$ordinary_hash",
   "recovery_vector_sha256": "$recovery_hash",
   "external_vector_generator": "pyca/cryptography 49.0.0 (OpenSSL 4.0.1) + RFC 8998 Appendix A.1",

@@ -44,6 +44,17 @@ func TestLegacyPlaneAndMTLSFieldsAreRejected(t *testing.T) {
 	}
 }
 
+func TestLegacyAccessAndTrafficFieldsAreRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.yaml")
+	legacy := "auth:\n  access_tokens_file: tokens.json\ntraffic_guard:\n  rate_sigma_threshold: 3\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("legacy raw-token or sigma configuration was accepted")
+	}
+}
+
 func TestProductionRejectsNonDurableOrFallbackSecurityBoundaries(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -57,6 +68,15 @@ func TestProductionRejectsNonDurableOrFallbackSecurityBoundaries(t *testing.T) {
 		}},
 		{"shared listener", func(c *Config) {
 			c.Server.DataListenAddr = c.Server.OpsListenAddr
+		}},
+		{"wildcard data listener", func(c *Config) {
+			c.Server.DataListenAddr = ":8443"
+		}},
+		{"missing data source", func(c *Config) {
+			c.Auth.DataSourceIP = ""
+		}},
+		{"CIDR data source", func(c *Config) {
+			c.Auth.DataSourceIP = "192.0.2.0/24"
 		}},
 		{"TPM transport URI", func(c *Config) {
 			c.TPM.TCTI = "device:/dev/tpmrm0"
@@ -102,11 +122,12 @@ func productionConfig(t *testing.T) *Config {
 	cfg.Database = DatabaseConfig{Path: filepath.Join(dir, "security-state.db")}
 	cfg.TPM = TPMConfig{Provider: "native", TCTI: "/dev/tpmrm0", PolicyPCRs: []int{7}}
 	cfg.Server.NodeID = "node-01"
-	cfg.Server.DataListenAddr = ":8443"
+	cfg.Server.DataListenAddr = "192.0.2.10:8443"
 	cfg.Server.OpsListenAddr = "127.0.0.1:8444"
 	cfg.Server.TLSCertFile = file
 	cfg.Server.TLSKeyFile = file
-	cfg.Auth.AccessTokensFile = file
+	cfg.Auth.TokenVerifiersFile = file
+	cfg.Auth.DataSourceIP = "192.0.2.20"
 	cfg.Policy.TrustedKeysPath = file
 	cfg.Policy.SignedPolicyPath = file
 	cfg.Audit.RedactionPepperFile = file

@@ -1,5 +1,5 @@
 // Package middleware implements HTTP middleware: auth, request ID, body limits,
-// plane isolation, idempotency, audit.
+// plane isolation, bounded admission, and strict request decoding.
 package middleware
 
 import (
@@ -7,10 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
+	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/auth/principal"
 	"github.com/kvlt/key-vault/internal/errorsx"
 	"github.com/kvlt/key-vault/internal/logging"
@@ -26,7 +29,31 @@ const (
 
 // AuthConfig configures the auth middleware.
 type AuthConfig struct {
-	AccessTokens map[string]*principal.Principal // token -> one data or ops identity
+	Verifier TokenVerifier
+	Counters *access.Counters
+}
+
+// TokenVerifier is the narrow authentication seam owned by the middleware.
+type TokenVerifier interface {
+	Authenticate(string) *principal.Principal
+}
+
+// SourceIP rejects Data-plane requests not received directly from the one
+// configured measurement host. Forwarded client-IP headers are ignored.
+func SourceIP(allowed netip.Addr, counters *access.Counters) func(http.Handler) http.Handler {
+	allowed = allowed.Unmap()
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			remote, parseErr := netip.ParseAddr(host)
+			if err != nil || parseErr != nil || remote.Unmap() != allowed {
+				counters.RejectSourceIP()
+				writeError(w, errorsx.New(errorsx.CodePermissionDenied, "source not allowed", false), requestID(r))
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // RequestID middleware injects a request ID.
@@ -75,16 +102,12 @@ func Auth(cfg AuthConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var p *principal.Principal
-			authz := r.Header.Get("Authorization")
-			if strings.HasPrefix(authz, "Bearer ") {
-				token := strings.TrimPrefix(authz, "Bearer ")
-				if cfg.AccessTokens != nil {
-					if sp, ok := cfg.AccessTokens[token]; ok {
-						p = sp
-					}
-				}
+			values := r.Header.Values("Authorization")
+			if cfg.Verifier != nil && len(values) == 1 && strings.HasPrefix(values[0], "Bearer ") {
+				p = cfg.Verifier.Authenticate(strings.TrimPrefix(values[0], "Bearer "))
 			}
 			if p == nil {
+				cfg.Counters.RejectToken()
 				writeError(w, errorsx.New(errorsx.CodeAuthFailed, "no credentials", false), requestID(r))
 				return
 			}
@@ -109,11 +132,12 @@ func RequireScope(scope string) func(http.Handler) http.Handler {
 }
 
 // RequirePlane returns a middleware that requires the given plane.
-func RequirePlane(plane principal.Plane) func(http.Handler) http.Handler {
+func RequirePlane(plane principal.Plane, counters *access.Counters) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			p := PrincipalFromContext(r.Context())
 			if p == nil || !p.CanAccessPlane(plane) {
+				counters.RejectPlane()
 				writeError(w, errorsx.New(errorsx.CodePermissionDenied, "plane access denied", false), requestID(r))
 				return
 			}

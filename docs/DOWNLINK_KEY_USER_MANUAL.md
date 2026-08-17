@@ -87,6 +87,7 @@ go run ./cmd/downlink-keyctl export-current-dek-batch \
 
 ```bash
 curl --fail-with-body \
+  --cacert /etc/measurement/key-vault-server.crt \
   -H 'Authorization: Bearer <data-token>' \
   -H 'Content-Type: application/json' \
   --data @raw-downlink-request.json \

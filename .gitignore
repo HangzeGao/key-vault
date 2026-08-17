@@ -25,6 +25,8 @@ Desktop.ini
 *.pfx
 .ssh/
 secrets/
+*.token
+access-token-verifiers.json
 
 # Runtime state
 /state/

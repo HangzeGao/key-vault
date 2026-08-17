@@ -120,9 +120,7 @@ func performAs(handler *Handler, path string, actor *principal.Principal) *httpt
 	handler.Routes(mux)
 	var target http.Handler = mux
 	if actor != nil {
-		target = middleware.ReadBody(middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{
-			"test-token": actor,
-		}})(middleware.APIAccess(mux)))
+		target = middleware.ReadBody(middleware.Auth(middleware.AuthConfig{Verifier: staticVerifier{actor}})(middleware.APIAccess(mux)))
 	}
 	request := httptest.NewRequest(http.MethodGet, path, nil)
 	if actor != nil {
@@ -131,4 +129,13 @@ func performAs(handler *Handler, path string, actor *principal.Principal) *httpt
 	recorder := httptest.NewRecorder()
 	target.ServeHTTP(recorder, request)
 	return recorder
+}
+
+type staticVerifier struct{ principal *principal.Principal }
+
+func (v staticVerifier) Authenticate(token string) *principal.Principal {
+	if token == "test-token" {
+		return v.principal
+	}
+	return nil
 }

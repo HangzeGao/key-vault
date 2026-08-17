@@ -1,11 +1,15 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 
+	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/auth/principal"
 )
 
@@ -84,5 +88,59 @@ func TestDecodeJSONStrictRejectsTrailingValue(t *testing.T) {
 	}
 	if err := DecodeJSONStrict([]byte(`{"name":"ok"} {"name":"second"}`), &got); err == nil {
 		t.Fatal("expected trailing JSON value rejection")
+	}
+}
+
+func TestSourceIPUsesRemoteAddrAndIgnoresForwardedHeaders(t *testing.T) {
+	counters := &access.Counters{}
+	handler := SourceIP(netip.MustParseAddr("192.0.2.10"), counters)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	allowed := httptest.NewRequest(http.MethodPost, "/api/v1/tc:protect", nil)
+	allowed.RemoteAddr = "192.0.2.10:1234"
+	allowed.Header.Set("X-Forwarded-For", "203.0.113.9")
+	allowedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(allowedResponse, allowed)
+	if allowedResponse.Code != http.StatusNoContent {
+		t.Fatalf("allowed status=%d", allowedResponse.Code)
+	}
+	denied := httptest.NewRequest(http.MethodPost, "/api/v1/tc:protect", nil)
+	denied.RemoteAddr = "203.0.113.9:1234"
+	denied.Header.Set("X-Forwarded-For", "192.0.2.10")
+	deniedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(deniedResponse, denied)
+	if deniedResponse.Code != http.StatusForbidden || counters.Snapshot().SourceIPRejected != 1 {
+		t.Fatalf("denied status=%d counters=%+v", deniedResponse.Code, counters.Snapshot())
+	}
+}
+
+func TestAuthRejectsDuplicateHeadersAndCountsFailures(t *testing.T) {
+	dataToken := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, access.TokenBytes))
+	opsToken := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{2}, access.TokenBytes))
+	verifier, err := access.NewVerifier("t-default", dataToken, opsToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counters := &access.Counters{}
+	handler := Auth(AuthConfig{Verifier: verifier, Counters: counters})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if PrincipalFromContext(r.Context()) == nil {
+			t.Fatal("missing principal")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	valid := httptest.NewRequest(http.MethodGet, "/", nil)
+	valid.Header.Set("Authorization", "Bearer "+dataToken)
+	validResponse := httptest.NewRecorder()
+	handler.ServeHTTP(validResponse, valid)
+	if validResponse.Code != http.StatusNoContent {
+		t.Fatalf("valid status=%d", validResponse.Code)
+	}
+	duplicate := httptest.NewRequest(http.MethodGet, "/", nil)
+	duplicate.Header.Add("Authorization", "Bearer "+dataToken)
+	duplicate.Header.Add("Authorization", "Bearer "+opsToken)
+	duplicateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(duplicateResponse, duplicate)
+	if duplicateResponse.Code != http.StatusUnauthorized || counters.Snapshot().TokenRejected != 1 {
+		t.Fatalf("duplicate status=%d counters=%+v", duplicateResponse.Code, counters.Snapshot())
 	}
 }

@@ -6,8 +6,9 @@ tenant-bound bearer token with `ops:read` and/or `audit:read` scope. Store that
 token in a regular file readable only by its owner (`0600` on Unix).
 
 ```sh
-export KVLT_OPS_ADDR=http://127.0.0.1:8080
+export KVLT_OPS_ADDR=https://127.0.0.1:8443
 export KVLT_OPS_TOKEN_FILE=/etc/key-vault/ops.token
+export KVLT_OPS_CA_FILE=/etc/key-vault/server.crt
 
 kvltctl status
 kvltctl status --json
@@ -31,6 +32,11 @@ Exit status is stable and suitable for monitoring:
 `GET /ops/v1/audit/events`, `GET /ops/v1/audit/verify`, and `GET
 /ops/v1/audit/heads`. There are no mutation endpoints on the operations
 listener.
+
+`kvltctl` accepts only an explicit loopback origin. HTTPS requires `--ca-file`
+or `KVLT_OPS_CA_FILE`; redirects and TLS versions below 1.3 are rejected. The
+status JSON includes aggregate `access_rejections` counters and no token or
+source-address values.
 
 Use the service manager for lifecycle and logs:
 

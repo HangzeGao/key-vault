@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	ccsdsapi "github.com/kvlt/key-vault/internal/api/ccsds"
 	"github.com/kvlt/key-vault/internal/api/middleware"
 	"github.com/kvlt/key-vault/internal/api/ops"
+	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/auth/principal"
 	"github.com/kvlt/key-vault/internal/config"
 )
@@ -28,11 +30,12 @@ type Server struct {
 
 // Deps bundles the server dependencies.
 type Deps struct {
-	Cfg          *config.Config
-	CCSDSHandler *ccsdsapi.Handler
-	AuditHandler *auditapi.Handler
-	OpsHandler   *ops.Handler
-	AccessTokens map[string]*principal.Principal
+	Cfg            *config.Config
+	CCSDSHandler   *ccsdsapi.Handler
+	AuditHandler   *auditapi.Handler
+	OpsHandler     *ops.Handler
+	AccessVerifier *access.Verifier
+	AccessCounters *access.Counters
 }
 
 // New constructs one process with separate data and read-only operations
@@ -40,6 +43,16 @@ type Deps struct {
 func New(deps Deps) (*Server, error) {
 	if deps.Cfg == nil {
 		return nil, fmt.Errorf("server: missing config")
+	}
+	dataSource, err := netip.ParseAddr(deps.Cfg.Auth.DataSourceIP)
+	if err != nil {
+		return nil, fmt.Errorf("server: invalid Data source IP: %w", err)
+	}
+	if dataSource.Zone() != "" || dataSource.IsUnspecified() || dataSource.IsMulticast() {
+		return nil, errors.New("server: Data source IP must be one unicast address without a zone")
+	}
+	if deps.Cfg.Environment == "production" && deps.AccessVerifier == nil {
+		return nil, fmt.Errorf("server: production access verifier is required")
 	}
 	tlsConfig := serverTLSConfig()
 	tlsEnabled := deps.Cfg.Server.TLSCertFile != "" || deps.Cfg.Server.TLSKeyFile != ""
@@ -87,28 +100,28 @@ func buildHTTPServer(cfg *config.Config, addr string, handler http.Handler, tlsC
 }
 
 func listenerHandler(mux *http.ServeMux, deps Deps, plane principal.Plane) http.Handler {
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-	auth := middleware.Auth(middleware.AuthConfig{AccessTokens: deps.AccessTokens})
+	auth := middleware.Auth(middleware.AuthConfig{Verifier: deps.AccessVerifier, Counters: deps.AccessCounters})
 	capacityCfg := middleware.CapacityConfig{Window: deps.Cfg.TrafficGuard.RateWindow,
-		SigmaThreshold: deps.Cfg.TrafficGuard.RateSigmaThreshold}
+		Burst: deps.Cfg.TrafficGuard.Burst, Counters: deps.AccessCounters}
 	var endpoint http.Handler = mux
 	endpoint = middleware.ReadBody(endpoint)
 	endpoint = middleware.BodyLimit(deps.Cfg.Server.MaxRequestBody)(endpoint)
 	admitted := middleware.CapacityGuard(capacityCfg)(endpoint)
-	protected := middleware.APIAccess(middleware.RequirePlane(plane)(admitted))
+	protected := middleware.APIAccess(middleware.RequirePlane(plane, deps.AccessCounters)(admitted))
 	authenticated := auth(protected)
 	preAuthenticated := middleware.PreAuthCapacityGuard(capacityCfg)(authenticated)
 	var handler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		if plane == principal.PlaneOps && r.URL.Path == "/healthz" {
 			mux.ServeHTTP(w, r)
 			return
 		}
 		preAuthenticated.ServeHTTP(w, r)
 	})
 	handler = middleware.RequestID(handler)
+	if plane == principal.PlaneData {
+		allowed, _ := netip.ParseAddr(deps.Cfg.Auth.DataSourceIP)
+		handler = middleware.SourceIP(allowed, deps.AccessCounters)(handler)
+	}
 	return transportSecurity(handler)
 }
 
@@ -119,6 +132,10 @@ func registerDataRoutes(mux *http.ServeMux, deps Deps) {
 }
 
 func registerOpsRoutes(mux *http.ServeMux, deps Deps) {
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
 	if deps.OpsHandler != nil {
 		deps.OpsHandler.Routes(mux)
 	}
@@ -170,9 +187,6 @@ func transportSecurity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
-		if r.TLS != nil {
-			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-		}
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ops/") {
 			h.Set("Cache-Control", "no-store")
 		}

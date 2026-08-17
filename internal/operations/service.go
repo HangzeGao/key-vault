@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/domain/policy"
 	"github.com/kvlt/key-vault/internal/downlink"
 	protocol "github.com/kvlt/key-vault/internal/protocol/ccsds"
@@ -38,6 +39,7 @@ type Service struct {
 	policies  Policies
 	tc        TCStatus
 	downlink  DownlinkStatus
+	access    *access.Counters
 	startTime time.Time
 }
 
@@ -47,11 +49,12 @@ type Deps struct {
 	Policies Policies
 	TC       TCStatus
 	Downlink DownlinkStatus
+	Access   *access.Counters
 }
 
 func New(deps Deps) *Service {
 	return &Service{store: deps.Store, resolver: deps.Resolver, policies: deps.Policies,
-		tc: deps.TC, downlink: deps.Downlink, startTime: time.Now()}
+		tc: deps.TC, downlink: deps.Downlink, access: deps.Access, startTime: time.Now()}
 }
 
 type Check struct {
@@ -127,19 +130,20 @@ type Snapshot struct {
 		Next     *Association `json:"next"`
 		Recovery *Association `json:"recovery"`
 	} `json:"tc"`
-	TCRotation           *TCRotation     `json:"tc_rotation,omitempty"`
-	DownlinkFormat       string          `json:"downlink_format"`
-	Downlink             downlink.Status `json:"downlink"`
-	ProfileDigest        string          `json:"profile_digest"`
-	Flight               *Flight         `json:"flight,omitempty"`
-	FlightReconciliation string          `json:"flight_reconciliation"`
-	Warnings             []string        `json:"warnings"`
+	TCRotation           *TCRotation            `json:"tc_rotation,omitempty"`
+	DownlinkFormat       string                 `json:"downlink_format"`
+	Downlink             downlink.Status        `json:"downlink"`
+	ProfileDigest        string                 `json:"profile_digest"`
+	Flight               *Flight                `json:"flight,omitempty"`
+	FlightReconciliation string                 `json:"flight_reconciliation"`
+	AccessRejections     access.CounterSnapshot `json:"access_rejections"`
+	Warnings             []string               `json:"warnings"`
 }
 
 func (s *Service) Snapshot(ctx context.Context, tenantID string) (*Snapshot, error) {
 	result := &Snapshot{ObservedAt: time.Now().UTC(), Status: "READY", Ready: true,
 		UptimeSeconds: int64(time.Since(s.startTime).Seconds()), Checks: make(map[string]Check),
-		Warnings: make([]string, 0), Database: Database{ExpectedSchema: 3}}
+		Warnings: make([]string, 0), Database: Database{ExpectedSchema: 3}, AccessRejections: s.access.Snapshot()}
 	degrade := func(name, summary string) {
 		result.Checks[name] = Check{Status: "degraded", Summary: summary}
 		result.Ready = false

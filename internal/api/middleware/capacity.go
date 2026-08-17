@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kvlt/key-vault/internal/auth/access"
 )
 
 const maxCapacityBuckets = 4096
@@ -15,8 +17,9 @@ const maxCapacityBuckets = 4096
 // deployments should additionally enforce a distributed/global limit at the
 // gateway, while this guard remains the last line of defense per process.
 type CapacityConfig struct {
-	Window         time.Duration
-	SigmaThreshold float64
+	Window   time.Duration
+	Burst    int
+	Counters *access.Counters
 }
 
 type rateBucket struct {
@@ -40,8 +43,8 @@ func capacityGuard(cfg CapacityConfig, preAuth bool) func(http.Handler) http.Han
 	if cfg.Window <= 0 {
 		cfg.Window = time.Minute
 	}
-	if cfg.SigmaThreshold <= 0 {
-		cfg.SigmaThreshold = 3
+	if cfg.Burst <= 0 {
+		cfg.Burst = 3
 	}
 	var mu sync.Mutex
 	buckets := make(map[string]rateBucket)
@@ -52,8 +55,7 @@ func capacityGuard(cfg CapacityConfig, preAuth bool) func(http.Handler) http.Han
 				next.ServeHTTP(w, r)
 				return
 			}
-			// Sigma is intentionally consumed as a conservative burst multiplier.
-			limit += int(cfg.SigmaThreshold)
+			limit += cfg.Burst
 			identity := remoteIdentity(r.RemoteAddr)
 			if !preAuth {
 				if p := PrincipalFromContext(r.Context()); p != nil && p.ID != "" {
@@ -72,6 +74,7 @@ func capacityGuard(cfg CapacityConfig, preAuth bool) func(http.Handler) http.Han
 				}
 				if len(buckets) >= maxCapacityBuckets {
 					mu.Unlock()
+					cfg.Counters.RejectRate()
 					w.Header().Set("Retry-After", strconv.Itoa(max(int(cfg.Window.Seconds()), 1)))
 					WriteJSON(w, http.StatusTooManyRequests, map[string]any{"error": map[string]any{
 						"code": "RATE_LIMITED", "message": "admission capacity exhausted", "retryable": true,
@@ -87,6 +90,7 @@ func capacityGuard(cfg CapacityConfig, preAuth bool) func(http.Handler) http.Han
 			remaining := limit - bucket.count
 			mu.Unlock()
 			if remaining < 0 {
+				cfg.Counters.RejectRate()
 				retry := int(time.Until(bucket.windowStart.Add(cfg.Window)).Seconds()) + 1
 				w.Header().Set("Retry-After", strconv.Itoa(max(retry, 1)))
 				WriteJSON(w, http.StatusTooManyRequests, map[string]any{"error": map[string]any{

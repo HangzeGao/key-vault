@@ -3,7 +3,7 @@ package principal
 
 import "strings"
 
-// Plane is the fixed remote entry point assigned to one access token.
+// Plane is the fixed remote entry point assigned to one machine identity.
 type Plane string
 
 const (

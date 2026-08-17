@@ -36,6 +36,8 @@ TC 与下行共享部署进程、审计和身份基础设施，但不共享密�
 
 在线接口不提供 Root、KEK、DEK、nonce prefix、计数器或轮换写操作。所有密钥初装与下行批次推进均由离线命令完成。
 
+每次普通 TC protect 调用都是新的密码操作并分配新 IV Counter。链路重传可重新提交同一完整明帧，但必须保留原 TC 帧序列号；星载 TC 接收/FARM 层负责序列号去重。密码模块不实现请求幂等、密帧缓存或业务指令重复判断。
+
 ## 固定线格式
 
 普通 TC、Recovery TC 及星载接口以 `docs/TC_GROUND_FLIGHT_ARCHITECTURE.md` 和测试向量为准。数传上注和下行 RAW 格式以 `docs/DOWNLINK_KEY_USER_MANUAL.md` 为准。

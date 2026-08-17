@@ -95,9 +95,9 @@ func TestTCDataPlaneAPIProducesFlightAcceptedVector(t *testing.T) {
 	clearFrame := buildClearTCFrame(decode("plaintext"))
 	body, _ := json.Marshal(map[string]string{"frame": base64.StdEncoding.EncodeToString(clearFrame)})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/tc:protect", bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Authorization", "Bearer "+testDataToken())
 	response := httptest.NewRecorder()
-	authenticatedHandler(security, "ccsds:tc:protect").ServeHTTP(response, request)
+	authenticatedHandler(security).ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}

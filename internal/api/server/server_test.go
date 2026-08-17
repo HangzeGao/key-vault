@@ -1,13 +1,18 @@
 package server
 
 import (
+	"bytes"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/kvlt/key-vault/internal/auth/principal"
+	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/config"
 )
 
@@ -20,7 +25,7 @@ func TestServerAppliesTransportSecurityWithoutBrowserPolicy(t *testing.T) {
 	request.TLS = &tls.ConnectionState{}
 	response := httptest.NewRecorder()
 	value.OpsHTTPServer().Handler.ServeHTTP(response, request)
-	if response.Code != 200 || response.Header().Get("X-Content-Type-Options") != "nosniff" || response.Header().Get("Strict-Transport-Security") == "" {
+	if response.Code != 200 || response.Header().Get("X-Content-Type-Options") != "nosniff" || response.Header().Get("Strict-Transport-Security") != "" {
 		t.Fatalf("status=%d headers=%v", response.Code, response.Header())
 	}
 	if response.Header().Get("Content-Security-Policy") != "" || response.Header().Get("X-Frame-Options") != "" {
@@ -32,10 +37,10 @@ func TestServerAppliesTransportSecurityWithoutBrowserPolicy(t *testing.T) {
 }
 
 func TestServerHasNoWebConsoleAndSeparatesPlanes(t *testing.T) {
-	value, err := New(Deps{Cfg: config.Default(), AccessTokens: map[string]*principal.Principal{
-		"data-token": {ID: "data", TenantID: "t-default", Plane: principal.PlaneData, Scopes: []string{"ccsds:tc:protect"}},
-		"ops-token":  {ID: "ops", TenantID: "t-default", Plane: principal.PlaneOps, Scopes: []string{"ops:read"}},
-	}})
+	cfg := config.Default()
+	cfg.Auth.DataSourceIP = "192.0.2.1"
+	verifier, dataToken, opsToken := testAccess(t)
+	value, err := New(Deps{Cfg: cfg, AccessVerifier: verifier})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,8 +55,8 @@ func TestServerHasNoWebConsoleAndSeparatesPlanes(t *testing.T) {
 		server      *http.Server
 		path, token string
 	}{
-		{value.DataHTTPServer(), "/api/v1/tc:protect", "ops-token"},
-		{value.OpsHTTPServer(), "/ops/v1/status", "data-token"},
+		{value.DataHTTPServer(), "/api/v1/tc:protect", opsToken},
+		{value.OpsHTTPServer(), "/ops/v1/status", dataToken},
 	} {
 		request := httptest.NewRequest(http.MethodGet, test.path, nil)
 		request.Header.Set("Authorization", "Bearer "+test.token)
@@ -71,6 +76,38 @@ func TestServerRejectsPartialTLSConfiguration(t *testing.T) {
 	}
 }
 
+func TestTLSHandshakeRejectsTLS12AndAcceptsTLS13(t *testing.T) {
+	value, err := New(Deps{Cfg: config.Default()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tlsServer := httptest.NewUnstartedServer(value.OpsHTTPServer().Handler)
+	tlsServer.TLS = serverTLSConfig()
+	tlsServer.StartTLS()
+	defer tlsServer.Close()
+	certificate := tlsServer.Certificate()
+	roots := x509.NewCertPool()
+	roots.AddCert(certificate)
+	serverName := ""
+	if len(certificate.DNSNames) != 0 {
+		serverName = certificate.DNSNames[0]
+	} else if len(certificate.IPAddresses) != 0 {
+		serverName = certificate.IPAddresses[0].String()
+	} else {
+		t.Fatal("test TLS certificate has no usable subject alternative name")
+	}
+	address := strings.TrimPrefix(tlsServer.URL, "https://")
+	if connection, err := tls.Dial("tcp", address, &tls.Config{RootCAs: roots, ServerName: serverName, MaxVersion: tls.VersionTLS12}); err == nil {
+		connection.Close()
+		t.Fatal("TLS 1.2 handshake succeeded")
+	}
+	connection, err := tls.Dial("tcp", address, &tls.Config{RootCAs: roots, ServerName: serverName, MinVersion: tls.VersionTLS13})
+	if err != nil {
+		t.Fatalf("TLS 1.3 handshake failed: %v", err)
+	}
+	connection.Close()
+}
+
 func TestAPIResponsesDisableCaching(t *testing.T) {
 	value, err := New(Deps{Cfg: config.Default()})
 	if err != nil {
@@ -87,10 +124,9 @@ func TestAPIResponsesDisableCaching(t *testing.T) {
 func TestAuthenticationAndAuthorizationPrecedeBodyRead(t *testing.T) {
 	cfg := config.Default()
 	cfg.Server.MaxRequestBody = 8
-	value, err := New(Deps{Cfg: cfg, AccessTokens: map[string]*principal.Principal{
-		"data-token": {ID: "data", TenantID: "t-default", Plane: principal.PlaneData, Scopes: []string{"ccsds:tc:protect"}},
-		"ops-token":  {ID: "ops", TenantID: "t-default", Plane: principal.PlaneOps, Scopes: []string{"ops:read"}},
-	}})
+	cfg.Auth.DataSourceIP = "192.0.2.1"
+	verifier, dataToken, opsToken := testAccess(t)
+	value, err := New(Deps{Cfg: cfg, AccessVerifier: verifier})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,8 +136,8 @@ func TestAuthenticationAndAuthorizationPrecedeBodyRead(t *testing.T) {
 	}{
 		{name: "missing token", want: http.StatusUnauthorized},
 		{name: "invalid token", token: "invalid", want: http.StatusUnauthorized},
-		{name: "wrong plane", token: "ops-token", want: http.StatusForbidden},
-		{name: "authorized", token: "data-token", want: http.StatusBadRequest},
+		{name: "wrong plane", token: opsToken, want: http.StatusForbidden},
+		{name: "authorized", token: dataToken, want: http.StatusBadRequest},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/api/v1/tc:protect", strings.NewReader("body larger than eight bytes"))
@@ -119,7 +155,8 @@ func TestAuthenticationAndAuthorizationPrecedeBodyRead(t *testing.T) {
 
 func TestInvalidCredentialsAreRateLimitedBeforeBodyRead(t *testing.T) {
 	cfg := config.Default()
-	cfg.TrafficGuard.RateSigmaThreshold = 1
+	cfg.TrafficGuard.Burst = 1
+	cfg.Auth.DataSourceIP = "192.0.2.10"
 	value, err := New(Deps{Cfg: cfg})
 	if err != nil {
 		t.Fatal(err)
@@ -140,4 +177,59 @@ func TestInvalidCredentialsAreRateLimitedBeforeBodyRead(t *testing.T) {
 	if response.Code != http.StatusTooManyRequests {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
+}
+
+func TestDataSourceIsRejectedBeforeCredentialsAndHealthIsOpsOnly(t *testing.T) {
+	cfg := config.Default()
+	cfg.Auth.DataSourceIP = "192.0.2.10"
+	verifier, dataToken, _ := testAccess(t)
+	counters := &access.Counters{}
+	value, err := New(Deps{Cfg: cfg, AccessVerifier: verifier, AccessCounters: counters})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/tc:protect", strings.NewReader("ignored"))
+	body := &trackingBody{}
+	request.Body = body
+	request.RemoteAddr = "192.0.2.11:1234"
+	request.Header.Set("Authorization", "Bearer "+dataToken)
+	response := httptest.NewRecorder()
+	value.DataHTTPServer().Handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden || counters.Snapshot().SourceIPRejected != 1 || counters.Snapshot().TokenRejected != 0 {
+		t.Fatalf("status=%d counters=%+v", response.Code, counters.Snapshot())
+	}
+	if body.read {
+		t.Fatal("source-IP rejection read the request body")
+	}
+
+	health := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	health.RemoteAddr = "192.0.2.10:1234"
+	health.Header.Set("Authorization", "Bearer "+dataToken)
+	healthResponse := httptest.NewRecorder()
+	value.DataHTTPServer().Handler.ServeHTTP(healthResponse, health)
+	if healthResponse.Code != http.StatusNotFound {
+		t.Fatalf("Data health status=%d", healthResponse.Code)
+	}
+}
+
+type trackingBody struct{ read bool }
+
+func (b *trackingBody) Read([]byte) (int, error) {
+	b.read = true
+	return 0, errors.New("body must not be read")
+}
+
+func (*trackingBody) Close() error { return nil }
+
+var _ io.ReadCloser = (*trackingBody)(nil)
+
+func testAccess(t *testing.T) (*access.Verifier, string, string) {
+	t.Helper()
+	dataToken := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{1}, access.TokenBytes))
+	opsToken := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{2}, access.TokenBytes))
+	verifier, err := access.NewVerifier("t-default", dataToken, opsToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return verifier, dataToken, opsToken
 }

@@ -1,3 +1,3 @@
 # API Middleware
 
-Order is request ID → body limit/read → authentication → API plane/scope matrix → capacity guard → handler. Strict JSON rejects unknown and duplicate fields at any depth. The admission guard limits crypto, batch, list, hot-key, and Ops traffic per process; production also requires a distributed gateway limit.
+Data execution order is exact RemoteAddr allowlist → request ID → pre-auth admission → bearer verifier → plane/scope matrix → authenticated admission → body limit/read → handler. Forwarded client-IP headers are unsupported. Ops is bound to loopback and starts at request ID. Strict JSON rejects unknown and duplicate fields at any depth.

@@ -11,7 +11,7 @@ import (
 
 func TestProductionRejectsPermissiveSecretFile(t *testing.T) {
 	cfg := productionConfig(t)
-	if err := os.Chmod(cfg.Auth.AccessTokensFile, 0o640); err != nil {
+	if err := os.Chmod(cfg.Auth.TokenVerifiersFile, 0o640); err != nil {
 		t.Fatal(err)
 	}
 	err := cfg.Validate()

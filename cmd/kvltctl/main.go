@@ -3,11 +3,14 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -17,6 +20,7 @@ import (
 	"time"
 
 	"github.com/kvlt/key-vault/internal/auditchain"
+	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/operations"
 )
 
@@ -50,6 +54,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	root.SetOutput(stderr)
 	addr := root.String("addr", envOr("KVLT_OPS_ADDR", "http://127.0.0.1:8080"), "loopback operations URL")
 	tokenFile := root.String("token-file", os.Getenv("KVLT_OPS_TOKEN_FILE"), "0600 file containing the operations token")
+	caFile := root.String("ca-file", os.Getenv("KVLT_OPS_CA_FILE"), "pinned TLS server certificate")
 	timeout := root.Duration("timeout", 5*time.Second, "request timeout")
 	if err := root.Parse(args); err != nil {
 		return exitConfiguration
@@ -59,8 +64,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return exitConfiguration
 	}
 	parsed, err := url.Parse(*addr)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Path != "" {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		fmt.Fprintln(stderr, "configuration error: --addr must be an http(s) origin without credentials or path")
+		return exitConfiguration
+	}
+	host := parsed.Hostname()
+	if host != "localhost" && (net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback()) {
+		fmt.Fprintln(stderr, "configuration error: --addr must use an explicit loopback host")
+		return exitConfiguration
+	}
+	transport, err := clientTransport(parsed.Scheme, *caFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "configuration error: %v\n", err)
 		return exitConfiguration
 	}
 	token, err := readToken(*tokenFile)
@@ -68,7 +83,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "configuration error: %v\n", err)
 		return exitConfiguration
 	}
-	c := client{baseURL: strings.TrimRight(*addr, "/"), token: token, http: &http.Client{Timeout: *timeout}}
+	c := client{baseURL: strings.TrimRight(*addr, "/"), token: token, http: &http.Client{Timeout: *timeout,
+		Transport: transport, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}}
 	command := root.Arg(0)
 	switch command {
 	case "status":
@@ -95,6 +111,9 @@ func statusCommand(ctx context.Context, c client, asJSON bool, stdout, stderr io
 		fmt.Fprintf(stdout, "%s ready=%t uptime=%ds tc=%s downlink_generation=%d audit_events=%d\n",
 			snapshot.Status, snapshot.Ready, snapshot.UptimeSeconds, snapshot.Checks["tc"].Status,
 			snapshot.Downlink.CurrentGeneration, snapshot.Database.AuditEvents)
+		fmt.Fprintf(stdout, "access_rejections source_ip=%d token=%d plane=%d rate_limited=%d\n",
+			snapshot.AccessRejections.SourceIPRejected, snapshot.AccessRejections.TokenRejected,
+			snapshot.AccessRejections.PlaneRejected, snapshot.AccessRejections.RateLimited)
 		for _, warning := range snapshot.Warnings {
 			fmt.Fprintf(stdout, "warning: %s\n", warning)
 		}
@@ -225,12 +244,12 @@ func readToken(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", errors.New("--token-file or KVLT_OPS_TOKEN_FILE is required")
 	}
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return "", fmt.Errorf("token file: %w", err)
 	}
-	if !info.Mode().IsRegular() {
-		return "", errors.New("token file must be regular")
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", errors.New("token file must be a regular non-symlink file")
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 		return "", errors.New("token file permissions must be 0600 or stricter")
@@ -239,11 +258,38 @@ func readToken(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("token file: %w", err)
 	}
-	token := strings.TrimSpace(string(content))
-	if len(token) < 32 || strings.ContainsAny(token, " \t\r\n") {
-		return "", errors.New("token file must contain one token of at least 32 characters")
+	token := strings.TrimSuffix(string(content), "\n")
+	if strings.ContainsAny(token, " \t\r\n") || access.ValidateToken(token) != nil {
+		return "", errors.New("token file must contain one canonical 256-bit base64url token")
 	}
 	return token, nil
+}
+
+func clientTransport(scheme, caFile string) (http.RoundTripper, error) {
+	if scheme == "http" {
+		if strings.TrimSpace(caFile) != "" {
+			return nil, errors.New("--ca-file is only valid with https")
+		}
+		return http.DefaultTransport, nil
+	}
+	if strings.TrimSpace(caFile) == "" {
+		return nil, errors.New("https requires --ca-file or KVLT_OPS_CA_FILE")
+	}
+	info, err := os.Lstat(caFile)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, errors.New("CA file must be a readable regular non-symlink file")
+	}
+	pemBytes, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("read CA file: %w", err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(pemBytes) {
+		return nil, errors.New("CA file contains no valid certificate")
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: roots}
+	return transport, nil
 }
 
 func auditIntact(raw []byte) bool {
@@ -273,5 +319,5 @@ func envOr(name, fallback string) string {
 	return fallback
 }
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "usage: kvltctl [--addr URL] --token-file PATH [--json] {status|doctor|audit tail|audit verify}")
+	fmt.Fprintln(w, "usage: kvltctl [--addr URL] --token-file PATH [--ca-file CERT] [--json] {status|doctor|audit tail|audit verify}")
 }

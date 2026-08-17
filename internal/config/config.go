@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,7 +54,8 @@ type TPMConfig struct {
 }
 
 type AuthConfig struct {
-	AccessTokensFile string `yaml:"access_tokens_file"`
+	TokenVerifiersFile string `yaml:"token_verifiers_file"`
+	DataSourceIP       string `yaml:"data_source_ip"`
 }
 
 type PolicyConfig struct {
@@ -66,8 +68,8 @@ type AuditConfig struct {
 }
 
 type TrafficGuardConfig struct {
-	RateWindow         time.Duration `yaml:"rate_window"`
-	RateSigmaThreshold float64       `yaml:"rate_sigma_threshold"`
+	RateWindow time.Duration `yaml:"rate_window"`
+	Burst      int           `yaml:"burst"`
 }
 
 // RecoveryConfig records externally enforced recovery controls. Restoring an
@@ -134,10 +136,10 @@ func Default() *Config {
 		},
 		Database: DatabaseConfig{Path: filepath.Join(tmpDir, "key-vault", "security-state.db")},
 		TPM:      TPMConfig{Provider: "swtpm", StateDir: filepath.Join(tmpDir, "kvlt-tpm"), PolicyPCRs: []int{7}},
-		Auth:     AuthConfig{},
+		Auth:     AuthConfig{DataSourceIP: "127.0.0.1"},
 		TrafficGuard: TrafficGuardConfig{
-			RateWindow:         time.Minute,
-			RateSigmaThreshold: 3.0,
+			RateWindow: time.Minute,
+			Burst:      3,
 		},
 		Baseline: BaselineConfig{
 			Version:        "engineering-baseline-v1",
@@ -207,8 +209,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("KVLT_TPM_TCTI"); v != "" {
 		c.TPM.TCTI = v
 	}
-	if v := os.Getenv("KVLT_ACCESS_TOKENS_FILE"); v != "" {
-		c.Auth.AccessTokensFile = v
+	if v := os.Getenv("KVLT_TOKEN_VERIFIERS_FILE"); v != "" {
+		c.Auth.TokenVerifiersFile = v
+	}
+	if v := os.Getenv("KVLT_DATA_SOURCE_IP"); v != "" {
+		c.Auth.DataSourceIP = strings.TrimSpace(v)
 	}
 	if v := os.Getenv("KVLT_POLICY_TRUSTED_KEYS_FILE"); v != "" {
 		c.Policy.TrustedKeysPath = v
@@ -259,6 +264,10 @@ func (c *Config) Validate() error {
 	if c.Server.DataListenAddr == c.Server.OpsListenAddr {
 		return fmt.Errorf("config: data and ops listeners must use different addresses")
 	}
+	dataSource, err := netip.ParseAddr(c.Auth.DataSourceIP)
+	if err != nil || dataSource.IsUnspecified() || dataSource.IsMulticast() || dataSource.Zone() != "" {
+		return fmt.Errorf("config: auth.data_source_ip must be one exact unicast IP address")
+	}
 	host, _, err := net.SplitHostPort(c.Server.OpsListenAddr)
 	if err != nil || (host != "localhost" && (net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback())) {
 		return fmt.Errorf("config: ops_listen_addr must bind an explicit loopback address")
@@ -283,6 +292,11 @@ func (c *Config) Validate() error {
 		}
 	}
 	if c.Environment == "production" {
+		dataHost, _, splitErr := net.SplitHostPort(c.Server.DataListenAddr)
+		dataListenIP := net.ParseIP(dataHost)
+		if splitErr != nil || dataListenIP == nil || dataListenIP.IsUnspecified() || dataListenIP.IsMulticast() {
+			return fmt.Errorf("config: production data_listen_addr must bind one explicit unicast IP address")
+		}
 		if !filepath.IsAbs(c.Database.Path) {
 			return fmt.Errorf("config: production database.path must be absolute")
 		}
@@ -318,7 +332,7 @@ func (c *Config) Validate() error {
 		}{
 			{"tls_cert_file", c.Server.TLSCertFile, false},
 			{"tls_key_file", c.Server.TLSKeyFile, true},
-			{"auth.access_tokens_file", c.Auth.AccessTokensFile, true},
+			{"auth.token_verifiers_file", c.Auth.TokenVerifiersFile, true},
 			{"policy.trusted_keys_path", c.Policy.TrustedKeysPath, false},
 			{"policy.signed_policy_path", c.Policy.SignedPolicyPath, false},
 			{"audit.redaction_pepper_file", c.Audit.RedactionPepperFile, true},
@@ -341,8 +355,11 @@ func (c *Config) Validate() error {
 	if c.TrafficGuard.RateWindow <= 0 {
 		c.TrafficGuard.RateWindow = time.Minute
 	}
-	if c.TrafficGuard.RateSigmaThreshold <= 0 {
-		c.TrafficGuard.RateSigmaThreshold = 3.0
+	if c.TrafficGuard.Burst <= 0 {
+		c.TrafficGuard.Burst = 3
+	}
+	if c.TrafficGuard.Burst > 1000 {
+		return fmt.Errorf("config: traffic_guard.burst must not exceed 1000")
 	}
 	if c.CCSDS.MaxFrameLength <= 0 || c.CCSDS.MaxFrameLength > 16*1024*1024 {
 		return fmt.Errorf("config: ccsds.max_frame_length must be 1..16777216")

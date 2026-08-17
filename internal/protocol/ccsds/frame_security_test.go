@@ -188,6 +188,25 @@ func TestProtectTCFrameOwnsFramingAndSelectsCurrent(t *testing.T) {
 	}
 }
 
+func TestRepeatedPlainFrameAllocatesNewCounterAndProtectedFrame(t *testing.T) {
+	security, _ := newTestSecurity(t, &fakeCore{}, nextTCAssociation(), tcAssociation())
+	clearFrame := plainTCFrame(t, []byte("command-16-bytes"))
+	first, err := security.ProtectTCFrame(context.Background(), "tenant-1", clearFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := security.ProtectTCFrame(context.Background(), "tenant-1", clearFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Metadata.Counter != 0 || second.Metadata.Counter != 1 || bytes.Equal(first.Frame, second.Frame) {
+		t.Fatalf("first=%+v second=%+v frames_equal=%t", first.Metadata, second.Metadata, bytes.Equal(first.Frame, second.Frame))
+	}
+	if !bytes.Equal(first.Frame[:TCPrimaryHeaderLength], second.Frame[:TCPrimaryHeaderLength]) {
+		t.Fatal("re-protection changed the caller-owned TC primary header or frame sequence number")
+	}
+}
+
 func TestAdvanceTCTransmitEpochIsLocalAndAtomic(t *testing.T) {
 	current, next := tcAssociation(), nextTCAssociation()
 	security, store := newTestSecurity(t, &fakeCore{}, current, next)

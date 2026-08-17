@@ -13,7 +13,7 @@ import (
 
 	ccsdsapi "github.com/kvlt/key-vault/internal/api/ccsds"
 	"github.com/kvlt/key-vault/internal/api/middleware"
-	"github.com/kvlt/key-vault/internal/auth/principal"
+	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/crypto/aead"
 	"github.com/kvlt/key-vault/internal/crypto/suite"
 	"github.com/kvlt/key-vault/internal/downlink"
@@ -81,14 +81,12 @@ func TestDownlinkBatchToAuthenticatedHTTPPlaintext(t *testing.T) {
 
 	mux := http.NewServeMux()
 	ccsdsapi.New(&fakeService{}, service).Routes(mux)
-	auth := middleware.Auth(middleware.AuthConfig{AccessTokens: map[string]*principal.Principal{
-		"test-token": {ID: "downlink", TenantID: "tenant-1", Plane: principal.PlaneData,
-			Scopes: []string{"ccsds:downlink:unprotect"}},
-	}})
+	verifier, _ := access.NewVerifier("tenant-1", testDataToken(), testOpsToken())
+	auth := middleware.Auth(middleware.AuthConfig{Verifier: verifier})
 	handler := middleware.ReadBody(auth(middleware.APIAccess(mux)))
 	body, _ := json.Marshal(map[string]string{"package": base64.StdEncoding.EncodeToString(raw)})
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect", bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Authorization", "Bearer "+testDataToken())
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
@@ -112,7 +110,7 @@ func TestDownlinkBatchToAuthenticatedHTTPPlaintext(t *testing.T) {
 	raw[len(raw)-1] ^= 1
 	body, _ = json.Marshal(map[string]string{"package": base64.StdEncoding.EncodeToString(raw)})
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect", bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer test-token")
+	request.Header.Set("Authorization", "Bearer "+testDataToken())
 	response = httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusUnprocessableEntity || bytes.Contains(response.Body.Bytes(), want) {

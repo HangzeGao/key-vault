@@ -5,7 +5,7 @@ This repository implements one strict pre-production contract:
 - complete-frame CCSDS TC protection on the ground and symmetric TC unprotection in the embedded C module;
 - authenticated raw downlink decryption using 8 dedicated SM4 KEKs and 1024-DEK Current/Previous batches;
 - direct TPM sealing of TC roots and the downlink KEK set, without CRK/SWK compatibility layers;
-- separate Data and Ops planes with bearer-token scopes;
+- separate Data and Ops planes with exact source-IP enforcement, SHA-256 bearer-token verifiers, and fixed scopes;
 - a release gate requiring Go and flight-C tests, 95% coverage, operations CLI tests, ARMv7 checks, and ground-to-flight vectors.
 - independent open-source SM4/CMAC/GCM/HCTR/KDF vectors consumed by both ground Go and flight C, anchored by RFC 8998 SM4-GCM.
 
@@ -17,6 +17,8 @@ AOS framing is intentionally not implemented until the mission format freezes. I
 ## Start here
 
 - [Downlink key user manual](docs/DOWNLINK_KEY_USER_MANUAL.md)
+- [Access-control user manual](docs/ACCESS_CONTROL_USER_MANUAL.md)
+- [Access-control test design](docs/ACCESS_CONTROL_TEST_DESIGN.md)
 - [CCSDS link security contract](docs/CCSDS_LINK_SECURITY.md)
 - [TC ground/flight architecture](docs/TC_GROUND_FLIGHT_ARCHITECTURE.md)
 - [Cryptographic test design](docs/CRYPTOGRAPHIC_TEST_DESIGN.md)

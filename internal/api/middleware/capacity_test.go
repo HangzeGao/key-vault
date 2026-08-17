@@ -6,10 +6,13 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/kvlt/key-vault/internal/auth/access"
 )
 
 func TestCapacityGuardLimitsCCSDSRequests(t *testing.T) {
-	h := CapacityGuard(CapacityConfig{Window: time.Minute, SigmaThreshold: 1})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	counters := &access.Counters{}
+	h := CapacityGuard(CapacityConfig{Window: time.Minute, Burst: 1, Counters: counters})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	for i := 0; i < 121; i++ {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/tc:protect", nil)
 		req.RemoteAddr = "client"
@@ -26,10 +29,13 @@ func TestCapacityGuardLimitsCCSDSRequests(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
 		t.Fatalf("status=%d retry-after=%q", rec.Code, rec.Header().Get("Retry-After"))
 	}
+	if counters.Snapshot().RateLimited != 1 {
+		t.Fatalf("rate rejection counter=%d", counters.Snapshot().RateLimited)
+	}
 }
 
 func TestPreAuthCapacityGuardUsesRemoteHostAndIsolatesClients(t *testing.T) {
-	h := PreAuthCapacityGuard(CapacityConfig{Window: time.Minute, SigmaThreshold: 1})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := PreAuthCapacityGuard(CapacityConfig{Window: time.Minute, Burst: 1})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	for i := 0; i < 121; i++ {
@@ -58,7 +64,7 @@ func TestPreAuthCapacityGuardUsesRemoteHostAndIsolatesClients(t *testing.T) {
 }
 
 func TestPreAuthCapacityGuardRejectsNewBucketsAtFixedCapacity(t *testing.T) {
-	h := PreAuthCapacityGuard(CapacityConfig{Window: time.Hour, SigmaThreshold: 1})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	h := PreAuthCapacityGuard(CapacityConfig{Window: time.Hour, Burst: 1})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	for i := 0; i < maxCapacityBuckets; i++ {

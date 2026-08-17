@@ -4,7 +4,8 @@ environment: production
 
 server:
   ops_listen_addr: "127.0.0.1:8443"
-  data_listen_addr: ":8444"
+  # Bind only the local interface serving the fixed measurement host.
+  data_listen_addr: "192.0.2.10:8444"
   tls_cert_file: /run/kvlt/tls/server.crt
   tls_key_file: /run/kvlt/tls/server.key
   read_header_timeout: 5s
@@ -26,8 +27,10 @@ tpm:
   policy_pcrs: [7]
 
 auth:
-  # JSON array with exactly one Data token and one Ops token. Protect as 0600.
-  access_tokens_file: /run/kvlt/secrets/access-tokens.json
+  # Exact peer IP; proxies, NAT and forwarded client-IP headers are unsupported.
+  data_source_ip: "192.0.2.20"
+  # Contains only SHA-256 verifiers for the fixed Data and Ops tokens.
+  token_verifiers_file: /run/kvlt/secrets/access-token-verifiers.json
 
 policy:
   trusted_keys_path: /run/kvlt/policy/trusted-keys.json
@@ -41,7 +44,7 @@ recovery:
 
 traffic_guard:
   rate_window: 1m
-  rate_sigma_threshold: 3.0
+  burst: 3
 
 # These values are mission-profile inputs. Validate them against the selected
 # CCSDS 355.0-B-2 transfer-frame profile before deployment.

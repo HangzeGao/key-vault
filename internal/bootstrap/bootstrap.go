@@ -6,10 +6,8 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -17,7 +15,7 @@ import (
 	"github.com/kvlt/key-vault/internal/application/protection"
 	"github.com/kvlt/key-vault/internal/audit/redaction"
 	"github.com/kvlt/key-vault/internal/auditchain"
-	"github.com/kvlt/key-vault/internal/auth/principal"
+	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/config"
 	"github.com/kvlt/key-vault/internal/domain/policy"
 	"github.com/kvlt/key-vault/internal/downlink"
@@ -44,7 +42,7 @@ type App struct {
 	PolicyMgr          *policysig.Manager
 	CCSDSFrameSecurity *ccsds.FrameSecurity
 	CCSDSStore         ccsds.Store
-	AccessTokens       map[string]*principal.Principal
+	AccessVerifier     *access.Verifier
 	AuditChain         *auditchain.Service
 }
 
@@ -62,7 +60,7 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 			slog.Info("configuration posture", "code", finding.Code, "message", finding.Message)
 		}
 	}
-	accessTokens, err := loadAccessTokens(cfg)
+	accessVerifier, err := loadAccessVerifier(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +74,7 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 			_ = store.Close()
 		}
 	}()
-	if err := ensureTenants(ctx, store, accessTokens); err != nil {
+	if err := ensureTenants(ctx, store, accessVerifier); err != nil {
 		return nil, fmt.Errorf("bootstrap: tenants: %w", err)
 	}
 
@@ -127,7 +125,7 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 		Cfg: cfg, Store: store, TPM: tpm, Resolver: resolver, Downlink: downlinkService, DownlinkSealer: downlinkSealer,
 		Policies: policies, PolicyMgr: policyMgr,
 		CCSDSFrameSecurity: frameSecurity, CCSDSStore: store,
-		AccessTokens: accessTokens, AuditChain: auditChain,
+		AccessVerifier: accessVerifier, AuditChain: auditChain,
 	}, nil
 }
 
@@ -150,23 +148,12 @@ func buildTPM(cfg *config.Config) (provider.Provider, error) {
 	}
 }
 
-func ensureTenants(ctx context.Context, store *securitystate.Store, accessTokens map[string]*principal.Principal) error {
+func ensureTenants(ctx context.Context, store *securitystate.Store, verifier *access.Verifier) error {
 	if err := store.EnsureTenant(ctx, "t-default", "default"); err != nil {
 		return err
 	}
-	seenTenants := make(map[string]bool)
-	for _, identity := range accessTokens {
-		tenantID := identity.TenantID
-		if tenantID == "" || tenantID == "t-default" {
-			continue
-		}
-		if seenTenants[tenantID] {
-			continue
-		}
-		seenTenants[tenantID] = true
-		if err := store.EnsureTenant(ctx, tenantID, strings.TrimPrefix(tenantID, "t-")); err != nil {
-			return err
-		}
+	if tenantID := verifier.TenantID(); tenantID != "" && tenantID != "t-default" {
+		return store.EnsureTenant(ctx, tenantID, strings.TrimPrefix(tenantID, "t-"))
 	}
 	return nil
 }
@@ -233,96 +220,18 @@ func (adapter *policyAuditAdapter) RecordPolicyReload(ctx context.Context, polic
 		Metadata: map[string]string{"version": fmt.Sprintf("%d", version), "reason": reason}})
 }
 
-func loadAccessTokens(cfg *config.Config) (map[string]*principal.Principal, error) {
-	tokens := make(map[string]*principal.Principal)
-	raw := []byte(os.Getenv("KVLT_ACCESS_TOKENS"))
-	if cfg.Auth.AccessTokensFile != "" {
-		var err error
-		raw, err = os.ReadFile(cfg.Auth.AccessTokensFile)
-		if err != nil {
-			return nil, fmt.Errorf("bootstrap: read access token file: %w", err)
-		}
-	}
-	if len(bytes.TrimSpace(raw)) == 0 {
+func loadAccessVerifier(cfg *config.Config) (*access.Verifier, error) {
+	if cfg.Auth.TokenVerifiersFile == "" {
 		if cfg.Environment == "production" {
-			return nil, errors.New("bootstrap: production access tokens are not configured")
+			return nil, errors.New("bootstrap: production token verifiers are not configured")
 		}
-		return tokens, nil
+		return nil, nil
 	}
-	var entries []struct {
-		Token    string   `json:"token"`
-		TenantID string   `json:"tenant_id"`
-		Scopes   []string `json:"scopes"`
-		Plane    string   `json:"plane"`
+	verifier, err := access.LoadVerifier(cfg.Auth.TokenVerifiersFile)
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap: access verifier: %w", err)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&entries); err != nil {
-		return nil, fmt.Errorf("bootstrap: parse access tokens: %w", err)
-	}
-	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
-		return nil, errors.New("bootstrap: trailing or invalid access token data")
-	}
-	if len(entries) != 2 {
-		return nil, errors.New("bootstrap: exactly one Data token and one Ops token are required")
-	}
-	seenPlanes := make(map[principal.Plane]bool, 2)
-	for _, entry := range entries {
-		if len(entry.Token) < 32 || entry.TenantID == "" {
-			return nil, errors.New("bootstrap: every access token must contain at least 32 characters and a tenant_id")
-		}
-		if cfg.Environment == "production" && len(entry.Token) < 43 {
-			return nil, errors.New("bootstrap: production access tokens must contain at least 43 characters")
-		}
-		var plane principal.Plane
-		switch entry.Plane {
-		case "data":
-			plane = principal.PlaneData
-		case "ops":
-			plane = principal.PlaneOps
-		default:
-			return nil, fmt.Errorf("bootstrap: access token plane %q must be data or ops", entry.Plane)
-		}
-		if seenPlanes[plane] {
-			return nil, fmt.Errorf("bootstrap: duplicate %s plane access token", entry.Plane)
-		}
-		seenPlanes[plane] = true
-		if !exactScopes(entry.Scopes, requiredScopes(plane)) {
-			return nil, fmt.Errorf("bootstrap: %s token scopes do not match the fixed plane contract", entry.Plane)
-		}
-		if _, duplicate := tokens[entry.Token]; duplicate {
-			return nil, errors.New("bootstrap: duplicate access token")
-		}
-		tokens[entry.Token] = &principal.Principal{ID: "static:" + entry.Token[:8], TenantID: entry.TenantID,
-			Scopes: entry.Scopes, Plane: plane, AuthMethod: "access_token"}
-	}
-	return tokens, nil
-}
-
-func requiredScopes(plane principal.Plane) []string {
-	if plane == principal.PlaneData {
-		return []string{"ccsds:tc:protect", "ccsds:downlink:unprotect"}
-	}
-	return []string{"audit:read", "ops:read"}
-}
-
-func exactScopes(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	seen := make(map[string]bool, len(got))
-	for _, scope := range got {
-		if seen[scope] {
-			return false
-		}
-		seen[scope] = true
-	}
-	for _, scope := range want {
-		if !seen[scope] {
-			return false
-		}
-	}
-	return true
+	return verifier, nil
 }
 
 func hashBaseline(value config.BaselineConfig) []byte {

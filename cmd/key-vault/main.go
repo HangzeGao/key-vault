@@ -14,6 +14,7 @@ import (
 	ccsdsapi "github.com/kvlt/key-vault/internal/api/ccsds"
 	"github.com/kvlt/key-vault/internal/api/ops"
 	"github.com/kvlt/key-vault/internal/api/server"
+	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/bootstrap"
 	"github.com/kvlt/key-vault/internal/config"
 	"github.com/kvlt/key-vault/internal/logging"
@@ -56,16 +57,18 @@ func main() {
 
 	ccsdsH := ccsdsapi.New(app.CCSDSFrameSecurity, app.Downlink)
 	auditH := auditapi.New(app.AuditChain)
+	accessCounters := &access.Counters{}
 	operationsService := operations.New(operations.Deps{Store: app.Store, Resolver: app.Resolver,
-		Policies: app.Policies, TC: app.CCSDSFrameSecurity, Downlink: app.Downlink})
+		Policies: app.Policies, TC: app.CCSDSFrameSecurity, Downlink: app.Downlink, Access: accessCounters})
 	opsH := ops.New(operationsService)
 
 	srv, err := server.New(server.Deps{
-		Cfg:          cfg,
-		CCSDSHandler: ccsdsH,
-		AuditHandler: auditH,
-		OpsHandler:   opsH,
-		AccessTokens: app.AccessTokens,
+		Cfg:            cfg,
+		CCSDSHandler:   ccsdsH,
+		AuditHandler:   auditH,
+		OpsHandler:     opsH,
+		AccessVerifier: app.AccessVerifier,
+		AccessCounters: accessCounters,
 	})
 	if err != nil {
 		slog.Error("server initialization failed", "error", err)
