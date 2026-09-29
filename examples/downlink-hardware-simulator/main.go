@@ -1,6 +1,8 @@
 // Command downlink-hardware-simulator creates an example raw downlink request
 // from the public example Mission Security Profile and an exported DEK batch.
 // It is test tooling, not a flight hardware implementation.
+//go:build downlink
+
 package main
 
 import (

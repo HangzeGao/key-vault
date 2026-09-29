@@ -1,47 +1,27 @@
 package securitystate
 
 import (
-	"bytes"
 	"context"
-	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/kvlt/key-vault/internal/auditchain"
+	"github.com/kvlt/key-vault/internal/features"
 	"github.com/kvlt/key-vault/internal/protocol/ccsds"
 	"github.com/kvlt/key-vault/internal/repository/models"
 )
 
-func TestProtocolTCAndDownlinkStateSurviveRestart(t *testing.T) {
+func TestProtocolTCStateSurvivesRestart(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "security.db")
 	store := openTestStore(t, path)
 	provisionTestTC(t, store)
-	sealed := []byte("sealed-kek-set")
-	if err := store.ProvisionDownlinkKEKSet(ctx, sealed, 3); err != nil {
-		t.Fatal(err)
-	}
-	pkg := bytes.Repeat([]byte{0x42}, 16417)
-	digest := [32]byte{1}
-	if err := store.AdvanceDownlinkBatch(ctx, 0, pkg, digest); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.MarkCurrentDownlinkObserved(ctx, 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetActiveDownlinkKEKSlot(ctx, 7); err != nil {
-		t.Fatal(err)
-	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	store = openTestStore(t, path)
 	defer store.Close()
-	state, err := store.ReadDownlinkKeyState(ctx)
-	if err != nil || state.ActiveKEKSlot != 7 || state.CurrentGeneration != 1 || !state.CurrentObserved ||
-		!bytes.Equal(state.SealedKEKSet, sealed) || !bytes.Equal(state.CurrentPackage, pkg) {
-		t.Fatalf("restored downlink state=%+v err=%v", state, err)
-	}
 	current, err := store.GetTransmitAssociation(ctx, "tenant-1", ccsds.DirectionTCTx)
 	if err != nil || current.ID != "current" {
 		t.Fatalf("restored current=%+v err=%v", current, err)
@@ -52,49 +32,58 @@ func TestProtocolTCAndDownlinkStateSurviveRestart(t *testing.T) {
 	}
 }
 
-func TestDownlinkStateFailsClosed(t *testing.T) {
+func TestSchemaModeMismatchFailsClosed(t *testing.T) {
 	ctx := context.Background()
-	store := openTestStore(t, filepath.Join(t.TempDir(), "state.db"))
-	defer store.Close()
-	if _, err := store.ReadDownlinkKeyState(ctx); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("unprovisioned error=%v", err)
+	path := filepath.Join(t.TempDir(), "state.db")
+	store := openTestStore(t, path)
+	statement := `CREATE TABLE downlink_key_state (id INTEGER)`
+	if features.Downlink {
+		statement = `DROP TABLE downlink_key_state`
 	}
-	if err := store.ProvisionDownlinkKEKSet(ctx, nil, 0); err == nil {
-		t.Fatal("empty sealed KEK set accepted")
-	}
-	if err := store.ProvisionDownlinkKEKSet(ctx, []byte("sealed"), 8); err == nil {
-		t.Fatal("invalid slot accepted")
-	}
-	if err := store.ProvisionDownlinkKEKSet(ctx, []byte("sealed"), 0); err != nil {
+	if _, err := store.db.ExecContext(ctx, statement); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.ProvisionDownlinkKEKSet(ctx, []byte("second"), 0); !errors.Is(err, ErrConflict) {
-		t.Fatalf("replacement error=%v", err)
-	}
-	pkg := make([]byte, 16417)
-	if err := store.AdvanceDownlinkBatch(ctx, 0, pkg, [32]byte{}); err == nil {
-		t.Fatal("zero digest accepted")
-	}
-	if err := store.AdvanceDownlinkBatch(ctx, 0, pkg, [32]byte{1}); err != nil {
+	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.AdvanceDownlinkBatch(ctx, 1, pkg, [32]byte{2}); !errors.Is(err, ErrConflict) {
-		t.Fatalf("unobserved advance error=%v", err)
+	if opened, err := Open(ctx, path); err == nil {
+		opened.Close()
+		t.Fatal("database opened with mismatched compile-time downlink mode")
 	}
-	if err := store.MarkCurrentDownlinkObserved(ctx, 2); !errors.Is(err, ErrConflict) {
-		t.Fatalf("wrong generation observe error=%v", err)
+}
+
+func TestSchemaVersionAndFilesystemFailures(t *testing.T) {
+	ctx := context.Background()
+	parentFile := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if opened, err := Open(ctx, filepath.Join(parentFile, "state.db")); err == nil {
+		opened.Close()
+		t.Fatal("database created below a regular file")
+	}
+	path := filepath.Join(t.TempDir(), "state.db")
+	store := openTestStore(t, path)
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := store.migrate(cancelled); err == nil {
+		t.Fatal("migration accepted cancelled context")
 	}
 	if _, err := store.db.ExecContext(ctx, `PRAGMA ignore_check_constraints=ON`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.ExecContext(ctx, `UPDATE downlink_key_state SET current_digest=x'01'`); err != nil {
+	if _, err := store.db.ExecContext(ctx, `UPDATE schema_meta SET version=4`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.db.ExecContext(ctx, `PRAGMA ignore_check_constraints=OFF`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ReadDownlinkKeyState(ctx); err == nil {
-		t.Fatal("corrupt digest accepted")
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if opened, err := Open(ctx, path); err == nil {
+		opened.Close()
+		t.Fatal("unsupported schema version accepted")
 	}
 }
 

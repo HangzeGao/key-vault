@@ -3,8 +3,8 @@
 This test-only command opens an exported 16417-byte DEK upload package using the public example Mission Security Profile, selects one DEK, and emits the exact JSON accepted by `POST /api/v1/downlink:unprotect`.
 
 ```bash
-go run ./examples/downlink-hardware-simulator \
-  -mission-profile ./examples/mission-security-profile.example.yaml \
+go run -tags downlink ./examples/downlink-hardware-simulator \
+  -mission-profile ./examples/mission-security-profile.downlink.example.yaml \
   -dek-package ./private/upload/downlink-dek-generation.bin \
   -key-serial 17 \
   -nonce-hex 000000000000000000000001 \

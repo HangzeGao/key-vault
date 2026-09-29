@@ -2,7 +2,7 @@
 
 ## 1. 适用范围
 
-本文说明地面密码系统如何为星载数传加密硬件生成和上注 DEK，以及如何认证并解密硬件下传的原始密文。当前合同是 `RAW`，不解释 AOS 帧；AOS 格式冻结后只能在 RAW 数据外增加适配层，不得复制密钥生命周期。
+本文说明启用 `-tags downlink` 的地面密码系统如何为星载数传加密硬件生成和上注 DEK，以及如何认证并解密硬件下传的原始密文。当前合同是 `RAW`，尚不解释 AOS 帧；后续只能在 RAW 数据外增加适配层，不得复制密钥生命周期。默认 TC-only 构建不包含此功能。
 
 本功能与 TC 遥控安全完全隔离：不同接口、不同密钥、不同状态和不同操作流程。下行只使用 SM4-GCM，不使用 KDF，也不使用旧 CRK/SWK 包装层。
 
@@ -36,13 +36,13 @@ key serial(2) | hardware nonce(12) | ciphertext(N) | tag(16)
 
 ## 3. 首次部署
 
-1. 复制并离线编辑 `examples/mission-security-profile.example.yaml`。
+1. 复制并离线编辑 `examples/mission-security-profile.downlink.example.yaml`。
 2. 替换所有示例 TC Root 和 8 个 KEK；示例值禁止用于任务环境。
 3. 保证 `downlink.kek_set_hex` 恰好 256 个十六进制字符，按槽 0 到槽 7 拼接。
 4. 运行一次配对部署：
 
 ```bash
-go run ./cmd/ccsds-provision \
+go run -tags downlink ./cmd/ccsds-provision \
   -config ./config.production.yaml \
   -mission-profile ./mission-security-profile.yaml \
   -artifacts-dir ./private/provisioning-artifacts
@@ -59,14 +59,14 @@ KEK 集合会直接封装到 TPM，数据库只保存 TPM sealed object。重复
 选择下一批使用的 KEK 槽：
 
 ```bash
-go run ./cmd/downlink-keyctl set-active-kek-slot \
+go run -tags downlink ./cmd/downlink-keyctl set-active-kek-slot \
   -config ./config.production.yaml 3
 ```
 
 生成下一批并写入权限为 0600 的文件：
 
 ```bash
-go run ./cmd/downlink-keyctl generate-next-dek-batch \
+go run -tags downlink ./cmd/downlink-keyctl generate-next-dek-batch \
   -config ./config.production.yaml \
   -output ./private/upload/downlink-dek-generation.bin
 ```
@@ -74,7 +74,7 @@ go run ./cmd/downlink-keyctl generate-next-dek-batch \
 将该文件原样交给高速上注链路。链路无需理解字段，也不得重新封装或修改。网络或硬件确认失败时，必须导出并重传同一字节序列：
 
 ```bash
-go run ./cmd/downlink-keyctl export-current-dek-batch \
+go run -tags downlink ./cmd/downlink-keyctl export-current-dek-batch \
   -config ./config.production.yaml \
   -output ./private/upload/downlink-dek-retry.bin
 ```
@@ -113,8 +113,8 @@ curl --fail-with-body \
 示例模拟数传硬件：它读取公开示例 Mission Profile 和已导出的 DEK 包，使用指定 DEK 与显式 nonce 生成可提交给 API 的 JSON。
 
 ```bash
-go run ./examples/downlink-hardware-simulator \
-  -mission-profile ./examples/mission-security-profile.example.yaml \
+go run -tags downlink ./examples/downlink-hardware-simulator \
+  -mission-profile ./examples/mission-security-profile.downlink.example.yaml \
   -dek-package ./private/upload/downlink-dek-generation.bin \
   -key-serial 17 \
   -nonce-hex 000000000000000000000001 \

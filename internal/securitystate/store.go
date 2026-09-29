@@ -1,5 +1,5 @@
 // Package securitystate owns the durable ground-side security state required
-// by the CCSDS TC and raw-downlink profile. It deliberately does not expose generic key
+// by the CCSDS TC profile and optional raw downlink. It deliberately does not expose generic key
 // vault, cluster, lease, upload/download, or outbox persistence.
 package securitystate
 
@@ -99,7 +99,20 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("securitystate: begin schema transaction: %w", err)
 	}
 	defer tx.Rollback()
-	for _, statement := range schemaStatements {
+	var existingMeta, existingDownlink int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_meta'`).Scan(&existingMeta); err != nil {
+		return fmt.Errorf("securitystate: inspect schema mode: %w", err)
+	}
+	if existingMeta != 0 {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='downlink_key_state'`).Scan(&existingDownlink); err != nil {
+			return fmt.Errorf("securitystate: inspect downlink mode: %w", err)
+		}
+		if !schemaModeMatches(existingDownlink) {
+			return errors.New("securitystate: database downlink mode does not match build")
+		}
+	}
+	statements := append(append([]string(nil), schemaStatements...), downlinkSchemaStatements()...)
+	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("securitystate: apply schema: %w", err)
 		}
@@ -177,24 +190,6 @@ var schemaStatements = []string{
 		status TEXT NOT NULL CHECK (status IN ('ACTIVE','PRE_ACTIVE','DECRYPT_ONLY','DESTROYED')),
 		created_at TEXT NOT NULL,
 		UNIQUE(key_id, version_no)
-	) STRICT`,
-	`CREATE TABLE IF NOT EXISTS downlink_key_state (
-		singleton INTEGER PRIMARY KEY CHECK (singleton=1),
-		active_kek_slot INTEGER NOT NULL CHECK (active_kek_slot BETWEEN 0 AND 7),
-		sealed_kek_set BLOB NOT NULL CHECK (length(sealed_kek_set)>0),
-		current_generation INTEGER,
-		current_observed INTEGER NOT NULL DEFAULT 0 CHECK (current_observed IN (0,1)),
-		current_package BLOB,
-		current_digest BLOB,
-		previous_generation INTEGER,
-		previous_package BLOB,
-		previous_digest BLOB,
-		updated_at TEXT NOT NULL,
-		CHECK ((current_generation IS NULL AND current_package IS NULL AND current_digest IS NULL) OR
-			(current_generation BETWEEN 1 AND 4294967295 AND length(current_package)=16417 AND length(current_digest)=32)),
-		CHECK ((previous_generation IS NULL AND previous_package IS NULL AND previous_digest IS NULL) OR
-			(previous_generation BETWEEN 1 AND 4294967295 AND length(previous_package)=16417 AND length(previous_digest)=32)),
-		CHECK (previous_generation IS NULL OR previous_generation < current_generation)
 	) STRICT`,
 	`CREATE TABLE IF NOT EXISTS security_associations (
 		id TEXT PRIMARY KEY,

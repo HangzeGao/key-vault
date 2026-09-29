@@ -10,7 +10,7 @@ import (
 
 	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/domain/policy"
-	"github.com/kvlt/key-vault/internal/downlink"
+	"github.com/kvlt/key-vault/internal/features"
 	protocol "github.com/kvlt/key-vault/internal/protocol/ccsds"
 	"github.com/kvlt/key-vault/internal/securitystate"
 )
@@ -25,7 +25,15 @@ type TCStatus interface {
 }
 
 type DownlinkStatus interface {
-	Status(context.Context) (downlink.Status, error)
+	DownlinkStatus(context.Context) (DownlinkState, error)
+}
+
+type DownlinkState struct {
+	Provisioned        bool   `json:"provisioned"`
+	ActiveKEKSlot      uint8  `json:"active_kek_slot"`
+	CurrentGeneration  uint32 `json:"current_generation"`
+	CurrentObserved    bool   `json:"current_observed"`
+	PreviousGeneration uint32 `json:"previous_generation"`
 }
 
 type Resolver interface{ Ready() bool }
@@ -131,8 +139,7 @@ type Snapshot struct {
 		Recovery *Association `json:"recovery"`
 	} `json:"tc"`
 	TCRotation           *TCRotation            `json:"tc_rotation,omitempty"`
-	DownlinkFormat       string                 `json:"downlink_format"`
-	Downlink             downlink.Status        `json:"downlink"`
+	Downlink             *DownlinkState         `json:"downlink,omitempty"`
 	ProfileDigest        string                 `json:"profile_digest"`
 	Flight               *Flight                `json:"flight,omitempty"`
 	FlightReconciliation string                 `json:"flight_reconciliation"`
@@ -192,7 +199,7 @@ func (s *Service) Snapshot(ctx context.Context, tenantID string) (*Snapshot, err
 			degrade("tc", "TC operations state unavailable")
 		} else {
 			result.TC.Current, result.TC.Next, result.TC.Recovery = mapAssociation(status.TCCurrent), mapAssociation(status.TCNext), mapAssociation(status.TCRecovery)
-			result.DownlinkFormat, result.ProfileDigest = status.DownlinkFormat, status.ProfileDigest
+			result.ProfileDigest = status.ProfileDigest
 			result.FlightReconciliation = status.FlightReconciliation
 			result.Warnings = append(result.Warnings, status.Warnings...)
 			if status.Ready {
@@ -220,12 +227,15 @@ func (s *Service) Snapshot(ctx context.Context, tenantID string) (*Snapshot, err
 			}
 		}
 	}
+	if !features.Downlink {
+		return result, nil
+	}
 	if s.downlink == nil {
 		degrade("downlink", "raw downlink service unavailable")
-	} else if value, err := s.downlink.Status(ctx); err != nil {
+	} else if value, err := s.downlink.DownlinkStatus(ctx); err != nil {
 		degrade("downlink", "raw downlink state unavailable")
 	} else {
-		result.Downlink = value
+		result.Downlink = &value
 		switch {
 		case !value.Provisioned:
 			result.Status = "UNCONFIGURED"

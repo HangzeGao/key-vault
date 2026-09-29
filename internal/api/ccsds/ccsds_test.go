@@ -13,7 +13,6 @@ import (
 	"github.com/kvlt/key-vault/internal/api/middleware"
 	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/crypto/suite"
-	"github.com/kvlt/key-vault/internal/downlink"
 	protocol "github.com/kvlt/key-vault/internal/protocol/ccsds"
 )
 
@@ -22,16 +21,6 @@ type fakeService struct {
 	input       []byte
 	flight      protocol.FlightSecurityStatus
 	downlinkErr error
-}
-
-func (service *fakeService) UnprotectRaw(_ context.Context, frame []byte) ([]byte, error) {
-	service.input = append([]byte(nil), frame...)
-	return []byte{1, 2, 3}, service.downlinkErr
-}
-
-func (service *fakeService) Status(context.Context) (downlink.Status, error) {
-	return downlink.Status{Provisioned: true, ActiveKEKSlot: 3, CurrentGeneration: 8,
-		CurrentObserved: true, PreviousGeneration: 7}, nil
 }
 
 func (service *fakeService) ObserveFlightSecurityStatus(_ context.Context, tenantID string, status protocol.FlightSecurityStatus) error {
@@ -50,7 +39,7 @@ func (service *fakeService) OperationsStatus(_ context.Context, tenantID string)
 	service.tenant = tenantID
 	counter := uint64(42)
 	return &protocol.OperationsStatus{
-		Status: "READY", Ready: true, DownlinkFormat: "RAW",
+		Status: "READY", Ready: true,
 		TCRotation: &protocol.TCRotationState{Phase: protocol.TCRotationPrepared, TransactionID: ^uint64(0),
 			CurrentSPI: 0x1001, NextSPI: 0x1002, CurrentRootVersion: 4, NextRootVersion: 5},
 		TCCurrent: &protocol.AssociationRuntimeState{ID: "tc-current", SPI: 0x1001, Direction: protocol.DirectionTCTx,
@@ -96,45 +85,7 @@ func TestTCAPIRejectsObsoleteDataOnlyContract(t *testing.T) {
 	}
 }
 
-func TestDownlinkAPIConsumesRawPackageAndReturnsPlaintext(t *testing.T) {
-	service := &fakeService{}
-	handler := authenticatedHandler(service)
-	raw := append([]byte{0, 17}, bytes.Repeat([]byte{1}, 12+16)...)
-	body := []byte(`{"package":"` + base64.StdEncoding.EncodeToString(raw) + `"}`)
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect", bytes.NewReader(body))
-	request.Header.Set("Authorization", "Bearer "+testDataToken())
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !bytes.Equal(service.input, raw) ||
-		!bytes.Contains(response.Body.Bytes(), []byte(`"plaintext":"AQID"`)) {
-		t.Fatalf("status=%d input=%x body=%s", response.Code, service.input, response.Body.String())
-	}
-}
-
-func TestDownlinkAPIErrorsFailClosed(t *testing.T) {
-	for _, tc := range []struct {
-		err    error
-		status int
-		code   string
-	}{
-		{downlink.ErrInvalid, http.StatusBadRequest, "DOWNLINK_INVALID"},
-		{downlink.ErrAuthentication, http.StatusUnprocessableEntity, "DOWNLINK_AUTHENTICATION_FAILED"},
-		{downlink.ErrNotProvisioned, http.StatusConflict, "DOWNLINK_STATE_REJECTED"},
-	} {
-		service := &fakeService{downlinkErr: tc.err}
-		handler := authenticatedHandler(service)
-		request := httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect",
-			bytes.NewReader([]byte(`{"package":"AQID"}`)))
-		request.Header.Set("Authorization", "Bearer "+testDataToken())
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, request)
-		if response.Code != tc.status || !bytes.Contains(response.Body.Bytes(), []byte(tc.code)) {
-			t.Fatalf("err=%v status=%d body=%s", tc.err, response.Code, response.Body.String())
-		}
-	}
-}
-
-func TestFlightStatusObservationUsesDownlinkScopeAndStrictSemantic(t *testing.T) {
+func TestFlightStatusObservationUsesDedicatedScopeAndStrictSemantic(t *testing.T) {
 	service := &fakeService{}
 	handler := authenticatedHandler(service)
 	body := []byte(`{"format_version":1,"profile_digest":"` + string(bytes.Repeat([]byte("01"), 32)) +
@@ -152,8 +103,9 @@ func TestFlightStatusObservationUsesDownlinkScopeAndStrictSemantic(t *testing.T)
 
 func authenticatedHandler(service ccsdsapi.Service) http.Handler {
 	mux := http.NewServeMux()
-	downlink, _ := service.(ccsdsapi.RawDownlinkService)
-	ccsdsapi.New(service, downlink).Routes(mux)
+	handler := ccsdsapi.New(service)
+	attachTestDownlink(handler, service)
+	handler.Routes(mux)
 	verifier, _ := access.NewVerifier("tenant-1", testDataToken(), testOpsToken())
 	auth := middleware.Auth(middleware.AuthConfig{Verifier: verifier})
 	return middleware.ReadBody(auth(middleware.APIAccess(mux)))

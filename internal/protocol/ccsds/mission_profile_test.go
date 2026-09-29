@@ -3,8 +3,12 @@ package ccsds
 import (
 	"bytes"
 	"encoding/binary"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kvlt/key-vault/internal/features"
 )
 
 const validMissionProfile = `format_version: 1
@@ -32,11 +36,42 @@ downlink:
 
 func loadMissionProfile(t *testing.T) *MissionSecurityProfile {
 	t.Helper()
-	profile, err := DecodeMissionSecurityProfile(strings.NewReader(validMissionProfile))
+	profile, err := DecodeMissionSecurityProfile(strings.NewReader(missionProfileFixture()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	return profile
+}
+
+func missionProfileFixture() string {
+	if features.Downlink {
+		return validMissionProfile
+	}
+	return strings.Split(validMissionProfile, "downlink:\n")[0]
+}
+
+func TestExampleMissionProfilesMatchBuildVariant(t *testing.T) {
+	base := filepath.Join("..", "..", "..", "examples")
+	selected, rejected := "mission-security-profile.example.yaml", "mission-security-profile.downlink.example.yaml"
+	if features.Downlink {
+		selected, rejected = rejected, selected
+	}
+	for _, test := range []struct {
+		name  string
+		valid bool
+	}{{selected, true}, {rejected, false}} {
+		file, err := os.Open(filepath.Join(base, test.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, decodeErr := DecodeMissionSecurityProfile(file)
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if (decodeErr == nil) != test.valid {
+			t.Fatalf("example %s valid=%t err=%v", test.name, test.valid, decodeErr)
+		}
+	}
 }
 
 func TestMissionProfileOwnsGroundFlightAndRecoveryConfiguration(t *testing.T) {
@@ -84,10 +119,11 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 		t.Fatal("nil reader accepted")
 	}
 	for name, input := range map[string]string{
-		"unknown":   strings.Replace(validMissionProfile, "mission_id: demo-sat", "unknown: x\nmission_id: demo-sat", 1),
-		"duplicate": strings.Replace(validMissionProfile, "mission_id: demo-sat", "mission_id: one\nmission_id: two", 1),
-		"multiple":  validMissionProfile + "---\nformat_version: 1\n",
-		"bad hex":   strings.Replace(validMissionProfile, "00112233445566778899aabbccddeeff", "00", 1),
+		"unknown":        strings.Replace(missionProfileFixture(), "mission_id: demo-sat", "unknown: x\nmission_id: demo-sat", 1),
+		"duplicate":      strings.Replace(missionProfileFixture(), "mission_id: demo-sat", "mission_id: one\nmission_id: two", 1),
+		"multiple":       missionProfileFixture() + "---\nformat_version: 1\n",
+		"trailer syntax": missionProfileFixture() + "broken: [unterminated\n",
+		"bad hex":        strings.Replace(missionProfileFixture(), "00112233445566778899aabbccddeeff", "00", 1),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := DecodeMissionSecurityProfile(strings.NewReader(input)); err == nil {
@@ -104,11 +140,22 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 		func(p *MissionSecurityProfile) { p.TC.SecurityEpoch = ^uint32(0) },
 		func(p *MissionSecurityProfile) { p.TC.NextRootVersion = p.TC.CurrentRootVersion },
 		func(p *MissionSecurityProfile) { p.TC.RecoveryTransactionID = 0 },
-		func(p *MissionSecurityProfile) { p.Downlink.ActiveKEKSlot = 8 },
-		func(p *MissionSecurityProfile) { p.Downlink.KEKSetHex = "00" },
+		func(p *MissionSecurityProfile) { p.TC.RecoverySPI = p.TC.CurrentSPI },
+	}
+	if features.Downlink {
+		mutations = append(mutations,
+			func(p *MissionSecurityProfile) { p.Downlink.ActiveKEKSlot = 8 },
+			func(p *MissionSecurityProfile) { p.Downlink.KEKSetHex = "00" },
+			func(p *MissionSecurityProfile) { p.Downlink = nil })
+	} else {
+		mutations = append(mutations, func(p *MissionSecurityProfile) { p.Downlink = &MissionDownlinkProfile{} })
 	}
 	for index, mutate := range mutations {
 		candidate := base
+		if base.Downlink != nil {
+			copyDownlink := *base.Downlink
+			candidate.Downlink = &copyDownlink
+		}
 		mutate(&candidate)
 		if err := candidate.Validate(); err == nil {
 			t.Fatalf("mutation %d accepted", index)
@@ -130,11 +177,14 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 	(*MissionSecrets)(nil).Zeroize()
 	secrets, _ := base.Secrets()
 	secrets.Zeroize()
-	if !bytes.Equal(secrets.CurrentRoot, make([]byte, 16)) || !bytes.Equal(secrets.KEKSet, make([]byte, 128)) {
+	if !bytes.Equal(secrets.CurrentRoot, make([]byte, 16)) || (features.Downlink && !bytes.Equal(secrets.KEKSet, make([]byte, 128))) {
 		t.Fatal("mission secrets were not zeroized")
 	}
 	invalid := base
 	invalid.TC.CurrentRootHex = "00"
+	if _, err := invalid.Associations(ids, 1); err == nil {
+		t.Fatal("invalid profile associations accepted")
+	}
 	if _, err := invalid.Digest(); err == nil {
 		t.Fatal("invalid profile digest accepted")
 	}

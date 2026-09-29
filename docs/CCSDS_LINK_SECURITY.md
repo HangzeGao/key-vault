@@ -2,12 +2,12 @@
 
 ## 边界
 
-当前系统只有两个独立运行面：
+系统有两个独立运行面；默认构建只包含 TC，下行通过 `-tags downlink` 显式加入：
 
 - TC uplink：地面接收完整 TC 明帧，使用 Current/Next 的 SM4-HCTR 或 Recovery 的 SM4-GCM，返回完整密帧；星载 C 模块完成对称解密。
 - Raw downlink：数传硬件使用 1024 个 SM4-GCM DEK 之一加密，地面在 Tag 验证成功后返回明文。
 
-AOS 帧格式尚未冻结。未来 AOS 只允许作为 Raw downlink 外层的解析/组帧适配器，不得引入第二套密钥、轮换、重放或数据库状态。
+AOS 帧适配尚未实现。后续 AOS 适配只允许作为 Raw downlink 外层的解析/组帧适配器，不得引入第二套密钥、轮换、重放或数据库状态。
 
 ## 隔离关系
 
@@ -30,8 +30,8 @@ TC 与下行共享部署进程、审计和身份基础设施，但不共享密�
 | Plane | Endpoint | Scope |
 |---|---|---|
 | Data | `POST /api/v1/tc:protect` | `ccsds:tc:protect` |
-| Data | `POST /api/v1/downlink:unprotect` | `ccsds:downlink:unprotect` |
-| Data | `POST /api/v1/flight-status:observe` | `ccsds:downlink:unprotect` |
+| Data (仅 downlink 构建) | `POST /api/v1/downlink:unprotect` | `ccsds:downlink:unprotect` |
+| Data | `POST /api/v1/flight-status:observe` | `ccsds:flight-status:observe` |
 | Ops (loopback only) | `GET /ops/v1/status` | `ops:read` |
 
 在线接口不提供 Root、KEK、DEK、nonce prefix、计数器或轮换写操作。所有密钥初装与下行批次推进均由离线命令完成。
@@ -42,4 +42,4 @@ TC 与下行共享部署进程、审计和身份基础设施，但不共享密�
 
 普通 TC、Recovery TC 及星载接口以 `docs/TC_GROUND_FLIGHT_ARCHITECTURE.md` 和测试向量为准。数传上注和下行 RAW 格式以 `docs/DOWNLINK_KEY_USER_MANUAL.md` 为准。
 
-实现不保留旧 AOS API、AOS Security Association、AOS replay store、CRK 表或旧 schema 兼容路径。数据库 schema version 3 是唯一接受版本。
+实现不保留旧 AOS API、AOS Security Association、AOS replay store、CRK 表或旧 schema 兼容路径。数据库 schema version 3 是唯一接受版本；TC-only 与 downlink 构建具有不同的严格表集合，交叉打开会失败关闭。

@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/kvlt/key-vault/internal/features"
 )
 
 func fixedToken(value byte) string {
@@ -26,6 +28,9 @@ func TestVerifierAuthenticatesOnlyFixedPlaneTokens(t *testing.T) {
 	ops := verifier.Authenticate(opsToken)
 	if data == nil || data.Plane != "data" || !data.HasScope("ccsds:tc:protect") || data.HasScope("ops:read") {
 		t.Fatalf("data principal=%+v", data)
+	}
+	if !data.HasScope("ccsds:flight-status:observe") || data.HasScope("ccsds:downlink:unprotect") != features.Downlink {
+		t.Fatalf("data scopes do not match build: %+v", data.Scopes)
 	}
 	if ops == nil || ops.Plane != "ops" || !ops.HasScope("ops:read") || ops.HasScope("ccsds:tc:protect") {
 		t.Fatalf("ops principal=%+v", ops)

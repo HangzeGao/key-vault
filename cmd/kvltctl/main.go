@@ -108,9 +108,12 @@ func statusCommand(ctx context.Context, c client, asJSON bool, stdout, stderr io
 	if asJSON {
 		writeJSON(stdout, snapshot)
 	} else {
-		fmt.Fprintf(stdout, "%s ready=%t uptime=%ds tc=%s downlink_generation=%d audit_events=%d\n",
+		fmt.Fprintf(stdout, "%s ready=%t uptime=%ds tc=%s audit_events=%d\n",
 			snapshot.Status, snapshot.Ready, snapshot.UptimeSeconds, snapshot.Checks["tc"].Status,
-			snapshot.Downlink.CurrentGeneration, snapshot.Database.AuditEvents)
+			snapshot.Database.AuditEvents)
+		if snapshot.Downlink != nil {
+			fmt.Fprintf(stdout, "downlink_generation=%d\n", snapshot.Downlink.CurrentGeneration)
+		}
 		fmt.Fprintf(stdout, "access_rejections source_ip=%d token=%d plane=%d rate_limited=%d\n",
 			snapshot.AccessRejections.SourceIPRejected, snapshot.AccessRejections.TokenRejected,
 			snapshot.AccessRejections.PlaneRejected, snapshot.AccessRejections.RateLimited)

@@ -13,7 +13,6 @@ import (
 
 	"github.com/kvlt/key-vault/internal/api/middleware"
 	"github.com/kvlt/key-vault/internal/auth/principal"
-	downlinkcrypto "github.com/kvlt/key-vault/internal/downlink"
 	"github.com/kvlt/key-vault/internal/errorsx"
 	protocol "github.com/kvlt/key-vault/internal/protocol/ccsds"
 )
@@ -23,22 +22,18 @@ type Service interface {
 	ObserveFlightSecurityStatus(ctx context.Context, tenantID string, status protocol.FlightSecurityStatus) error
 }
 
-type RawDownlinkService interface {
-	UnprotectRaw(context.Context, []byte) ([]byte, error)
-}
-
 type Handler struct {
-	service  Service
-	downlink RawDownlinkService
+	service Service
+	downlinkHandler
 }
 
-func New(service Service, downlink RawDownlinkService) *Handler {
-	return &Handler{service: service, downlink: downlink}
+func New(service Service) *Handler {
+	return &Handler{service: service}
 }
 
 func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/tc:protect", h.protectTC)
-	mux.HandleFunc("POST /api/v1/downlink:unprotect", h.unprotectDownlink)
+	h.registerDownlink(mux)
 	mux.HandleFunc("POST /api/v1/flight-status:observe", h.observeFlightStatus)
 }
 
@@ -61,7 +56,7 @@ type observeFlightStatusRequest struct {
 }
 
 func (h *Handler) observeFlightStatus(w http.ResponseWriter, r *http.Request) {
-	_, tenantID, ok := authorize(w, r, "ccsds:downlink:unprotect")
+	_, tenantID, ok := authorize(w, r, "ccsds:flight-status:observe")
 	if !ok {
 		return
 	}
@@ -92,11 +87,6 @@ func (h *Handler) observeFlightStatus(w http.ResponseWriter, r *http.Request) {
 type protectTCRequest struct {
 	TenantID string `json:"tenant_id,omitempty"`
 	Frame    string `json:"frame"`
-}
-
-type unprotectDownlinkRequest struct {
-	TenantID string `json:"tenant_id,omitempty"`
-	Package  string `json:"package"`
 }
 
 func (h *Handler) protectTC(w http.ResponseWriter, r *http.Request) {
@@ -131,38 +121,6 @@ func (h *Handler) protectTC(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) unprotectDownlink(w http.ResponseWriter, r *http.Request) {
-	principal, tenantID, ok := authorize(w, r, "ccsds:downlink:unprotect")
-	if !ok {
-		return
-	}
-	var request unprotectDownlinkRequest
-	if err := middleware.DecodeJSONStrict(middleware.BodyFromContext(r.Context()), &request); err != nil {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "invalid json")
-		return
-	}
-	if request.TenantID != "" {
-		tenantID = request.TenantID
-	}
-	if principal.TenantID != "" && tenantID != principal.TenantID {
-		writeError(w, http.StatusForbidden, "PERMISSION_DENIED", "tenant mismatch")
-		return
-	}
-	frame, err := base64.StdEncoding.DecodeString(request.Package)
-	if err != nil || len(frame) == 0 {
-		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "package must be non-empty base64")
-		return
-	}
-	result, err := h.downlink.UnprotectRaw(r.Context(), frame)
-	if err != nil {
-		writeProtocolError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"plaintext": base64.StdEncoding.EncodeToString(result),
-	})
-}
-
 func authorize(w http.ResponseWriter, r *http.Request, scope string) (*principal.Principal, string, bool) {
 	caller := middleware.PrincipalFromContext(r.Context())
 	if caller == nil {
@@ -177,13 +135,10 @@ func authorize(w http.ResponseWriter, r *http.Request, scope string) (*principal
 }
 
 func writeProtocolError(w http.ResponseWriter, err error) {
+	if writeDownlinkError(w, err) {
+		return
+	}
 	switch {
-	case errors.Is(err, downlinkcrypto.ErrInvalid):
-		writeError(w, http.StatusBadRequest, "DOWNLINK_INVALID", "invalid raw downlink package")
-	case errors.Is(err, downlinkcrypto.ErrAuthentication):
-		writeError(w, http.StatusUnprocessableEntity, "DOWNLINK_AUTHENTICATION_FAILED", "raw downlink authentication failed")
-	case errors.Is(err, downlinkcrypto.ErrNotProvisioned), errors.Is(err, downlinkcrypto.ErrNotObserved):
-		writeError(w, http.StatusConflict, "DOWNLINK_STATE_REJECTED", "downlink key state rejected operation")
 	case errors.Is(err, protocol.ErrFrameInvalid):
 		writeError(w, http.StatusBadRequest, "FRAME_INVALID", "invalid CCSDS frame data")
 	case errors.Is(err, protocol.ErrAssociationNotFound):

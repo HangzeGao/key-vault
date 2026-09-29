@@ -319,11 +319,6 @@ func TestClosedDatabaseFailsAllPersistenceBoundaries(t *testing.T) {
 		func() error { _, err := store.ListAuditChainHeads(ctx); return err },
 		func() error { _, err := store.VerifyAuditChain(ctx, "system"); return err },
 		func() error { _, err := store.Diagnostics(ctx); return err },
-		func() error { _, err := store.ReadDownlinkKeyState(ctx); return err },
-		func() error { return store.ProvisionDownlinkKEKSet(ctx, []byte("sealed"), 0) },
-		func() error { return store.SetActiveDownlinkKEKSlot(ctx, 0) },
-		func() error { return store.AdvanceDownlinkBatch(ctx, 0, make([]byte, 16417), digest) },
-		func() error { return store.MarkCurrentDownlinkObserved(ctx, 1) },
 	}
 	for index, call := range calls {
 		if err := call(); err == nil {
@@ -538,55 +533,6 @@ func mustAssociation(t *testing.T, store *Store, id string) *ccsds.SecurityAssoc
 		t.Fatal(err)
 	}
 	return association
-}
-
-func TestDownlinkPersistenceBoundaryMatrix(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t, filepath.Join(t.TempDir(), "state.db"))
-	defer store.Close()
-	if err := store.SetActiveDownlinkKEKSlot(ctx, 0); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("unprovisioned slot error=%v", err)
-	}
-	if err := store.SetActiveDownlinkKEKSlot(ctx, 8); err == nil {
-		t.Fatal("invalid slot accepted")
-	}
-	if err := store.AdvanceDownlinkBatch(ctx, 0, nil, [32]byte{1}); err == nil {
-		t.Fatal("invalid package accepted")
-	}
-	if err := store.AdvanceDownlinkBatch(ctx, ^uint32(0), make([]byte, 16417), [32]byte{1}); err == nil {
-		t.Fatal("generation overflow accepted")
-	}
-	if err := store.ProvisionDownlinkKEKSet(ctx, []byte("sealed"), 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SetActiveDownlinkKEKSlot(ctx, 7); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AdvanceDownlinkBatch(ctx, 0, make([]byte, 16417), [32]byte{1}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.MarkCurrentDownlinkObserved(ctx, 1); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.AdvanceDownlinkBatch(ctx, 1, make([]byte, 16417), [32]byte{2}); err != nil {
-		t.Fatal(err)
-	}
-	state, err := store.ReadDownlinkKeyState(ctx)
-	if err != nil || state.PreviousGeneration != 1 || state.CurrentGeneration != 2 {
-		t.Fatalf("state=%+v err=%v", state, err)
-	}
-	if _, err := store.db.ExecContext(ctx, `PRAGMA ignore_check_constraints=ON`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.ExecContext(ctx, `UPDATE downlink_key_state SET previous_digest=x'01'`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.db.ExecContext(ctx, `PRAGMA ignore_check_constraints=OFF`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.ReadDownlinkKeyState(ctx); err == nil {
-		t.Fatal("corrupt previous digest accepted")
-	}
 }
 
 func TestRotationCorruptionAndPrepareWriteFailure(t *testing.T) {

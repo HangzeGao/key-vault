@@ -31,7 +31,7 @@ const (
 )
 
 var (
-	dataScopes = []string{"ccsds:tc:protect", "ccsds:downlink:unprotect"}
+	dataScopes = dataPlaneScopes()
 	opsScopes  = []string{"audit:read", "ops:read"}
 )
 

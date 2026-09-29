@@ -1,3 +1,5 @@
+//go:build downlink
+
 // Command downlink-keyctl is the only batch-management interface. It is
 // intentionally offline-only and exposes no KEK or plaintext DEK material.
 package main

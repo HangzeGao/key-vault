@@ -26,12 +26,12 @@ var flightNVMMagic = [4]byte{'T', 'C', 'S', '2'}
 // both ground security state and the initial flight NVM image. Its root fields
 // are secret and must only be handled by the offline provisioning process.
 type MissionSecurityProfile struct {
-	FormatVersion uint16                 `yaml:"format_version" json:"format_version"`
-	MissionID     string                 `yaml:"mission_id" json:"mission_id"`
-	TenantID      string                 `yaml:"tenant_id" json:"tenant_id"`
-	SpacecraftID  uint16                 `yaml:"spacecraft_id" json:"spacecraft_id"`
-	TC            MissionTCProfile       `yaml:"tc" json:"tc"`
-	Downlink      MissionDownlinkProfile `yaml:"downlink" json:"downlink"`
+	FormatVersion uint16                  `yaml:"format_version" json:"format_version"`
+	MissionID     string                  `yaml:"mission_id" json:"mission_id"`
+	TenantID      string                  `yaml:"tenant_id" json:"tenant_id"`
+	SpacecraftID  uint16                  `yaml:"spacecraft_id" json:"spacecraft_id"`
+	TC            MissionTCProfile        `yaml:"tc" json:"tc"`
+	Downlink      *MissionDownlinkProfile `yaml:"downlink,omitempty" json:"downlink,omitempty"`
 }
 
 type MissionTCProfile struct {
@@ -105,8 +105,8 @@ func (profile MissionSecurityProfile) Validate() error {
 		tc.RecoveryTransactionID == 0 {
 		return errors.New("ccsds: invalid TC epoch, root version, or recovery transaction")
 	}
-	if profile.Downlink.ActiveKEKSlot > 7 {
-		return errors.New("ccsds: active downlink KEK slot must be 0..7")
+	if err := validateMissionDownlink(profile.Downlink); err != nil {
+		return err
 	}
 	nextSPI := NextSPI(tc.CurrentSPI)
 	if tc.RecoverySPI == tc.CurrentSPI || tc.RecoverySPI == nextSPI {
@@ -117,7 +117,7 @@ func (profile MissionSecurityProfile) Validate() error {
 		length int
 	}{
 		"current root": {tc.CurrentRootHex, 16}, "next root": {tc.NextRootHex, 16},
-		"recovery root": {tc.RecoveryRootHex, 16}, "downlink KEK set": {profile.Downlink.KEKSetHex, 128},
+		"recovery root":           {tc.RecoveryRootHex, 16},
 		"ordinary nonce prefix":   {tc.NoncePrefixHex, TCNoncePrefixLength},
 		"recovery nonce prefix":   {tc.RecoveryNoncePrefixHex, TCNoncePrefixLength},
 		"recovery primary header": {tc.RecoveryPrimaryHeaderHex, TCPrimaryHeaderLength},
@@ -147,7 +147,7 @@ func (profile MissionSecurityProfile) Secrets() (MissionSecrets, error) {
 	current, _ := decodeProfileHex(profile.TC.CurrentRootHex, 16)
 	next, _ := decodeProfileHex(profile.TC.NextRootHex, 16)
 	recovery, _ := decodeProfileHex(profile.TC.RecoveryRootHex, 16)
-	kekSet, _ := decodeProfileHex(profile.Downlink.KEKSetHex, 128)
+	kekSet := missionDownlinkSecrets(profile.Downlink)
 	return MissionSecrets{CurrentRoot: current, NextRoot: next, RecoveryRoot: recovery, KEKSet: kekSet}, nil
 }
 

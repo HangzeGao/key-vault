@@ -1,3 +1,5 @@
+//go:build downlink
+
 package downlink
 
 import (

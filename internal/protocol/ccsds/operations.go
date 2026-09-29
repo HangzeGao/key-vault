@@ -56,7 +56,6 @@ type OperationsStatus struct {
 	TCNext               *AssociationRuntimeState
 	TCRecovery           *AssociationRuntimeState
 	TCRotation           *TCRotationState
-	DownlinkFormat       string
 	ProfileDigest        string
 	FlightStatus         *ObservedFlightSecurityStatus
 	FlightReconciliation string
@@ -70,7 +69,7 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 	if err != nil {
 		return nil, err
 	}
-	status := &OperationsStatus{Status: "UNCONFIGURED", DownlinkFormat: "RAW",
+	status := &OperationsStatus{Status: "UNCONFIGURED",
 		FlightReconciliation: "NOT_OBSERVED", Warnings: make([]string, 0)}
 	digest, digestErr := s.store.ReadMissionProfileDigest(ctx, tenantID)
 	if digestErr == nil {

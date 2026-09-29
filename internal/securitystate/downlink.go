@@ -1,3 +1,5 @@
+//go:build downlink
+
 package securitystate
 
 import (
@@ -6,6 +8,29 @@ import (
 	"errors"
 	"time"
 )
+
+const downlinkSchemaStatement = `CREATE TABLE IF NOT EXISTS downlink_key_state (
+		singleton INTEGER PRIMARY KEY CHECK (singleton=1),
+		active_kek_slot INTEGER NOT NULL CHECK (active_kek_slot BETWEEN 0 AND 7),
+		sealed_kek_set BLOB NOT NULL CHECK (length(sealed_kek_set)>0),
+		current_generation INTEGER,
+		current_observed INTEGER NOT NULL DEFAULT 0 CHECK (current_observed IN (0,1)),
+		current_package BLOB,
+		current_digest BLOB,
+		previous_generation INTEGER,
+		previous_package BLOB,
+		previous_digest BLOB,
+		updated_at TEXT NOT NULL,
+		CHECK ((current_generation IS NULL AND current_package IS NULL AND current_digest IS NULL) OR
+			(current_generation BETWEEN 1 AND 4294967295 AND length(current_package)=16417 AND length(current_digest)=32)),
+		CHECK ((previous_generation IS NULL AND previous_package IS NULL AND previous_digest IS NULL) OR
+			(previous_generation BETWEEN 1 AND 4294967295 AND length(previous_package)=16417 AND length(previous_digest)=32)),
+		CHECK (previous_generation IS NULL OR previous_generation < current_generation)
+	) STRICT`
+
+func downlinkSchemaStatements() []string { return []string{downlinkSchemaStatement} }
+
+func schemaModeMatches(existingDownlinkTables int) bool { return existingDownlinkTables == 1 }
 
 type DownlinkKeyState struct {
 	ActiveKEKSlot      uint8

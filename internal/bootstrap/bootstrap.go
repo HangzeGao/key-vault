@@ -18,7 +18,6 @@ import (
 	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/config"
 	"github.com/kvlt/key-vault/internal/domain/policy"
-	"github.com/kvlt/key-vault/internal/downlink"
 	"github.com/kvlt/key-vault/internal/policysig"
 	"github.com/kvlt/key-vault/internal/protocol/ccsds"
 	"github.com/kvlt/key-vault/internal/resolver/keyresolver"
@@ -32,12 +31,11 @@ const (
 
 // App contains only the modules used by the CCSDS ground system.
 type App struct {
-	Cfg                *config.Config
-	Store              *securitystate.Store
-	TPM                provider.Provider
-	Resolver           *keyresolver.Resolver
-	Downlink           *downlink.Service
-	DownlinkSealer     *downlink.TPMSealer
+	Cfg      *config.Config
+	Store    *securitystate.Store
+	TPM      provider.Provider
+	Resolver *keyresolver.Resolver
+	downlinkState
 	Policies           *policy.Engine
 	PolicyMgr          *policysig.Manager
 	CCSDSFrameSecurity *ccsds.FrameSecurity
@@ -96,13 +94,9 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 		}
 		return version.SealedMaterial, nil
 	})
-	downlinkSealer, err := downlink.NewTPMSealer(ctx, tpm, storageName, cfg.Server.NodeID, baseline, policyDigest[:])
+	downlinkState, err := initDownlink(ctx, tpm, store, cfg, baseline, policyDigest[:])
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap: downlink TPM sealer: %w", err)
-	}
-	downlinkService := downlink.NewService(store, downlinkSealer)
-	if err := downlinkService.Load(ctx); err != nil {
-		return nil, fmt.Errorf("bootstrap: load downlink keys: %w", err)
+		return nil, err
 	}
 
 	auditChain := auditchain.New(store)
@@ -122,7 +116,7 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 	}
 
 	return &App{
-		Cfg: cfg, Store: store, TPM: tpm, Resolver: resolver, Downlink: downlinkService, DownlinkSealer: downlinkSealer,
+		Cfg: cfg, Store: store, TPM: tpm, Resolver: resolver, downlinkState: downlinkState,
 		Policies: policies, PolicyMgr: policyMgr,
 		CCSDSFrameSecurity: frameSecurity, CCSDSStore: store,
 		AccessVerifier: accessVerifier, AuditChain: auditChain,

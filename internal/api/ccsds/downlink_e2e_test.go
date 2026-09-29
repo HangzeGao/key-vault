@@ -1,3 +1,5 @@
+//go:build downlink
+
 package ccsds_test
 
 import (
@@ -80,7 +82,9 @@ func TestDownlinkBatchToAuthenticatedHTTPPlaintext(t *testing.T) {
 	raw = append(raw, tag...)
 
 	mux := http.NewServeMux()
-	ccsdsapi.New(&fakeService{}, service).Routes(mux)
+	api := ccsdsapi.New(&fakeService{})
+	api.SetDownlink(service)
+	api.Routes(mux)
 	verifier, _ := access.NewVerifier("tenant-1", testDataToken(), testOpsToken())
 	auth := middleware.Auth(middleware.AuthConfig{Verifier: verifier})
 	handler := middleware.ReadBody(auth(middleware.APIAccess(mux)))
