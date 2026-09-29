@@ -10,14 +10,6 @@ if [ "$MODE" != "serve" ] && [ "$MODE" != "provision-ccsds" ]; then
 fi
 
 cd "$SCRIPT_DIR"
-if [ "${KVLT_ENABLE_DOWNLINK:-0}" != "0" ] && [ "${KVLT_ENABLE_DOWNLINK:-0}" != "1" ]; then
-  echo "KVLT_ENABLE_DOWNLINK must be 0 or 1" >&2
-  exit 2
-fi
-GO_TAGS=()
-if [ "${KVLT_ENABLE_DOWNLINK:-0}" = "1" ]; then
-  GO_TAGS=(-tags downlink)
-fi
 if [ "$(go env GOVERSION)" != "go1.26.6" ]; then
   echo "Go 1.26.6 is required" >&2
   exit 2
@@ -38,7 +30,7 @@ if [ "$MODE" = "provision-ccsds" ]; then
 	fi
   echo "building offline CCSDS provisioner..."
 	mkdir -p "$SCRIPT_DIR/bin"
-  go build "${GO_TAGS[@]}" -trimpath -o bin/ccsds-provision ./cmd/ccsds-provision
+  go build -trimpath -o bin/ccsds-provision ./cmd/ccsds-provision
   echo "provisioning paired ground and flight TC security state..."
   exec "$SCRIPT_DIR/bin/ccsds-provision" \
     -mission-profile "$KVLT_MISSION_PROFILE" \
@@ -52,7 +44,7 @@ if [ "$#" -gt 2 ] || [ -z "$CONFIG_PATH" ] || [[ "$CONFIG_PATH" != /* ]] || [ ! 
 fi
 echo "building service and operations CLI..."
 mkdir -p "$SCRIPT_DIR/bin"
-go build "${GO_TAGS[@]}" -trimpath -o bin/key-vault ./cmd/key-vault
+go build -trimpath -o bin/key-vault ./cmd/key-vault
 go build -trimpath -o bin/kvltctl ./cmd/kvltctl
 
 echo "starting key-vault from explicit configuration: $CONFIG_PATH"

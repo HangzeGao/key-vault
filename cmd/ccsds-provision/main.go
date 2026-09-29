@@ -88,7 +88,6 @@ func run(ctx context.Context, options provisionOptions) error {
 	if err != nil {
 		return fmt.Errorf("bootstrap: %w", err)
 	}
-	defer app.CloseDownlink()
 	defer app.TPM.Close()
 	defer app.Store.Close()
 	if err := app.Store.BindMissionProfile(ctx, profile.TenantID, digest); err != nil {
@@ -122,9 +121,6 @@ func run(ctx context.Context, options provisionOptions) error {
 		slog.Info("CCSDS association ready", "association_id", association.ID,
 			"direction", association.Direction, "state", association.State,
 			"spi", fmt.Sprintf("0x%04X", association.SPI), "result", result)
-	}
-	if err := provisionDownlink(ctx, app, profile, &secrets); err != nil {
-		return err
 	}
 	command, primaryHeader, err := profile.RootPrepareCommand()
 	if err != nil {

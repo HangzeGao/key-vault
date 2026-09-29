@@ -17,10 +17,9 @@ import (
 )
 
 type fakeService struct {
-	tenant      string
-	input       []byte
-	flight      protocol.FlightSecurityStatus
-	downlinkErr error
+	tenant string
+	input  []byte
+	flight protocol.FlightSecurityStatus
 }
 
 func (service *fakeService) ObserveFlightSecurityStatus(_ context.Context, tenantID string, status protocol.FlightSecurityStatus) error {
@@ -85,6 +84,17 @@ func TestTCAPIRejectsObsoleteDataOnlyContract(t *testing.T) {
 	}
 }
 
+func TestCCSDSRoutesDoNotExposeHardwareDownlink(t *testing.T) {
+	mux := http.NewServeMux()
+	ccsdsapi.New(&fakeService{}).Routes(mux)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/downlink:unprotect", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("unsupported hardware route status=%d", response.Code)
+	}
+}
+
 func TestFlightStatusObservationUsesDedicatedScopeAndStrictSemantic(t *testing.T) {
 	service := &fakeService{}
 	handler := authenticatedHandler(service)
@@ -104,7 +114,6 @@ func TestFlightStatusObservationUsesDedicatedScopeAndStrictSemantic(t *testing.T
 func authenticatedHandler(service ccsdsapi.Service) http.Handler {
 	mux := http.NewServeMux()
 	handler := ccsdsapi.New(service)
-	attachTestDownlink(handler, service)
 	handler.Routes(mux)
 	verifier, _ := access.NewVerifier("tenant-1", testDataToken(), testOpsToken())
 	auth := middleware.Auth(middleware.AuthConfig{Verifier: verifier})

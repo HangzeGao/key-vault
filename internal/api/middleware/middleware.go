@@ -16,7 +16,6 @@ import (
 	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/auth/principal"
 	"github.com/kvlt/key-vault/internal/errorsx"
-	"github.com/kvlt/key-vault/internal/features"
 	"github.com/kvlt/key-vault/internal/logging"
 )
 
@@ -192,11 +191,6 @@ func accessRuleFor(method, path string) (accessRule, bool) {
 		switch path {
 		case "/api/v1/tc:protect":
 			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:tc:protect"}}, true
-		case "/api/v1/downlink:unprotect":
-			if features.Downlink {
-				return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:downlink:unprotect"}}, true
-			}
-			return accessRule{}, false
 		case "/api/v1/flight-status:observe":
 			return accessRule{plane: principal.PlaneData, scopes: []string{"ccsds:flight-status:observe"}}, true
 		}

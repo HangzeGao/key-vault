@@ -28,7 +28,7 @@ func TestStatusAndDoctorExitContracts(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/ops/v1/status":
-			_, _ = w.Write([]byte(`{"status":"READY","ready":true,"checks":{"tc":{"status":"ok"}},"database":{"audit_events":2},"downlink":{"current_generation":8},"warnings":[]}`))
+			_, _ = w.Write([]byte(`{"status":"READY","ready":true,"checks":{"tc":{"status":"ok"}},"database":{"audit_events":2},"warnings":[]}`))
 		case "/ops/v1/audit/verify":
 			_, _ = w.Write([]byte(`{"results":[{"chain_name":"system","intact":true}]}`))
 		default:
@@ -97,7 +97,7 @@ func TestTokenFileValidation(t *testing.T) {
 
 func TestHTTPSRequiresAndUsesPinnedCertificate(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"status":"READY","ready":true,"checks":{"tc":{"status":"ok"}},"database":{},"downlink":{},"warnings":[]}`))
+		_, _ = w.Write([]byte(`{"status":"READY","ready":true,"checks":{"tc":{"status":"ok"}},"database":{},"warnings":[]}`))
 	}))
 	defer server.Close()
 	token := tokenFile(t)

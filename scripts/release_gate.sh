@@ -11,10 +11,8 @@ if [[ -z "$go_bin" ]]; then echo "release gate failed: Go toolchain not found" >
 cd "$ROOT_DIR"
 bash -n start.sh
 GO_BIN="$go_bin" bash scripts/go_security_gate.sh
-CGO_ENABLED=1 "$go_bin" test -race -tags downlink ./...
 GO_BIN="$go_bin" bash scripts/c_hardening_gate.sh
 "$go_bin" test -count=1 -run '^TestTCDataPlaneAPIProducesFlightAcceptedVector$' ./internal/api/ccsds
-"$go_bin" test -tags downlink -count=1 -run '^TestDownlinkBatchToAuthenticatedHTTPPlaintext$' ./internal/api/ccsds
 
 GO_BIN="$go_bin" bash scripts/external_vector_gate.sh
 
@@ -24,20 +22,17 @@ coverage_output="$(bash scripts/coverage_gate.sh)"
 printf '%s\n' "$coverage_output"
 c_coverage="$(printf '%s\n' "$coverage_output" | awk '/Flight C line coverage gate passed/ {gsub(/%/,"",$7); print $7}')"
 go_coverage="$(printf '%s\n' "$coverage_output" | awk '/Ground TC Go statement coverage gate passed/ {gsub(/%/,"",$8); print $8}')"
-go_downlink_build_coverage="$(printf '%s\n' "$coverage_output" | awk '/Ground TC\+downlink Go statement coverage gate passed/ {gsub(/%/,"",$8); print $8}')"
 access_coverage="$(printf '%s\n' "$coverage_output" | awk '/Ground access Go statement coverage gate passed/ {gsub(/%/,"",$8); print $8}')"
-access_downlink_coverage="$(printf '%s\n' "$coverage_output" | awk '/Ground access\+downlink Go statement coverage gate passed/ {gsub(/%/,"",$8); print $8}')"
-if [[ -z "$c_coverage" || -z "$go_coverage" || -z "$go_downlink_build_coverage" || -z "$access_coverage" || -z "$access_downlink_coverage" ]]; then echo "release gate failed: coverage evidence missing" >&2; exit 1; fi
+if [[ -z "$c_coverage" || -z "$go_coverage" || -z "$access_coverage" ]]; then echo "release gate failed: coverage evidence missing" >&2; exit 1; fi
 
 mkdir -p "$EVIDENCE_DIR"
-"$go_bin" build -o "$EVIDENCE_DIR/key-vault-tc-gate" ./cmd/key-vault
-"$go_bin" build -tags downlink -o "$EVIDENCE_DIR/key-vault-downlink-gate" ./cmd/key-vault
-if "$go_bin" tool nm "$EVIDENCE_DIR/key-vault-tc-gate" | grep 'github.com/kvlt/key-vault/internal/downlink' >/dev/null; then
-  echo "release gate failed: TC-only binary still links downlink service" >&2
+"$go_bin" build -o "$EVIDENCE_DIR/key-vault-gate" ./cmd/key-vault
+if ! diff -u <("$go_bin" list ./...) <("$go_bin" list -tags downlink ./...); then
+  echo "release gate failed: obsolete downlink build tag changes package set" >&2
   exit 1
 fi
-if ! "$go_bin" tool nm "$EVIDENCE_DIR/key-vault-downlink-gate" | grep 'github.com/kvlt/key-vault/internal/downlink' >/dev/null; then
-  echo "release gate failed: downlink binary does not link downlink service" >&2
+if "$go_bin" tool nm "$EVIDENCE_DIR/key-vault-gate" | grep 'github.com/kvlt/key-vault/internal/downlink' >/dev/null; then
+  echo "release gate failed: binary still links unsupported downlink service" >&2
   exit 1
 fi
 
@@ -59,7 +54,7 @@ external_vector_hash="$(sha256sum testdata/crypto/cryptography-sm4-v1.tsv | awk 
 external_generator_hash="$(sha256sum scripts/oracle/cryptography_vector_generator.py | awk '{print $1}')"
 cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
 {
-  "format_version": 6,
+  "format_version": 7,
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_commit": "$commit",
   "dirty_worktree": $dirty,
@@ -75,9 +70,7 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "c_smoke_fuzz_crashes": 0,
   "flight_c_line_coverage": $c_coverage,
   "ground_tc_go_statement_coverage": $go_coverage,
-  "ground_tc_downlink_go_statement_coverage": $go_downlink_build_coverage,
   "ground_access_go_statement_coverage": $access_coverage,
-  "ground_access_downlink_go_statement_coverage": $access_downlink_coverage,
   "ordinary_vector_sha256": "$ordinary_hash",
   "recovery_vector_sha256": "$recovery_hash",
   "external_vector_generator": "pyca/cryptography 49.0.0 (OpenSSL 4.0.1) + RFC 8998 Appendix A.1",
@@ -87,9 +80,7 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "rfc8998_sm4_gcm": "passed",
   "external_sm4_block_cmac_gcm_hctr_kdf": "passed",
   "api_to_flight_vector": "passed",
-  "downlink_batch_to_http_plaintext": "passed",
-  "tc_only_build": "passed",
-  "downlink_build": "passed",
+  "unsupported_downlink_absent": "passed",
   "armv7_cross_compile": "passed",
   "armv7_qemu_neon": "passed",
   "go_x86_armv7_differential_records": 256,

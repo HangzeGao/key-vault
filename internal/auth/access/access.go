@@ -31,7 +31,7 @@ const (
 )
 
 var (
-	dataScopes = dataPlaneScopes()
+	dataScopes = []string{"ccsds:tc:protect", "ccsds:flight-status:observe"}
 	opsScopes  = []string{"audit:read", "ops:read"}
 )
 

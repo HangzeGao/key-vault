@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/kvlt/key-vault/internal/auditchain"
-	"github.com/kvlt/key-vault/internal/features"
 	"github.com/kvlt/key-vault/internal/protocol/ccsds"
 	"github.com/kvlt/key-vault/internal/repository/models"
 )
@@ -32,15 +31,11 @@ func TestProtocolTCStateSurvivesRestart(t *testing.T) {
 	}
 }
 
-func TestSchemaModeMismatchFailsClosed(t *testing.T) {
+func TestUnsupportedDownlinkTableFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "state.db")
 	store := openTestStore(t, path)
-	statement := `CREATE TABLE downlink_key_state (id INTEGER)`
-	if features.Downlink {
-		statement = `DROP TABLE downlink_key_state`
-	}
-	if _, err := store.db.ExecContext(ctx, statement); err != nil {
+	if _, err := store.db.ExecContext(ctx, `CREATE TABLE downlink_key_state (id INTEGER)`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -48,7 +43,7 @@ func TestSchemaModeMismatchFailsClosed(t *testing.T) {
 	}
 	if opened, err := Open(ctx, path); err == nil {
 		opened.Close()
-		t.Fatal("database opened with mismatched compile-time downlink mode")
+		t.Fatal("database opened with unsupported downlink table")
 	}
 }
 

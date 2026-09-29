@@ -260,7 +260,7 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 
 ### 11.1 星地同源测试密钥装载
 
-`ccsds-provision` 只接受与编译变体匹配的严格 Mission Security Profile：默认 TC-only 只导入 Current/Next/Recovery Root；`-tags downlink` 变体额外导入独立的 8 槽下行 KEKSet。两者均生成星载初始 NVM 镜像、Recovery Root Prepare 完整帧和哈希证据。运行时仍不存在明文密钥导出接口。
+`ccsds-provision` 只接受严格的 TC Mission Security Profile，导入 Current/Next/Recovery Root，并生成星载初始 NVM 镜像、Recovery Root Prepare 完整帧和哈希证据。运行时仍不存在明文密钥导出接口。
 
 ### 11.2 地面 epoch 切换的生产编排入口
 

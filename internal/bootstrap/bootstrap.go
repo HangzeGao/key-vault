@@ -31,11 +31,10 @@ const (
 
 // App contains only the modules used by the CCSDS ground system.
 type App struct {
-	Cfg      *config.Config
-	Store    *securitystate.Store
-	TPM      provider.Provider
-	Resolver *keyresolver.Resolver
-	downlinkState
+	Cfg                *config.Config
+	Store              *securitystate.Store
+	TPM                provider.Provider
+	Resolver           *keyresolver.Resolver
 	Policies           *policy.Engine
 	PolicyMgr          *policysig.Manager
 	CCSDSFrameSecurity *ccsds.FrameSecurity
@@ -94,11 +93,6 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 		}
 		return version.SealedMaterial, nil
 	})
-	downlinkState, err := initDownlink(ctx, tpm, store, cfg, baseline, policyDigest[:])
-	if err != nil {
-		return nil, err
-	}
-
 	auditChain := auditchain.New(store)
 	policyMgr := policysig.New(policies, &policyAuditAdapter{audit: auditChain})
 	if err := configureSignedPolicy(ctx, cfg, policyMgr); err != nil {
@@ -116,7 +110,7 @@ func Build(ctx context.Context, cfg *config.Config) (_ *App, err error) {
 	}
 
 	return &App{
-		Cfg: cfg, Store: store, TPM: tpm, Resolver: resolver, downlinkState: downlinkState,
+		Cfg: cfg, Store: store, TPM: tpm, Resolver: resolver,
 		Policies: policies, PolicyMgr: policyMgr,
 		CCSDSFrameSecurity: frameSecurity, CCSDSStore: store,
 		AccessVerifier: accessVerifier, AuditChain: auditChain,

@@ -24,7 +24,6 @@ type Service interface {
 
 type Handler struct {
 	service Service
-	downlinkHandler
 }
 
 func New(service Service) *Handler {
@@ -33,7 +32,6 @@ func New(service Service) *Handler {
 
 func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/tc:protect", h.protectTC)
-	h.registerDownlink(mux)
 	mux.HandleFunc("POST /api/v1/flight-status:observe", h.observeFlightStatus)
 }
 
@@ -135,9 +133,6 @@ func authorize(w http.ResponseWriter, r *http.Request, scope string) (*principal
 }
 
 func writeProtocolError(w http.ResponseWriter, err error) {
-	if writeDownlinkError(w, err) {
-		return
-	}
 	switch {
 	case errors.Is(err, protocol.ErrFrameInvalid):
 		writeError(w, http.StatusBadRequest, "FRAME_INVALID", "invalid CCSDS frame data")

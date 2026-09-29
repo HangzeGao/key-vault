@@ -11,7 +11,6 @@ import (
 
 	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/auth/principal"
-	"github.com/kvlt/key-vault/internal/features"
 )
 
 func TestAPIAccessStrictCCSDSMatrix(t *testing.T) {
@@ -23,6 +22,7 @@ func TestAPIAccessStrictCCSDSMatrix(t *testing.T) {
 		{"TC protect", http.MethodPost, "/api/v1/tc:protect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:tc:protect"}}, 204},
 		{"flight status observe", http.MethodPost, "/api/v1/flight-status:observe", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:flight-status:observe"}}, 204},
 		{"wrong data scope", http.MethodPost, "/api/v1/tc:protect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:downlink:unprotect"}}, 403},
+		{"unsupported hardware downlink", http.MethodPost, "/api/v1/downlink:unprotect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:downlink:unprotect"}}, 403},
 		{"wrong plane", http.MethodPost, "/api/v1/tc:protect", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ccsds:tc:protect"}}, 403},
 		{"audit read", http.MethodGet, "/ops/v1/audit/events", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"audit:read"}}, 204},
 		{"audit delete removed", http.MethodDelete, "/ops/v1/audit/events", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"audit:read"}}, 403},
@@ -33,20 +33,6 @@ func TestAPIAccessStrictCCSDSMatrix(t *testing.T) {
 		{"old keys removed", http.MethodGet, "/ops/v1/keys", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"keys:read"}}, 403},
 		{"mutation removed", http.MethodPost, "/ops/v1/state:repair", &principal.Principal{Plane: principal.PlaneOps, Scopes: []string{"ops:repair"}}, 403},
 	}
-	if features.Downlink {
-		tests = append(tests, struct {
-			name, method, path string
-			principal          *principal.Principal
-			want               int
-		}{"downlink unprotect", http.MethodPost, "/api/v1/downlink:unprotect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:downlink:unprotect"}}, 204})
-	} else {
-		tests = append(tests, struct {
-			name, method, path string
-			principal          *principal.Principal
-			want               int
-		}{"downlink removed", http.MethodPost, "/api/v1/downlink:unprotect", &principal.Principal{Plane: principal.PlaneData, Scopes: []string{"ccsds:downlink:unprotect"}}, 403})
-	}
-
 	next := APIAccess(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }))
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

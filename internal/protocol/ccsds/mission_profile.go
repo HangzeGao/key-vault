@@ -26,12 +26,11 @@ var flightNVMMagic = [4]byte{'T', 'C', 'S', '2'}
 // both ground security state and the initial flight NVM image. Its root fields
 // are secret and must only be handled by the offline provisioning process.
 type MissionSecurityProfile struct {
-	FormatVersion uint16                  `yaml:"format_version" json:"format_version"`
-	MissionID     string                  `yaml:"mission_id" json:"mission_id"`
-	TenantID      string                  `yaml:"tenant_id" json:"tenant_id"`
-	SpacecraftID  uint16                  `yaml:"spacecraft_id" json:"spacecraft_id"`
-	TC            MissionTCProfile        `yaml:"tc" json:"tc"`
-	Downlink      *MissionDownlinkProfile `yaml:"downlink,omitempty" json:"downlink,omitempty"`
+	FormatVersion uint16           `yaml:"format_version" json:"format_version"`
+	MissionID     string           `yaml:"mission_id" json:"mission_id"`
+	TenantID      string           `yaml:"tenant_id" json:"tenant_id"`
+	SpacecraftID  uint16           `yaml:"spacecraft_id" json:"spacecraft_id"`
+	TC            MissionTCProfile `yaml:"tc" json:"tc"`
 }
 
 type MissionTCProfile struct {
@@ -50,11 +49,6 @@ type MissionTCProfile struct {
 	RecoveryPrimaryHeaderHex string `yaml:"recovery_primary_header_hex" json:"recovery_primary_header_hex"`
 }
 
-type MissionDownlinkProfile struct {
-	ActiveKEKSlot uint8  `yaml:"active_kek_slot" json:"active_kek_slot"`
-	KEKSetHex     string `yaml:"kek_set_hex" json:"kek_set_hex"`
-}
-
 // MissionAssociationIDs are stable persistence identifiers chosen by the
 // offline provisioning adapter. Profile validation and association construction
 // remain inside this module.
@@ -64,7 +58,7 @@ type MissionAssociationIDs struct {
 }
 
 type MissionSecrets struct {
-	CurrentRoot, NextRoot, RecoveryRoot, KEKSet []byte
+	CurrentRoot, NextRoot, RecoveryRoot []byte
 }
 
 // DecodeMissionSecurityProfile accepts one strict YAML document. Unknown and
@@ -105,9 +99,6 @@ func (profile MissionSecurityProfile) Validate() error {
 		tc.RecoveryTransactionID == 0 {
 		return errors.New("ccsds: invalid TC epoch, root version, or recovery transaction")
 	}
-	if err := validateMissionDownlink(profile.Downlink); err != nil {
-		return err
-	}
 	nextSPI := NextSPI(tc.CurrentSPI)
 	if tc.RecoverySPI == tc.CurrentSPI || tc.RecoverySPI == nextSPI {
 		return errors.New("ccsds: Current, Next, and Recovery SPIs must be distinct")
@@ -147,15 +138,14 @@ func (profile MissionSecurityProfile) Secrets() (MissionSecrets, error) {
 	current, _ := decodeProfileHex(profile.TC.CurrentRootHex, 16)
 	next, _ := decodeProfileHex(profile.TC.NextRootHex, 16)
 	recovery, _ := decodeProfileHex(profile.TC.RecoveryRootHex, 16)
-	kekSet := missionDownlinkSecrets(profile.Downlink)
-	return MissionSecrets{CurrentRoot: current, NextRoot: next, RecoveryRoot: recovery, KEKSet: kekSet}, nil
+	return MissionSecrets{CurrentRoot: current, NextRoot: next, RecoveryRoot: recovery}, nil
 }
 
 func (secrets *MissionSecrets) Zeroize() {
 	if secrets == nil {
 		return
 	}
-	for _, value := range [][]byte{secrets.CurrentRoot, secrets.NextRoot, secrets.RecoveryRoot, secrets.KEKSet} {
+	for _, value := range [][]byte{secrets.CurrentRoot, secrets.NextRoot, secrets.RecoveryRoot} {
 		for index := range value {
 			value[index] = 0
 		}

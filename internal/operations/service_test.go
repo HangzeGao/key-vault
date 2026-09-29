@@ -7,7 +7,6 @@ import (
 
 	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/domain/policy"
-	"github.com/kvlt/key-vault/internal/features"
 	protocol "github.com/kvlt/key-vault/internal/protocol/ccsds"
 	"github.com/kvlt/key-vault/internal/securitystate"
 )
@@ -42,34 +41,22 @@ func (f fakeTC) OperationsStatus(context.Context, string) (*protocol.OperationsS
 	return &protocol.OperationsStatus{Status: "READY", Ready: f.ready, TCCurrent: &protocol.AssociationRuntimeState{SPI: 1, NextIVCounter: &counter}, TCRotation: &protocol.TCRotationState{Phase: protocol.TCRotationPrepared, TransactionID: ^uint64(0)}, Warnings: []string{}}, nil
 }
 
-type fakeDownlink struct{ value DownlinkState }
-
-func (f fakeDownlink) DownlinkStatus(context.Context) (DownlinkState, error) { return f.value, nil }
-
 func TestSnapshotAggregatesReadyStateWithoutSecrets(t *testing.T) {
 	counters := &access.Counters{}
 	counters.RejectToken()
-	service := New(Deps{Store: fakeStore{}, Resolver: fakeResolver(true), Policies: fakePolicies{}, TC: fakeTC{true}, Downlink: fakeDownlink{DownlinkState{Provisioned: true, CurrentGeneration: 8, CurrentObserved: true}}, Access: counters})
+	service := New(Deps{Store: fakeStore{}, Resolver: fakeResolver(true), Policies: fakePolicies{}, TC: fakeTC{true}, Access: counters})
 	value, err := service.Snapshot(context.Background(), "tenant")
 	if err != nil || !value.Ready || value.Status != "READY" || value.TC.Current.SPI != 1 || value.TCRotation.TransactionID != "18446744073709551615" || value.AccessRejections.TokenRejected != 1 {
 		t.Fatalf("value=%+v err=%v", value, err)
 	}
-	if features.Downlink {
-		if value.Downlink == nil || value.Checks["downlink"].Status != "ok" {
-			t.Fatalf("downlink build has no downlink status: %+v", value)
-		}
-	} else if value.Downlink != nil || value.Checks["downlink"].Status != "" {
-		t.Fatalf("TC-only status leaks downlink state: %+v", value)
+	if value.Checks["downlink"].Status != "" {
+		t.Fatalf("unsupported downlink check present: %+v", value)
 	}
 }
 func TestSnapshotDegradesAcrossBoundaries(t *testing.T) {
-	service := New(Deps{Store: fakeStore{true}, Resolver: fakeResolver(false), TC: fakeTC{false}, Downlink: fakeDownlink{}})
+	service := New(Deps{Store: fakeStore{true}, Resolver: fakeResolver(false), TC: fakeTC{false}})
 	value, err := service.Snapshot(context.Background(), "tenant")
-	wantStatus := "DEGRADED"
-	if features.Downlink {
-		wantStatus = "UNCONFIGURED"
-	}
-	if err != nil || value.Ready || value.Status != wantStatus || value.Checks["state"].Status != "degraded" || value.Checks["policy"].Status != "degraded" {
+	if err != nil || value.Ready || value.Status != "DEGRADED" || value.Checks["state"].Status != "degraded" || value.Checks["policy"].Status != "degraded" {
 		t.Fatalf("value=%+v err=%v", value, err)
 	}
 }

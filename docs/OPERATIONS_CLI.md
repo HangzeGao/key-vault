@@ -47,4 +47,4 @@ systemctl restart key-vault
 ```
 
 Provisioning and key transitions remain explicit offline tools:
-`ccsds-provision`, `ccsds-activate`, and `downlink-keyctl`.
+`ccsds-provision` and `ccsds-activate`.

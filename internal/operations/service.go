@@ -1,6 +1,6 @@
 // Package operations builds the single, non-secret read model used by local
 // operators. It owns readiness semantics so HTTP and CLI adapters do not need
-// to know how protocol, downlink, TPM, policy, and state-store details combine.
+// to know how protocol, TPM, policy, and state-store details combine.
 package operations
 
 import (
@@ -10,7 +10,6 @@ import (
 
 	"github.com/kvlt/key-vault/internal/auth/access"
 	"github.com/kvlt/key-vault/internal/domain/policy"
-	"github.com/kvlt/key-vault/internal/features"
 	protocol "github.com/kvlt/key-vault/internal/protocol/ccsds"
 	"github.com/kvlt/key-vault/internal/securitystate"
 )
@@ -24,18 +23,6 @@ type TCStatus interface {
 	OperationsStatus(context.Context, string) (*protocol.OperationsStatus, error)
 }
 
-type DownlinkStatus interface {
-	DownlinkStatus(context.Context) (DownlinkState, error)
-}
-
-type DownlinkState struct {
-	Provisioned        bool   `json:"provisioned"`
-	ActiveKEKSlot      uint8  `json:"active_kek_slot"`
-	CurrentGeneration  uint32 `json:"current_generation"`
-	CurrentObserved    bool   `json:"current_observed"`
-	PreviousGeneration uint32 `json:"previous_generation"`
-}
-
 type Resolver interface{ Ready() bool }
 type Policies interface {
 	Get(string) (*policy.Policy, error)
@@ -46,7 +33,6 @@ type Service struct {
 	resolver  Resolver
 	policies  Policies
 	tc        TCStatus
-	downlink  DownlinkStatus
 	access    *access.Counters
 	startTime time.Time
 }
@@ -56,13 +42,12 @@ type Deps struct {
 	Resolver Resolver
 	Policies Policies
 	TC       TCStatus
-	Downlink DownlinkStatus
 	Access   *access.Counters
 }
 
 func New(deps Deps) *Service {
 	return &Service{store: deps.Store, resolver: deps.Resolver, policies: deps.Policies,
-		tc: deps.TC, downlink: deps.Downlink, access: deps.Access, startTime: time.Now()}
+		tc: deps.TC, access: deps.Access, startTime: time.Now()}
 }
 
 type Check struct {
@@ -139,7 +124,6 @@ type Snapshot struct {
 		Recovery *Association `json:"recovery"`
 	} `json:"tc"`
 	TCRotation           *TCRotation            `json:"tc_rotation,omitempty"`
-	Downlink             *DownlinkState         `json:"downlink,omitempty"`
 	ProfileDigest        string                 `json:"profile_digest"`
 	Flight               *Flight                `json:"flight,omitempty"`
 	FlightReconciliation string                 `json:"flight_reconciliation"`
@@ -225,28 +209,6 @@ func (s *Service) Snapshot(ctx context.Context, tenantID string) (*Snapshot, err
 					RootVersion: f.RootVersion, PendingRootPresent: f.PendingRootPresent, ReceiveCount: f.ReceiveCount,
 					LastReceiveUS: f.LastReceiveUS, MaxReceiveUS: f.MaxReceiveUS, CycleLimitExceededCount: f.CycleLimitExceededCount, ClockAnomalyCount: f.ClockAnomalyCount}
 			}
-		}
-	}
-	if !features.Downlink {
-		return result, nil
-	}
-	if s.downlink == nil {
-		degrade("downlink", "raw downlink service unavailable")
-	} else if value, err := s.downlink.DownlinkStatus(ctx); err != nil {
-		degrade("downlink", "raw downlink state unavailable")
-	} else {
-		result.Downlink = &value
-		switch {
-		case !value.Provisioned:
-			result.Status = "UNCONFIGURED"
-			result.Ready = false
-			degrade("downlink", "raw downlink KEK set is not provisioned")
-		case value.CurrentGeneration == 0:
-			degrade("downlink", "raw downlink has no Current DEK batch")
-		case !value.CurrentObserved:
-			degrade("downlink", "Current DEK batch is not observed; next generation is blocked")
-		default:
-			ok("downlink", "raw downlink key state ready")
 		}
 	}
 	return result, nil

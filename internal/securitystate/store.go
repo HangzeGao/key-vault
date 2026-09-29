@@ -1,5 +1,5 @@
 // Package securitystate owns the durable ground-side security state required
-// by the CCSDS TC profile and optional raw downlink. It deliberately does not expose generic key
+// by the CCSDS TC profile. It deliberately does not expose generic key
 // vault, cluster, lease, upload/download, or outbox persistence.
 package securitystate
 
@@ -99,20 +99,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("securitystate: begin schema transaction: %w", err)
 	}
 	defer tx.Rollback()
-	var existingMeta, existingDownlink int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_meta'`).Scan(&existingMeta); err != nil {
-		return fmt.Errorf("securitystate: inspect schema mode: %w", err)
+	var legacyDownlinkTable int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='downlink_key_state'`).Scan(&legacyDownlinkTable); err != nil {
+		return fmt.Errorf("securitystate: inspect unsupported table: %w", err)
 	}
-	if existingMeta != 0 {
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='downlink_key_state'`).Scan(&existingDownlink); err != nil {
-			return fmt.Errorf("securitystate: inspect downlink mode: %w", err)
-		}
-		if !schemaModeMatches(existingDownlink) {
-			return errors.New("securitystate: database downlink mode does not match build")
-		}
+	if legacyDownlinkTable != 0 {
+		return errors.New("securitystate: unsupported downlink state table")
 	}
-	statements := append(append([]string(nil), schemaStatements...), downlinkSchemaStatements()...)
-	for _, statement := range statements {
+	for _, statement := range schemaStatements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("securitystate: apply schema: %w", err)
 		}

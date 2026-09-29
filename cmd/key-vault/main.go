@@ -52,7 +52,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer app.Store.Close()
-	defer app.CloseDownlink()
 	defer app.TPM.Close()
 
 	ccsdsH := ccsdsapi.New(app.CCSDSFrameSecurity)
@@ -60,7 +59,6 @@ func main() {
 	accessCounters := &access.Counters{}
 	operationsDeps := operations.Deps{Store: app.Store, Resolver: app.Resolver,
 		Policies: app.Policies, TC: app.CCSDSFrameSecurity, Access: accessCounters}
-	wireDownlink(app, ccsdsH, &operationsDeps)
 	operationsService := operations.New(operationsDeps)
 	opsH := ops.New(operationsService)
 
