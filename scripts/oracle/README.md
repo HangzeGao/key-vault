@@ -19,3 +19,16 @@ requires a matching `pyca/cryptography` runtime:
 python3 scripts/oracle/cryptography_vector_generator.py \
   testdata/crypto/cryptography-sm4-v1.tsv
 ```
+
+The separate `aes_downlink_vectors.py` pins cryptography 50.0.2 / OpenSSL 4.0.3
+and first checks NIST SP 800-38A F.1.5. It generates four normative blocks and
+379 independent 880-byte AES-256-ECB data fields, including every key bit and
+every data block. It never imports product code. Regenerate with:
+
+```bash
+python3 scripts/oracle/aes_downlink_vectors.py testdata/crypto/aes-downlink-v1.tsv
+```
+
+Both vector sets use the same 18-column manifest; file, row and generator
+SHA-256 are verified by their Go consumers. Committed offline fixtures suffice
+for normal gates; installing either generator's Python runtime is unnecessary.

@@ -1,9 +1,11 @@
-.PHONY: test go-security-gate c-hardening-gate external-vector-gate coverage-gate release-gate
+.PHONY: test go-security-gate c-hardening-gate external-vector-gate downlink-gate coverage-gate release-gate
 
 test:
 	go test ./internal/protocol/ccsds ./internal/securitystate \
 		./internal/crypto/aead ./internal/crypto/suite ./internal/domain/policy
 	$(MAKE) -C embedded/tc_security test
+	go test ./internal/downlink
+	$(MAKE) -C embedded/downlink_security test
 
 go-security-gate:
 	bash scripts/go_security_gate.sh
@@ -16,6 +18,9 @@ external-vector-gate:
 
 coverage-gate:
 	bash scripts/coverage_gate.sh
+
+downlink-gate:
+	bash scripts/downlink_gate.sh
 
 release-gate:
 	bash scripts/release_gate.sh

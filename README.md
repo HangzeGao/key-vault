@@ -11,7 +11,7 @@ This repository implements one strict pre-production contract:
 Operations are intentionally browser-free. Use the loopback-only `kvltctl`
 interface documented in [docs/OPERATIONS_CLI.md](docs/OPERATIONS_CLI.md).
 
-The current implementation is TC-only. Hardware-dependent data downlink encryption, DEK upload, RAW decryption and AOS frame handling are outside the active product contract. The last complete optional-downlink implementation is preserved at Git commit `b564c97` (for example, `git show b564c97:internal/downlink/service.go`).
+The software downlink core encrypts exactly 880 bytes with AES-256-ECB in flight C and decrypts that data field in ground Go. See [the software downlink contract](docs/SOFTWARE_DOWNLINK.md). Full AOS framing and authenticated AES key replacement are not yet integrated.
 
 ## Start here
 
@@ -20,6 +20,7 @@ The current implementation is TC-only. Hardware-dependent data downlink encrypti
 - [CCSDS link security contract](docs/CCSDS_LINK_SECURITY.md)
 - [TC ground/flight architecture](docs/TC_GROUND_FLIGHT_ARCHITECTURE.md)
 - [Cryptographic test design](docs/CRYPTOGRAPHIC_TEST_DESIGN.md)
+- [Software downlink data-field contract](docs/SOFTWARE_DOWNLINK.md)
 - [Mission Security Profile](examples/mission-security-profile.example.yaml)
 
 ## Development

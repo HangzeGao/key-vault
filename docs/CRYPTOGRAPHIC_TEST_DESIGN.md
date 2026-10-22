@@ -2,11 +2,13 @@
 
 状态：上线前强制测试合同
 
-适用范围：地面 Go 密码系统、星载 C TC 密码模块、共享密码材料及 CCSDS TC 组合
+适用范围：地面 Go 密码系统、星载 C TC 和 AES 软下行数据域模块、共享密码材料及 CCSDS TC 组合
 
 下位专项设计：[`TC_END_TO_END_TEST_DESIGN.md`](TC_END_TO_END_TEST_DESIGN.md)
 
-当前产物仅包含 TC。未确定搭载的星载数传加解密硬件及其密钥上注、下行解密不在本测试合同内。门禁仍须验证产物没有相关路由、权限、持久化表或链接符号。
+当前产物包含 TC 和独立 AES 软下行数据域核心。AES 核心遵循
+[`SOFTWARE_DOWNLINK.md`](SOFTWARE_DOWNLINK.md)，完整 AOS 帧布局和 GCM
+认证的 AES 密钥更新指令尚待接入。
 
 ## 1. 目的和约束
 
@@ -25,6 +27,7 @@
 | 用途 | 固定合同 | 安全属性 |
 | --- | --- | --- |
 | 普通 TC | SM4-HCTR，16 字节 tweak，无 Tag | 保密性、宽块扩散；不声明密码学认证 |
+| 软下行数据域 | AES-256-ECB，32 字节 key，880 字节/55 分组，无填充、IV、Tag | 保密性；不提供认证或抗重放 |
 | Recovery Root Prepare | SM4-GCM，12 字节 nonce，16 字节 Tag | 加密和认证 |
 | 工作密钥派生 | SP 800-108 Counter KDF，PRF=SM4-CMAC | 从随机 SM4 Root 做确定性域隔离派生 |
 | 普通 TC 工作材料 | 16 字节 SM4 key + 16 字节 HCTR hash key | 总安全强度不超过 128 位 Root |
@@ -303,7 +306,12 @@ SM4 block KAT
 | Root/TPM/权限/审计 | 单元、集成、越权、泄漏扫描、L3 | 物理 TPM、恢复演练 |
 | 大量或跨边界改动 | 完整 `make release-gate`，包含当前 TC 构建与对应加固测试 | 长时与目标硬件门禁 |
 
-若表中要求的 runner 尚不存在，相关代码变更必须先实现 runner，不能以“当前项目未支持”为理由跳过。算法组件测试不得以未实现硬件下行为理由跳过。
+若表中要求的 runner 尚不存在，相关代码变更必须先实现 runner，不能以“当前项目未支持”为理由跳过。
+
+AES 软下行核心的算法/缓冲区改动触发 L0、L1、ASan/UBSan、smoke fuzz、
+独立 C/Go 95% 覆盖率和完整 release gate。固定向量、实际 C 输出交给 Go
+解密及 ARMv7/QEMU 是必须执行的组件边界验证，不冒充尚未接入的 HTTP、
+密钥持久化或完整帧 L3。以后接入更新、持久化或 AOS 帧时必须补齐相应 L2/L3。
 
 ## 12. 执行入口和证据
 
@@ -312,6 +320,11 @@ SM4 block KAT
 ```bash
 make release-gate
 ```
+
+其中 `scripts/downlink_gate.sh` 对 AES 核心独立执行规范/Oracle 向量、实际
+C-to-Go 数据域链路、O0/O2、ASan/UBSan、故障自检、有界 fuzz 及 C/Go 各自
+95% 覆盖率；`scripts/armv7_gate.sh` 同时验证 ARMv7 实际密文流可由 Go 解密。
+AES 的 383 条向量和生成器哈希、覆盖率及加固结果写入发布证据。
 
 门禁必须失败即停，并生成机器可读证据。最终证据至少包含：
 

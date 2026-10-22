@@ -50,7 +50,24 @@ readonly COMMON=(src/sm4.c src/hctr.c src/kdf.c tests/test_differential.c)
     -Wall -Wextra -Wpedantic -Werror -march=armv7-a -mfpu=neon -mfloat-abi=hard \
     "${COMMON[@]}" src/sm4_armv7_neon.S -o "$BUILD_DIR/diff-armv7"
   "$qemu_arm" -L "$sysroot" "$BUILD_DIR/diff-armv7" "$VECTORS" | tee "$BUILD_DIR/armv7-result.txt"
+
+  "$cc_arm" "${sysroot_flag[@]}" -I"$ROOT_DIR/embedded/downlink_security/include" -std=c11 -O2 \
+    -Wall -Wextra -Wpedantic -Werror -march=armv7-a -mfpu=neon -mfloat-abi=hard \
+    "$ROOT_DIR/embedded/downlink_security/src/downlink_security.c" \
+    "$ROOT_DIR/embedded/downlink_security/tests/test_downlink.c" -o "$BUILD_DIR/downlink-armv7"
+  "$qemu_arm" -L "$sysroot" "$BUILD_DIR/downlink-armv7" \
+    "$ROOT_DIR/testdata/crypto/aes-downlink-v1.tsv" "$BUILD_DIR/downlink-armv7.bin"
+  # The Go consumer also authenticates the fixture manifest and compares the
+  # actual ARM ciphertext stream to the independent Oracle, then decrypts it.
+  (cd "$ROOT_DIR" && DLSEC_FLIGHT_OUTPUT="$BUILD_DIR/downlink-armv7.bin" \
+    "$go_bin" test -count=1 -run '^TestSharedVectors$' ./internal/downlink)
+  "$cc_arm" "${sysroot_flag[@]}" -I"$ROOT_DIR/embedded/downlink_security/include" -std=c11 -O2 \
+    -Wall -Wextra -Wpedantic -Werror -march=armv7-a -mfpu=neon -mfloat-abi=hard \
+    -DDLSEC_TEST_SELF_TEST_FAILURE=1 "$ROOT_DIR/embedded/downlink_security/src/downlink_security.c" \
+    "$ROOT_DIR/embedded/downlink_security/tests/test_selftest_failure.c" -o "$BUILD_DIR/downlink-failure-armv7"
+  "$qemu_arm" -L "$sysroot" "$BUILD_DIR/downlink-failure-armv7"
 )
 grep -q 'backend=software cases=256' "$BUILD_DIR/x86-result.txt"
 grep -q 'backend=armv7-neon cases=256' "$BUILD_DIR/armv7-result.txt"
 printf 'ARMv7 cross/QEMU three-way differential gate passed: 256 records\n'
+printf 'ARMv7 AES downlink C-to-Go gate passed: 383 records\n'

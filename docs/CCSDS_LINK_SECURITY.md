@@ -6,7 +6,9 @@
 
 - TC uplink：地面接收完整 TC 明帧，使用 Current/Next 的 SM4-HCTR 或 Recovery 的 SM4-GCM，返回完整密帧；星载 C 模块完成对称解密。
 
-星载数传加解密硬件未确定搭载，与之相关的密钥上注、下行解密及 AOS 适配均不属于当前产物；历史实现保留在 Git 记录中。
+AES 软下行数据域核心使用固定 32 字节密钥处理 880 字节（55 分组），详见
+[`SOFTWARE_DOWNLINK.md`](SOFTWARE_DOWNLINK.md)。AOS 完整帧布局和 GCM
+认证的 AES 更新指令尚未接入当前服务。
 
 ## 隔离关系
 

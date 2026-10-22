@@ -457,7 +457,7 @@ func TestAuditCorruptionAndWriteFailures(t *testing.T) {
 
 func TestStrictSchemaRejectsOldAndCorruptState(t *testing.T) {
 	ctx := context.Background()
-	if _, err := Open(ctx, string([]byte{'b', 'a', 'd', 0, 'p'})); err == nil {
+	if _, err := Open(ctx, filepath.Join(t.TempDir(), "bad\x00path")); err == nil {
 		t.Fatal("invalid filesystem path accepted")
 	}
 	if _, err := Open(ctx, t.TempDir()); err == nil {
