@@ -10,8 +10,8 @@ if [ "$MODE" != "serve" ] && [ "$MODE" != "provision-ccsds" ]; then
 fi
 
 cd "$SCRIPT_DIR"
-if [ "$(go env GOVERSION)" != "go1.26.6" ]; then
-  echo "Go 1.26.6 is required" >&2
+if [ "$(go env GOVERSION)" != "go1.26.10" ]; then
+  echo "Go 1.26.10 is required" >&2
   exit 2
 fi
 

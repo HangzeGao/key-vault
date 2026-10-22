@@ -3,7 +3,7 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-readonly REQUIRED_GO_VERSION="go1.26.6"
+readonly REQUIRED_GO_VERSION="go1.26.10"
 readonly GOVULNCHECK_VERSION="v1.7.0"
 
 go_bin="${GO_BIN:-$(command -v go || true)}"
