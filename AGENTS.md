@@ -6,6 +6,7 @@
 
 ## Mandatory delivery workflow
 
+- For every code change, check whether it affects the flight software interface manual: [Markdown](docs/FLIGHT_INTERFACE_MANUAL.md) and [Word](docs/星务端密码模块接口手册.docx). Check public entry points, required and optional callbacks, parameters, return values, call order, concurrency, persistence, and responsibility boundaries. If the contract changes, update both formats in the same change and verify that they agree. Keep the main text limited to interfaces used or implemented by flight software; place BSP helpers in an appendix and omit internal interfaces. State in the handoff whether the manuals were updated or why no update was needed.
 - Every task that changes code must end with one focused Git commit after the relevant verification passes. Do not leave completed code changes uncommitted, do not combine unrelated work in the same commit, and never stage unrelated user files.
 - Before committing, inspect `git status` and the staged diff, run `git diff --check`, and report the verification performed. Documentation-only changes requested as a durable project rule must also be committed.
 - After each commit, count commits on the current branch that are ahead of its upstream with `git rev-list --count @{upstream}..HEAD`. Push the current branch when that count reaches 5 or more. A successful push resets this delivery counter because the upstream catches up. If no upstream exists, publish the branch on the fifth local commit. Do not wait for a sixth commit.
