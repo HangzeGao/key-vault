@@ -42,7 +42,7 @@ readonly COMMON=(src/sm4.c src/hctr.c src/kdf.c tests/test_differential.c)
   fi
 
   make clean
-  make CC="$cc_arm" ARMV7_NEON=1 \
+  make CC="$cc_arm" AR="$("$cc_arm" -print-prog-name=ar)" ARMV7_NEON=1 \
     CFLAGS="$arm_cflags" all
   "$qemu_arm" -L "$sysroot" build/test_tc_security \
     "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"

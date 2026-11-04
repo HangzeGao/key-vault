@@ -10,7 +10,7 @@ readonly FUZZ_ITERATIONS="4096"
 readonly SANITIZERS="address,undefined"
 readonly SOURCES=(
   src/tc_security.c
-  src/tc_security_nvm.c
+  adapters/nvm/tc_security_nvm.c
   src/selftest.c
   src/sm4.c
   src/hctr.c
@@ -22,7 +22,7 @@ rm -rf -- "$BUILD_DIR"
 mkdir -p -- "$BUILD_DIR"
 
 common_flags=(
-  -I"$C_DIR/include" -I"$C_DIR/src"
+  -I"$C_DIR/include" -I"$C_DIR/src" -I"$C_DIR/adapters/nvm"
   -std=c11 -O1 -g -Wall -Wextra -Wpedantic -Werror
   -fno-omit-frame-pointer "-fsanitize=$SANITIZERS"
 )

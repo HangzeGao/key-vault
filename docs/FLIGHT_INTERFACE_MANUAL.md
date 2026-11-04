@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | 普通 TC | SM4-HCTR 解密、重放检查、Current/Next 切换 | 按任务规则校验明文，接收成功后执行指令 |
 | Recovery TC | SM4-GCM 认证解密、解析 Root Prepare | 原子持久化待生效根和重放状态 |
-| 状态恢复 | NVM 镜像编解码、双槽选择与修复计划 | 物理擦写、读回验证、保存可信 generation 下限 |
+| 状态恢复 | 校验星务传入的完整配置并恢复安全状态 | 选择有效持久化状态，恢复完整配置 |
 | 运行诊断 | 提供不含密钥的状态和耗时统计 | 将状态字段装入任务遥测 |
 
 ## 1. TC 初始化与生命周期
@@ -121,16 +121,18 @@ const char *tcsec_status_string(tcsec_status_t status);
 
 ## 5. 推荐接入顺序
 
-1. 上电后，BSP 读取 NVM 双槽及可信 generation 下限，选取有效配置；必要时按修复计划修复并验证。BSP 辅助接口见附录 A。
+1. 上电后，星务通过存储适配恢复完整配置。采用双槽 NVM 时，可使用附录 A 的镜像辅助库。
 2. 星务提供三个回调，以完整配置调用 `tcsec_init`；返回 `TCSEC_OK` 后才开放 TC 接收。
 3. 每帧调用 `tcsec_receive`。模块通过明文校验和原子持久化后，星务按返回码交付普通遥控明文。
 4. 在需要发布运行遥测时调用 `tcsec_get_runtime_status`；停用时调用 `tcsec_deinit`。
 
 运行与平台职责详见[星载密码运行闭环](FLIGHT_RUNTIME_CLOSURE.md)。
 
-## 附录 A BSP 持久化辅助接口
+## 附录 A 可选双槽镜像辅助接口
 
-接口定义：[tc_security_nvm.h](../embedded/tc_security/include/tc_security_nvm.h)。NVM 是断电后仍能保存数据的存储器。每个槽位镜像固定为 **175 字节**，解码后的 `tcsec_nvm_image_t` 包含 `generation` 和完整 `config`。
+TC 核心用 `make core` 构建。星务若采用本项目的双槽镜像格式，可另外用 `make nvm-adapter` 构建辅助库，由星务存储适配调用。静态链接时将辅助库放在核心库之前。
+
+接口定义：[tc_security_nvm.h](../embedded/tc_security/adapters/nvm/tc_security_nvm.h)。NVM 是断电后仍能保存数据的存储器。每个槽位镜像固定为 **175 字节**，解码后的 `tcsec_nvm_image_t` 包含 `generation` 和完整 `config`。
 
 | 接口 | 输入 | 输出及行为 |
 | --- | --- | --- |

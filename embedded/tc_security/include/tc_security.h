@@ -140,8 +140,10 @@ typedef int (*tcsec_plaintext_validator_fn)(void *user_context,
                                             const uint8_t *plaintext,
                                             size_t plaintext_length);
 
-/* The adapter atomically persists exactly one commit. It must not execute or
- * enqueue ordinary plaintext. root_prepare is non-NULL only for ROOT_PREPARE. */
+/* Flight software atomically persists one logical state change and returns
+ * only after verifying it. The core has no storage dependency. The callback
+ * must not execute or enqueue ordinary plaintext. root_prepare is non-NULL
+ * only for ROOT_PREPARE. */
 typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(void *user_context,
                                                        const tcsec_commit_t *commit);
 

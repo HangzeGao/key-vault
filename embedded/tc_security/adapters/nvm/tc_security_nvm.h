@@ -3,6 +3,8 @@
 
 #include "tc_security.h"
 
+/* Optional flight-side image adapter. The TC core builds without this header. */
+
 #ifdef __cplusplus
 extern "C" {
 #endif

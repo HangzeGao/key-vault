@@ -87,8 +87,15 @@ fail-closed SPI/configuration handling remain unconditional safety invariants.
 ECC/EDAC, memory scrubbing, MPU, watchdog, executable-image checking, and the
 physical NVM redundancy strategy remain platform/BSP responsibilities.
 
-`tc_security_nvm.h` supplies the fixed 175-byte, endian-stable two-slot state
-codec used at the BSP seam. Every slot carries a monotonic generation, Mission
+`make core` builds `build/libtc_security.a` without any storage adapter. The
+flight application restores a complete configuration for `tcsec_init` or `tcsec_reset`, and implements
+`commit_state` using its storage platform.
+
+`make nvm-adapter` builds the optional flight-side `build/libtc_security_nvm.a`.
+Add `adapters/nvm` to the application include path to use `tc_security_nvm.h`.
+When linking static archives, list the adapter before the core. The adapter
+provides the fixed 175-byte, endian-stable two-slot state codec. Every slot
+carries a monotonic generation, Mission
 Security Profile SHA-256 digest, CRC32C and its inverse. Decode validates the
 complete `tcsec_config_t`; selection accepts the newest valid slot, falls back
 after an interrupted/corrupt write, rejects ambiguous equal generations, and
