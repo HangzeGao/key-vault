@@ -727,15 +727,3 @@ tcsec_status_t tcsec_get_runtime_status(const tcsec_context_t *context,
 void tcsec_deinit(tcsec_context_t *context) {
     if (context != NULL) zeroize(context, sizeof(*context));
 }
-
-const char *tcsec_status_string(tcsec_status_t status) {
-    static const char *const names[] = {
-        "OK", "INVALID_ARGUMENT", "INVALID_CONFIGURATION", "FRAME_LENGTH_INVALID",
-        "FECF_INVALID", "ASSOCIATION_NOT_FOUND", "REPLAY_REJECTED",
-        "IV_FORWARD_JUMP_REJECTED", "AUTHENTICATION_FAILED", "OUTPUT_TOO_SMALL",
-        "PLAINTEXT_REJECTED", "ROOT_PREPARE_REJECTED", "PERSISTENCE_FAILED",
-        "STATE_INTEGRITY_FAILED", "EPOCH_PROMOTED", "ROOT_PREPARED",
-        "ROOT_ALREADY_PREPARED", "SELF_TEST_FAILED"
-    };
-    return (int)status >= 0 && status <= TCSEC_SELF_TEST_FAILED ? names[status] : "UNKNOWN";
-}

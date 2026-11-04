@@ -49,7 +49,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then dirty=true; fi
 fi
 source_manifest_hash="$({
-  find cmd examples internal scripts embedded/tc_security/src embedded/tc_security/include embedded/tc_security/adapters \
+  find cmd examples internal scripts embedded/tc_security/src embedded/tc_security/include embedded/tc_security/adapters embedded/tc_security/tools \
     embedded/tc_security/tests embedded/downlink_security/src embedded/downlink_security/include \
     embedded/downlink_security/tests -type f -print
   printf '%s\n' Makefile embedded/tc_security/Makefile embedded/downlink_security/Makefile start.sh go.mod go.sum

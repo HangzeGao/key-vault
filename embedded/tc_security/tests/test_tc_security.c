@@ -1,5 +1,6 @@
 #include "tc_security.h"
 #include "tc_security_nvm.h"
+#include "../tools/tc_security_diagnostics.h"
 #include "tc_security_kdf.h"
 #include "gcm.h"
 #include "hctr.h"

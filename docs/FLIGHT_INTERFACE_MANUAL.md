@@ -95,7 +95,6 @@ uint64_t monotonic_time_us(void *user_context);
 ```c
 tcsec_status_t tcsec_get_runtime_status(const tcsec_context_t *context,
                                         tcsec_runtime_status_t *status);
-const char *tcsec_status_string(tcsec_status_t status);
 ```
 
 运行状态包含自检状态、密码后端、配置摘要、Current/Next/Recovery SPI、安全 epoch、根版本、Pending 根标志，以及接收次数、最近/最大耗时、120 ms 上限超限次数和时钟异常次数。状态不含根密钥或工作密钥；自检锁定时仍会填充诊断状态，但返回 `TCSEC_SELF_TEST_FAILED`。星务负责遥测字段封装。

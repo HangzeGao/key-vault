@@ -271,7 +271,6 @@ tcsec_status_t tcsec_get_runtime_status(const tcsec_context_t *context,
 /* Deinitializes and zeroizes all roots, derived working keys, replay state,
  * callbacks, and caller binding in the context. */
 void tcsec_deinit(tcsec_context_t *context);
-const char *tcsec_status_string(tcsec_status_t status);
 
 #ifdef __cplusplus
 }

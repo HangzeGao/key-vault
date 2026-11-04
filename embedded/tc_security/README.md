@@ -25,7 +25,7 @@ production builds and is not release evidence.
 
 The integration surface is `tcsec_init`, `tcsec_reset`, `tcsec_receive`,
 `tcsec_get_runtime_status`, and `tcsec_deinit`.
-`tcsec_status_string` is a diagnostic helper. The required callback types are
+The status-to-string helper lives in `tools/tc_security_diagnostics.h`. The required callback types are
 `tcsec_plaintext_validator_fn`, `tcsec_state_commit_fn`, and
 `tcsec_monotonic_time_us_fn`.
 `tcsec_init` accepts them as one `tcsec_callbacks_t` value and copies that value

@@ -59,7 +59,7 @@ $(CORE_LIB): $(CORE_OBJECTS)
 $(NVM_LIB): $(BUILD_DIR)/tc_security_nvm.o
 	$(AR) rcs $@ $^
 
-$(TEST_BIN): tests/test_tc_security.c $(CORE_LIB) $(NVM_LIB) $(NVM_HEADER)
+$(TEST_BIN): tests/test_tc_security.c $(CORE_LIB) $(NVM_LIB) $(NVM_HEADER) tools/tc_security_diagnostics.h
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -I$(NVM_DIR) $(CFLAGS) \
 		tests/test_tc_security.c $(NVM_LIB) $(CORE_LIB) $(LDFLAGS) -o $@
