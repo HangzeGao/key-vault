@@ -2,7 +2,6 @@ package ccsds
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,17 +12,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const (
-	MissionProfileVersion = 1
-	FlightNVMImageVersion = 2
-	FlightNVMImageLength  = 175
-	flightNVMPayloadLen   = 123
-)
-
-var flightNVMMagic = [4]byte{'T', 'C', 'S', '2'}
+const MissionProfileVersion = 1
 
 // MissionSecurityProfile is the single controlled source used to provision
-// both ground security state and the initial flight NVM image. Its root fields
+// the ground security state and authenticated Recovery frame. Its root fields
 // are secret and must only be handled by the offline provisioning process.
 type MissionSecurityProfile struct {
 	FormatVersion uint16           `yaml:"format_version" json:"format_version"`
@@ -200,85 +192,10 @@ func (profile MissionSecurityProfile) RootPrepareCommand() (RootPrepareCommand, 
 		OrdinarySuiteID: suite.SM4HCTR, NewOperationalRoot: secrets.NextRoot}, header, nil
 }
 
-// MarshalInitialFlightNVM emits the deterministic initial two-slot payload
-// consumed by tcsec_nvm_decode. It includes Current and Recovery roots but not
-// the staged Next root; Next enters flight only through authenticated Recovery.
-func (profile MissionSecurityProfile) MarshalInitialFlightNVM(generation uint32) ([]byte, error) {
-	if generation == 0 {
-		return nil, errors.New("ccsds: NVM generation must be non-zero")
-	}
-	secrets, err := profile.Secrets()
-	if err != nil {
-		return nil, err
-	}
-	digest, _ := profile.Digest()
-	prefix, _ := decodeProfileHex(profile.TC.NoncePrefixHex, TCNoncePrefixLength)
-	recoveryPrefix, _ := decodeProfileHex(profile.TC.RecoveryNoncePrefixHex, TCNoncePrefixLength)
-	image := make([]byte, FlightNVMImageLength)
-	copy(image[:4], flightNVMMagic[:])
-	binary.BigEndian.PutUint16(image[4:6], FlightNVMImageVersion)
-	binary.BigEndian.PutUint16(image[6:8], flightNVMPayloadLen)
-	binary.BigEndian.PutUint32(image[8:12], generation)
-	copy(image[12:44], digest[:])
-	offset := 44
-	put16 := func(value uint16) { binary.BigEndian.PutUint16(image[offset:offset+2], value); offset += 2 }
-	put32 := func(value uint32) { binary.BigEndian.PutUint32(image[offset:offset+4], value); offset += 4 }
-	put64 := func(value uint64) { binary.BigEndian.PutUint64(image[offset:offset+8], value); offset += 8 }
-	put := func(value []byte) { copy(image[offset:offset+len(value)], value); offset += len(value) }
-	put16(profile.SpacecraftID)
-	put16(uint16(suite.SM4HCTR))
-	put(secrets.CurrentRoot)
-	put32(profile.TC.CurrentRootVersion)
-	put32(profile.TC.SecurityEpoch)
-	put16(profile.TC.CurrentSPI)
-	put(prefix)
-	put32(0)
-	put64(0)
-	image[offset] = 0
-	offset++ // ordinary replay
-	image[offset] = 0
-	offset++ // no pending root in initial image
-	put16(0)
-	put(make([]byte, 16))
-	put32(0)
-	put64(0)
-	put16(uint16(suite.SM4GCM))
-	put(secrets.RecoveryRoot)
-	put32(profile.TC.RecoveryRootVersion)
-	put16(profile.TC.RecoverySPI)
-	put(recoveryPrefix)
-	put32(0)
-	put64(0)
-	image[offset] = 0
-	offset++
-	if offset != FlightNVMImageLength-8 {
-		return nil, errors.New("ccsds: internal NVM image length mismatch")
-	}
-	checksum := crc32c(image[:offset])
-	binary.BigEndian.PutUint32(image[offset:offset+4], checksum)
-	binary.BigEndian.PutUint32(image[offset+4:offset+8], ^checksum)
-	return image, nil
-}
-
 func decodeProfileHex(value string, length int) ([]byte, error) {
 	decoded, err := hex.DecodeString(value)
 	if err != nil || len(decoded) != length {
 		return nil, fmt.Errorf("expected %d bytes of hexadecimal data", length)
 	}
 	return decoded, nil
-}
-
-func crc32c(data []byte) uint32 {
-	crc := ^uint32(0)
-	for _, value := range data {
-		crc ^= uint32(value)
-		for bit := 0; bit < 8; bit++ {
-			if crc&1 != 0 {
-				crc = crc>>1 ^ 0x82f63b78
-			} else {
-				crc >>= 1
-			}
-		}
-	}
-	return ^crc
 }

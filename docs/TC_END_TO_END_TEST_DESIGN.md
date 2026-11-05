@@ -11,7 +11,7 @@
 ```text
 HTTP API -> 地面 CCSDS 应用服务 -> SQLite SecurityState/测试 TPM
          -> 完整密帧传输 -> 编译后的星载 C 模块
-         -> 明文校验器 -> 原子 NVM 适配器 -> 明文或拒绝结果
+         -> 首个 Next 的内部明文校验 -> 原子 NVM 适配器 -> 明文或拒绝结果
 ```
 
 主场景不得直接调用内部加密函数、直接修改数据库状态、跳过 FECF，也不得用测试代码重新实现一份星载解密算法来代替 C 模块。
@@ -45,7 +45,7 @@ TC Primary Header(5) | Recovery SPI(2) | IV Counter(4)
 | 星务适配器 | 解密明文 | 按测控团队提供的规则校验包格式和允许范围 |
 | 星载 NVM 适配器 | 待提交状态 | 原子持久化；失败时不得释放明文或推进重放状态 |
 
-普通 TC 的安全性依赖“HCTR 解密后严格校验，再持久化，最后释放”。HCTR 提供宽块扩散但不提供完整性认证，所以明文校验器不是可选组件。
+Current 帧通过密码模块检查后先持久化 replay 再交付。首个 Next 帧还须通过内部明文校验才持久化切换。HCTR 提供宽块扩散，缺少完整性认证。
 
 重传合同固定为“再次保护、使用新 IV”：同一明帧每次调用 `tc:protect` 都分配新 Counter 并产生新密帧；密码系统不缓存密帧，也不实现 `Idempotency-Key`。测控链路重传同一逻辑帧时必须保持 TC 主导头中的帧序列号不变，星载 FARM/COP-1 或等价接收层负责阻止同一帧序列号重复交付。IV replay 只拒绝完全相同的旧密帧，不能替代帧序列号去重。
 
@@ -58,7 +58,7 @@ flowchart LR
     G --> K["Ephemeral swtpm / TPM adapter"]
     G -->|"Complete protected TC frame"| L["Telemetry & Control Link Adapter"]
     L -->|"Unmodified frame"| F["Compiled Flight C Harness"]
-    F --> V["Plaintext Validator Adapter"]
+    F --> V["Linked Next Command Policy"]
     F --> N["Atomic NVM Adapter"]
     F -->|"status + released plaintext metadata"| T
     N -->|"restart restore"| F
@@ -187,13 +187,14 @@ Harness 内部只保留以下适配器：
 3. 断言内存和持久化 replay 状态均未推进。
 4. 取消故障后重发同一帧，期望成功；这证明失败不会造成不可恢复失步。
 
-### 6.6 HCTR 篡改必须被明文规则拦截
+### 6.6 首个 Next 帧的明文规则
 
-1. 修改普通 HCTR 密文中的一位，并重新计算正确 FECF。
+1. 修改首个 Next 帧的 HCTR 密文中的一位，并重新计算正确 FECF。
 2. 期望 FECF 通过，但明文校验失败并返回 `PLAINTEXT_REJECTED`。
-3. 断言不释放明文、不提交 replay 状态。
+3. 断言不释放明文，不提交 replay 或切换状态。
+4. 另发一帧可解密、业务语义非法的 Current 帧。星务拒绝执行后，重放同一密帧仍被密码模块拒绝。
 
-这条用例必须使用测控团队提供的正式明文校验规则。HCTR 会把篡改扩散为整段不可控变化，但不能代替认证；该用例验证的是关闭式拒绝边界，不能只用“前两个字节固定”作为最终验收。
+Next 篡改用例必须使用测控团队提供的正式明文校验规则。HCTR 会把篡改扩散为整段不可控变化，但不能代替认证；该用例验证的是关闭式拒绝边界，不能只用“前两个字节固定”作为最终验收。
 
 ## 7. P0 拒绝矩阵
 
@@ -206,7 +207,7 @@ Harness 内部只保留以下适配器：
 | 重放已接收 IV | `REPLAY_REJECTED` | 否 | 否 |
 | 普通 IV 前跳 4097 | `IV_FORWARD_JUMP_REJECTED` | 否 | 否 |
 | 输出缓冲区过小 | `OUTPUT_TOO_SMALL` | 否 | 否 |
-| 解密后包格式非法 | `PLAINTEXT_REJECTED` | 否 | 否 |
+| 首个 Next 解密后未通过任务规则 | `PLAINTEXT_REJECTED` | 否 | 否 |
 | NVM 原子提交失败 | `PERSISTENCE_FAILED` | 否 | 否 |
 | Recovery Tag 篡改且 FECF 重新计算 | `AUTHENTICATION_FAILED` | 否 | 否 |
 | Recovery 新版本、Next SPI 或 epoch 不符合事务约束 | `ROOT_PREPARE_REJECTED` | 否 | 否 |
@@ -221,7 +222,7 @@ Harness 内部只保留以下适配器：
 - IV 接近 `uint32` 上限：达到耗尽边界后 fail closed，不环回。仅夹具初始化阶段可设置边界状态，业务断言仍必须走公开 API。
 - 最小数据域、最大合法数据域和大一字节的数据域。
 - Current、Next、Recovery 三条 replay 状态互不污染。
-- 在一个 context 的校验回调中嵌套调用另一个 context，验证无可变全局状态；同一 context 并发由星务串行化，不作为库内锁语义。
+- 在一个 context 的持久化回调中嵌套调用另一个 context，验证无可变全局状态；同一 context 并发由星务串行化，不作为库内锁语义。
 - Recovery 密文、Tag、SPI、IV 和事务字段逐项单点篡改。
 - C harness 使用 AddressSanitizer/UndefinedBehaviorSanitizer 运行全场景。
 - 连续长稳测试记录内存峰值、每帧耗时和状态写次数。
@@ -260,7 +261,7 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 
 ### 11.1 星地同源测试密钥装载
 
-`ccsds-provision` 只接受严格的 TC Mission Security Profile，导入 Current/Next/Recovery Root，并生成星载初始 NVM 镜像、Recovery Root Prepare 完整帧和哈希证据。运行时仍不存在明文密钥导出接口。
+`ccsds-provision` 只接受严格的 TC Mission Security Profile，导入 Current/Next/Recovery Root，并生成 Recovery Root Prepare 完整帧和哈希证据。星务通过受控首装工序灌装初始状态。
 
 ### 11.2 地面 epoch 切换的生产编排入口
 
@@ -272,13 +273,13 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 
 ### 11.4 正式明文校验规则
 
-密码系统无法判断一条业务指令是否危险，但星载端必须在 HCTR 解密后识别“结构上合法的遥控包”。必选校验合同、星务适配 seam、规则表输入和反例矩阵统一定义在 [`TC_PLAINTEXT_VALIDATION_DESIGN.md`](TC_PLAINTEXT_VALIDATION_DESIGN.md)，本测试设计不复制另一套字段规则。
+密码系统无法判断一条业务指令是否危险，但星载密码模块必须在切换前确认首个 Next 帧符合包结构和任务规则。必选校验合同、规则表输入和反例矩阵统一定义在 [`TC_PLAINTEXT_VALIDATION_DESIGN.md`](TC_PLAINTEXT_VALIDATION_DESIGN.md)，本测试设计不复制另一套字段规则。
 
-端到端测试必须链接星务生产校验实现，并至少覆盖固定 TC 主导头、唯一未分段 Space Packet、长度精确一致、`VCID -> APID -> 指令码` 白名单、参数范围、保留位和填充。测试桩中的 `CA FE` 魔数只能用于底层 C 模块机制测试，不能进入 L2/L3 或发布验收。任务级规则表及其正反样例未冻结前，HCTR 篡改用例不得标记为安全验收完成。
+端到端测试必须链接正式任务规则，并至少覆盖固定 TC 主导头、唯一未分段 Space Packet、长度精确一致、`VCID -> APID -> 指令码` 白名单、参数范围、保留位和填充。合成规则和合成指令只用于底层 C 模块机制测试。任务级规则表及其正反样例未冻结前，HCTR 篡改用例不得标记为安全验收完成。
 
 ### 11.5 真实板载适配器
 
-通用 C 模块已提供固定长度双槽 NVM codec，覆盖字节序、CRC32C/inverse、最高有效 generation 选择、掉电半写回退、位翻转和回滚 floor。发布前仍必须在目标 BSP 验收物理擦写、读回、可信 generation floor、时间预算和输出缓冲区管理。
+密码模块通过星务回调加载及提交完整逻辑状态。主机测试在回调边界注入中断、提交确认丢失、加载失败及完整性错误。目标板仍须验证实际存储格式、写入与读回、掉电恢复、回退保护、时间预算和输出缓冲区管理。
 
 ## 12. 完成定义
 
@@ -291,3 +292,16 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 - HCTR 篡改能被正式遥控包规则拒绝；
 - SM4-HCTR 普通链路和 SM4-GCM Recovery 链路均使用真实生产代码；
 - 物理 TPM 与目标星载板卡的硬件在环测试满足已分配的执行时间和资源预算。
+
+
+### 运行期主机进程恢复入口
+
+`scripts/tc_process_gate.sh` 由 release gate 强制执行，启动真实 HTTP 路由，
+地面使用 SQLite 保存关联与 IV，将实际 HTTP 输出密帧传给独立 C 进程。
+C 进程通过测试专用的持久回调保存逻辑状态，每次调用重新启动进程，验证
+提交前失败、提交后确认丢失、重启重放拒绝及状态丢失不自动首装。
+地面同时关闭并重开 SQLite，断言 IV 继续递增。
+
+该入口使用公开测试根和主机文件记录，不是板载存储驱动。三副本逐字节中断由
+C 逻辑模型覆盖。正式 Next 任务规则、真实 TPM、物理 NVM 和板级掉电仍按
+第 11、12 节完成任务验收，不能由这些机制测试代替。

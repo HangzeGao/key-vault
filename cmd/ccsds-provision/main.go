@@ -1,5 +1,5 @@
 // Command ccsds-provision consumes one controlled Mission Security Profile and
-// creates matching ground state, flight NVM, Recovery frame, and hash evidence.
+// creates matching ground state, a Recovery frame, and hash evidence.
 package main
 
 import (
@@ -33,7 +33,7 @@ const (
 func main() {
 	configPath := flag.String("config", "", "path to ground YAML configuration")
 	profilePath := flag.String("mission-profile", "", "path to the controlled Mission Security Profile")
-	artifactsDir := flag.String("artifacts-dir", "", "private directory for flight NVM, Recovery frame, and evidence")
+	artifactsDir := flag.String("artifacts-dir", "", "private directory for the Recovery frame and evidence")
 	flag.Parse()
 	if err := run(context.Background(), provisionOptions{configPath: *configPath,
 		profilePath: *profilePath, artifactsDir: *artifactsDir}); err != nil {
@@ -131,12 +131,7 @@ func run(ctx context.Context, options provisionOptions) error {
 	if err != nil {
 		return fmt.Errorf("create authenticated Recovery frame: %w", err)
 	}
-	flightNVM, err := profile.MarshalInitialFlightNVM(profile.TC.CurrentRootVersion)
-	if err != nil {
-		return err
-	}
-	defer clear(flightNVM)
-	if err := writeArtifacts(options.artifactsDir, *profile, digest, flightNVM, recoveryFrame.Frame); err != nil {
+	if err := writeArtifacts(options.artifactsDir, *profile, digest, recoveryFrame.Frame); err != nil {
 		return err
 	}
 	slog.Info("CCSDS mission provisioning complete", "mission_id", profile.MissionID,
@@ -263,7 +258,6 @@ type releaseEvidence struct {
 	MissionID           string `json:"mission_id"`
 	TenantID            string `json:"tenant_id"`
 	ProfileSHA256       string `json:"profile_sha256"`
-	FlightNVMSHA256     string `json:"flight_nvm_sha256"`
 	RecoveryFrameSHA256 string `json:"recovery_frame_sha256"`
 	CurrentSPI          uint16 `json:"current_spi"`
 	NextSPI             uint16 `json:"next_spi"`
@@ -273,15 +267,15 @@ type releaseEvidence struct {
 }
 
 func writeArtifacts(directory string, profile ccsds.MissionSecurityProfile, digest [32]byte,
-	flightNVM, recoveryFrame []byte) error {
+	recoveryFrame []byte) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return fmt.Errorf("create artifact directory: %w", err)
 	}
 	if err := os.Chmod(directory, 0o700); err != nil {
 		return fmt.Errorf("protect artifact directory: %w", err)
 	}
-	evidence := releaseEvidence{FormatVersion: 1, MissionID: profile.MissionID, TenantID: profile.TenantID,
-		ProfileSHA256: hex.EncodeToString(digest[:]), FlightNVMSHA256: digestBytes(flightNVM),
+	evidence := releaseEvidence{FormatVersion: 2, MissionID: profile.MissionID, TenantID: profile.TenantID,
+		ProfileSHA256:       hex.EncodeToString(digest[:]),
 		RecoveryFrameSHA256: digestBytes(recoveryFrame), CurrentSPI: profile.TC.CurrentSPI,
 		NextSPI: ccsds.NextSPI(profile.TC.CurrentSPI), RecoverySPI: profile.TC.RecoverySPI,
 		CurrentRootVersion: profile.TC.CurrentRootVersion, NextRootVersion: profile.TC.NextRootVersion}
@@ -294,7 +288,7 @@ func writeArtifacts(directory string, profile ccsds.MissionSecurityProfile, dige
 		name string
 		data []byte
 	}{
-		{"flight-tcsec.nvm", flightNVM}, {"root-prepare.tc", recoveryFrame},
+		{"root-prepare.tc", recoveryFrame},
 		// Evidence is installed last. Its hashes make any interrupted prior
 		// artifact replacement detectable on the next verification.
 		{"release-evidence.json", encodedEvidence},

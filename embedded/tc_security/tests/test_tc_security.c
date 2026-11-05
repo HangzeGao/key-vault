@@ -1,16 +1,35 @@
 #include "tc_security.h"
-#include "tc_security_nvm.h"
+#include "context_private.h"
 #include "../tools/tc_security_diagnostics.h"
 #include "tc_security_kdf.h"
 #include "gcm.h"
 #include "hctr.h"
 #include "sm4.h"
+#include "next_validation.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+/* Test-only cold restart and private inspection for fault injection. */
+static void cold_restart(tcsec_context_t *object) {
+    memset(object, 0, sizeof(*object));
+}
+static tcsec_private_context_t inspect(const tcsec_context_t *object) {
+    tcsec_private_context_t value;
+    memcpy(&value, object->_opaque, sizeof(value));
+    return value;
+}
+static void corrupt_epoch(tcsec_context_t *object) {
+    object->_opaque[offsetof(tcsec_private_context_t, current_epoch)] ^= 1u;
+}
+
 #define VECTOR_BUFFER_SIZE 4096u
+
+/* TEST ONLY: one ordinary Space Packet accepted by the synthetic policy. */
+static const uint8_t next_test_packet[16] = {
+    0x10, 0x42, 0xc0, 0x01, 0x00, 0x09, 0x01, 0x01
+};
 
 typedef struct {
     tcsec_suite_t suite;
@@ -34,18 +53,16 @@ typedef struct {
 } vector_t;
 
 typedef struct {
-    int accept_plaintext;
+    tcsec_config_t snapshot;
+    tcsec_context_t *context_to_corrupt_on_load;
     tcsec_commit_result_t result;
     uint32_t calls;
     tcsec_commit_kind_t last_kind;
     uint16_t last_spi;
     uint64_t transaction_id;
     tcsec_context_t *context_to_corrupt;
-    uint8_t *validated_plaintext;
-    size_t validated_plaintext_length;
-    uint8_t corrupt_context_during_validation;
+    uint8_t *plaintext_to_corrupt;
     uint8_t corrupt_context_during_commit;
-    uint8_t corrupt_plaintext_during_commit;
     uint64_t monotonic_time_us;
 } callbacks_t;
 
@@ -143,22 +160,20 @@ fail:
     return 0;
 }
 
-static int validate_plaintext(void *user,
-                              const uint8_t primary_header[TCSEC_PRIMARY_HEADER_LENGTH],
-                              const uint8_t *plaintext, size_t length) {
+static tcsec_commit_result_t commit_state(void *user, const tcsec_commit_t *commit) {
     callbacks_t *callbacks = (callbacks_t *)user;
-    callbacks->validated_plaintext = (uint8_t *)plaintext;
-    callbacks->validated_plaintext_length = length;
-    if (callbacks->corrupt_context_during_validation != 0u &&
+    callbacks->calls++;
+    callbacks->last_kind = commit->kind;
+    callbacks->last_spi = commit->spi;
+    if (commit->root_prepare != NULL) callbacks->transaction_id = commit->root_prepare->transaction_id;
+    if (callbacks->plaintext_to_corrupt != NULL) callbacks->plaintext_to_corrupt[0] ^= 1u;
+    if (callbacks->corrupt_context_during_commit != 0u &&
         callbacks->context_to_corrupt != NULL)
-        callbacks->context_to_corrupt->current_epoch ^= 1u;
-    return callbacks->accept_plaintext && primary_header[0] == 0x20u &&
-           length >= 2u && plaintext[0] == 0xcau && plaintext[1] == 0xfeu;
+        corrupt_epoch(callbacks->context_to_corrupt);
+    return callbacks->result;
 }
 
-static int validate_plaintext_reentrant(void *user,
-                                        const uint8_t primary_header[TCSEC_PRIMARY_HEADER_LENGTH],
-                                        const uint8_t *plaintext, size_t length) {
+static tcsec_commit_result_t commit_reentrant(void *user, const tcsec_commit_t *commit) {
     reentrant_callbacks_t *callbacks = (reentrant_callbacks_t *)user;
     if (callbacks->invoked == 0u) {
         callbacks->invoked = 1u;
@@ -167,24 +182,7 @@ static int validate_plaintext_reentrant(void *user,
             callbacks->secondary_plaintext, sizeof(callbacks->secondary_plaintext),
             &callbacks->secondary_result);
     }
-    return callbacks->base.accept_plaintext && primary_header[0] == 0x20u &&
-           length >= 2u && plaintext[0] == 0xcau && plaintext[1] == 0xfeu;
-}
-
-static tcsec_commit_result_t commit_state(void *user, const tcsec_commit_t *commit) {
-    callbacks_t *callbacks = (callbacks_t *)user;
-    callbacks->calls++;
-    callbacks->last_kind = commit->kind;
-    callbacks->last_spi = commit->spi;
-    if (commit->root_prepare != NULL) callbacks->transaction_id = commit->root_prepare->transaction_id;
-    if (callbacks->corrupt_plaintext_during_commit != 0u &&
-        callbacks->validated_plaintext != NULL &&
-        callbacks->validated_plaintext_length != 0u)
-        callbacks->validated_plaintext[0] ^= 1u;
-    if (callbacks->corrupt_context_during_commit != 0u &&
-        callbacks->context_to_corrupt != NULL)
-        callbacks->context_to_corrupt->current_epoch ^= 1u;
-    return callbacks->result;
+    return commit_state(&callbacks->base, commit);
 }
 
 static uint64_t monotonic_time_us(void *user) {
@@ -193,17 +191,26 @@ static uint64_t monotonic_time_us(void *user) {
     return callbacks->monotonic_time_us;
 }
 
+static tcsec_status_t load_snapshot(void *user, tcsec_config_t *config) {
+    const callbacks_t *callbacks = user;
+    *config = callbacks->snapshot;
+    if (callbacks->context_to_corrupt_on_load != NULL)
+        corrupt_epoch(callbacks->context_to_corrupt_on_load);
+    return TCSEC_OK;
+}
+
 static tcsec_status_t init_context(tcsec_context_t *context,
-                                   const tcsec_config_t *config,
-                                   tcsec_plaintext_validator_fn validator,
-                                   void *user_context) {
+                                  const tcsec_config_t *config,
+                                  callbacks_t *fixture) {
     const tcsec_callbacks_t callbacks = {
-        validator,
-        commit_state,
-        monotonic_time_us,
-        user_context
+        .load_state = load_snapshot,
+        .commit_state = commit_state,
+        .monotonic_time_us = monotonic_time_us,
+        .user_context = fixture,
     };
-    return tcsec_init(context, config, &callbacks);
+    cold_restart(context);
+    fixture->snapshot = *config;
+    return tcsec_init(context, &callbacks);
 }
 
 static uint16_t frame_crc(const uint8_t *data, size_t length) {
@@ -277,7 +284,7 @@ static void ordinary_config(tcsec_config_t *config, const vector_t *vector) {
 static int init_ordinary(tcsec_context_t *context, const vector_t *vector, callbacks_t *callbacks) {
     tcsec_config_t config;
     ordinary_config(&config, vector);
-    return init_context(context, &config, validate_plaintext, callbacks) == TCSEC_OK;
+    return init_context(context, &config, callbacks) == TCSEC_OK;
 }
 
 static void recovery_config(tcsec_config_t *config, const vector_t *vector) {
@@ -302,22 +309,22 @@ static void recovery_config(tcsec_config_t *config, const vector_t *vector) {
 static int init_recovery(tcsec_context_t *context, const vector_t *vector, callbacks_t *callbacks) {
     tcsec_config_t config;
     recovery_config(&config, vector);
-    return init_context(context, &config, validate_plaintext, callbacks) == TCSEC_OK;
+    return init_context(context, &config, callbacks) == TCSEC_OK;
 }
 
 static int init_recovery_restored(tcsec_context_t *context, const vector_t *vector,
                                   const tcsec_context_t *prepared, callbacks_t *callbacks) {
     tcsec_config_t config;
     recovery_config(&config, vector);
-    config.ordinary.pending_root_present = prepared->pending_root_present;
-    config.ordinary.pending_suite = prepared->next_suite;
-    memcpy(config.ordinary.pending_operational_root, prepared->pending_root,
-           prepared->pending_root_length);
-    config.ordinary.pending_operational_root_length = prepared->pending_root_length;
-    config.ordinary.pending_root_version = prepared->pending_root_version;
-    config.ordinary.pending_transaction_id = prepared->pending_transaction_id;
-    config.recovery.replay = prepared->recovery_replay;
-    return init_context(context, &config, validate_plaintext, callbacks) == TCSEC_OK;
+    config.ordinary.pending_root_present = inspect(prepared).pending_root_present;
+    config.ordinary.pending_suite = inspect(prepared).next_suite;
+    memcpy(config.ordinary.pending_operational_root, inspect(prepared).pending_root,
+           inspect(prepared).pending_root_length);
+    config.ordinary.pending_operational_root_length = inspect(prepared).pending_root_length;
+    config.ordinary.pending_root_version = inspect(prepared).pending_root_version;
+    config.ordinary.pending_transaction_id = inspect(prepared).pending_transaction_id;
+    config.recovery.replay = inspect(prepared).recovery_replay;
+    return init_context(context, &config, callbacks) == TCSEC_OK;
 }
 
 static int test_sm4_hctr(void) {
@@ -451,7 +458,7 @@ static int test_low_level_rejections(void) {
         tcsec_derive_recovery_key(block, 16u, 1u, TCSEC_SUITE_SM4_GCM,
                                   1u, 1u, output, 15u) == 0)
         return 0;
-    for (status = TCSEC_OK; status <= TCSEC_SELF_TEST_FAILED;
+    for (status = TCSEC_OK; status <= TCSEC_PROFILE_MISMATCH;
          status = (tcsec_status_t)(status + 1))
         if (strcmp(tcsec_status_string(status), "UNKNOWN") == 0) return 0;
     return strcmp(tcsec_status_string((tcsec_status_t)-1), "UNKNOWN") == 0 &&
@@ -461,57 +468,62 @@ static int test_low_level_rejections(void) {
 static int test_strict_configuration(const char *path) {
     vector_t vector;
     tcsec_config_t config;
-    tcsec_context_t context;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
-    tcsec_callbacks_t invalid_callbacks = {validate_plaintext, NULL, monotonic_time_us, &callbacks};
+    tcsec_context_t context = {0};
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
+    tcsec_callbacks_t invalid_callbacks = {.load_state = load_snapshot};
+    const tcsec_callbacks_t missing_load = {.commit_state = commit_state};
     if (!load_vector(path, &vector)) return 0;
     ordinary_config(&config, &vector);
-    if (tcsec_init(&context, &config, NULL) != TCSEC_INVALID_ARGUMENT ||
-        tcsec_init(&context, &config, &invalid_callbacks) != TCSEC_INVALID_ARGUMENT)
+    if (tcsec_init(&context, NULL) != TCSEC_INVALID_ARGUMENT ||
+        tcsec_init(&context, &missing_load) != TCSEC_MISSING_CALLBACK ||
+        tcsec_init(&context, &invalid_callbacks) != TCSEC_MISSING_CALLBACK)
         return 0;
+    config.ordinary.spacecraft_id = 0x0400u;
+    if (init_context(&context, &config, &callbacks) !=
+        TCSEC_INVALID_CONFIGURATION) return 0;
     ordinary_config(&config, &vector);
     config.ordinary.pending_root_present = 1u;
-    if (init_context(&context, &config, validate_plaintext, &callbacks) !=
+    if (init_context(&context, &config, &callbacks) !=
         TCSEC_INVALID_CONFIGURATION) return 0;
     ordinary_config(&config, &vector);
     config.ordinary.pending_root_version = 1u;
-    if (init_context(&context, &config, validate_plaintext, &callbacks) !=
+    if (init_context(&context, &config, &callbacks) !=
         TCSEC_INVALID_CONFIGURATION) return 0;
     ordinary_config(&config, &vector);
     config.ordinary.current_epoch = UINT32_MAX;
-    if (init_context(&context, &config, validate_plaintext, &callbacks) !=
+    if (init_context(&context, &config, &callbacks) !=
         TCSEC_INVALID_CONFIGURATION) return 0;
     ordinary_config(&config, &vector);
     config.recovery.spi = (uint16_t)(config.ordinary.current_spi + 1u);
-    if (init_context(&context, &config, validate_plaintext, &callbacks) !=
+    if (init_context(&context, &config, &callbacks) !=
         TCSEC_INVALID_CONFIGURATION) return 0;
     return 1;
 }
 
 static int test_context_fault_detection(const char *path) {
     vector_t vector;
-    tcsec_context_t context;
+    tcsec_context_t context = {0};
     tcsec_result_t result;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
     if (!load_vector(path, &vector) ||
         !init_ordinary(&context, &vector, &callbacks)) return 0;
-    context.current_epoch ^= 1u;
+    corrupt_epoch(&context);
     if (tcsec_receive(&context, vector.protected_frame,
                       vector.protected_frame_length, plaintext,
                       sizeof(plaintext), &result) !=
         TCSEC_STATE_INTEGRITY_FAILED) return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
     return 1;
 }
 
 static int test_runtime_status(const char *path) {
     vector_t vector;
     tcsec_config_t replacement;
-    tcsec_context_t context;
+    tcsec_context_t context = {0};
     tcsec_result_t result;
     tcsec_runtime_status_t status;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
     if (!load_vector(path, &vector) || !init_ordinary(&context, &vector, &callbacks) ||
         tcsec_get_runtime_status(&context, &status) != TCSEC_OK ||
@@ -521,7 +533,7 @@ static int test_runtime_status(const char *path) {
         status.receive_count != 0u || status.current_spi != vector.spi ||
         status.next_spi != (uint16_t)(vector.spi + 1u) ||
         status.recovery_spi != 0x7002u ||
-        memcmp(status.profile_digest, context.profile_digest,
+        memcmp(status.profile_digest, inspect(&context).profile_digest,
                TCSEC_PROFILE_DIGEST_LENGTH) != 0)
         return 0;
     if (tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
@@ -533,18 +545,61 @@ static int test_runtime_status(const char *path) {
         return 0;
     ordinary_config(&replacement, &vector);
     replacement.profile_digest[0] ^= 1u;
-    if (tcsec_reset(&context, &replacement) != TCSEC_INVALID_CONFIGURATION)
+    callbacks.snapshot = replacement;
+    if (tcsec_reset(&context) != TCSEC_PROFILE_MISMATCH)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
     return tcsec_get_runtime_status(NULL, &status) == TCSEC_INVALID_ARGUMENT &&
            tcsec_get_runtime_status(&context, NULL) == TCSEC_INVALID_ARGUMENT;
+}
+
+static int test_receive_without_clock(const char *path) {
+    vector_t vector;
+    tcsec_config_t config;
+    tcsec_context_t context = {0};
+    tcsec_result_t result;
+    tcsec_runtime_status_t status;
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_PERSISTENCE_FAILED};
+    const tcsec_callbacks_t platform = {
+        .load_state = load_snapshot, .commit_state = commit_state, .user_context = &callbacks,
+    };
+    uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
+    if (!load_vector(path, &vector)) return 0;
+    ordinary_config(&config, &vector);
+    callbacks.snapshot = config;
+    if (tcsec_init(&context, &platform) != TCSEC_OK ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      plaintext, sizeof(plaintext), &result) != TCSEC_PERSISTENCE_FAILED ||
+        result.plaintext_length != 0u || callbacks.calls != 1u)
+        return 0;
+
+    callbacks.result = TCSEC_COMMIT_NEW;
+    if (tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      plaintext, sizeof(plaintext), &result) != TCSEC_RECEPTION_PAUSED ||
+        result.plaintext_length != 0u || callbacks.calls != 1u ||
+        tcsec_reset(&context) != TCSEC_OK ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      plaintext, sizeof(plaintext), &result) != TCSEC_OK ||
+        result.plaintext_length != vector.plaintext_length ||
+        memcmp(plaintext, vector.plaintext, vector.plaintext_length) != 0 ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      plaintext, sizeof(plaintext), &result) != TCSEC_REPLAY_REJECTED ||
+        callbacks.calls != 2u ||
+        tcsec_get_runtime_status(&context, &status) != TCSEC_OK ||
+        status.receive_count != 2u || status.last_receive_us != 0u ||
+        status.max_receive_us != 0u || status.cycle_limit_exceeded_count != 0u ||
+        status.clock_anomaly_count != 0u)
+        return 0;
+
+    cold_restart(&context);
+    return 1;
 }
 
 static int test_reset_transaction(const char *path) {
     vector_t vector;
     tcsec_config_t replacement;
-    tcsec_context_t context;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
+    tcsec_context_t context = {0};
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
     tcsec_result_t result;
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
     if (!load_vector(path, &vector) ||
@@ -552,155 +607,47 @@ static int test_reset_transaction(const char *path) {
 
     ordinary_config(&replacement, &vector);
     replacement.ordinary.current_epoch = UINT32_MAX;
-    if (tcsec_reset(&context, &replacement) != TCSEC_INVALID_CONFIGURATION ||
-        context.initialized == 0u || context.current_spi != vector.spi ||
-        context.current_epoch != vector.security_epoch ||
-        context.callbacks.validate_plaintext != validate_plaintext ||
-        context.callbacks.commit_state != commit_state ||
-        context.callbacks.user_context != &callbacks)
+    callbacks.snapshot = replacement;
+    if (tcsec_reset(&context) != TCSEC_INVALID_CONFIGURATION ||
+        inspect(&context).initialized == 0u || inspect(&context).current_spi != vector.spi ||
+        inspect(&context).current_epoch != vector.security_epoch ||
+        inspect(&context).callbacks.commit_state != commit_state ||
+        inspect(&context).callbacks.user_context != &callbacks)
         return 0;
 
     if (tcsec_receive(&context, vector.protected_frame,
                       vector.protected_frame_length, plaintext,
-                      sizeof(plaintext), &result) != TCSEC_OK ||
-        callbacks.calls != 1u) return 0;
+                      sizeof(plaintext), &result) != TCSEC_RECEPTION_PAUSED ||
+        result.plaintext_length != 0u || callbacks.calls != 0u) return 0;
 
-    ordinary_config(&replacement, &vector);
-    if (tcsec_reset(&context, &replacement) != TCSEC_OK ||
-        callbacks.calls != 1u || context.current_replay.seen != 0u ||
-        context.callbacks.validate_plaintext != validate_plaintext ||
-        context.callbacks.commit_state != commit_state ||
-        context.callbacks.user_context != &callbacks)
+    ordinary_config(&callbacks.snapshot, &vector);
+    if (tcsec_reset(&context) != TCSEC_OK ||
+        callbacks.calls != 0u || inspect(&context).current_replay.seen != 0u ||
+        inspect(&context).callbacks.commit_state != commit_state ||
+        inspect(&context).callbacks.user_context != &callbacks)
         return 0;
     if (tcsec_receive(&context, vector.protected_frame,
                       vector.protected_frame_length, plaintext,
                       sizeof(plaintext), &result) != TCSEC_OK ||
-        callbacks.calls != 2u ||
+        callbacks.calls != 1u ||
         memcmp(plaintext, vector.plaintext, vector.plaintext_length) != 0)
         return 0;
 
-    tcsec_deinit(&context);
-    return tcsec_reset(&context, &replacement) == TCSEC_INVALID_ARGUMENT;
-}
-
-static int test_nvm_two_slot_recovery(const char *path) {
-    vector_t vector;
-    tcsec_nvm_image_t first;
-    tcsec_nvm_image_t second;
-    tcsec_nvm_image_t decoded;
-    tcsec_nvm_repair_plan_t repair;
-    tcsec_context_t context;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
-    tcsec_result_t result;
-    uint8_t slot0[TCSEC_NVM_IMAGE_LENGTH];
-    uint8_t slot1[TCSEC_NVM_IMAGE_LENGTH];
-    uint8_t corrupt[TCSEC_NVM_IMAGE_LENGTH];
-    uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
-    size_t slot0_length = 0u;
-    size_t slot1_length = 0u;
-    uint8_t selected = 0xffu;
-    if (!load_vector(path, &vector)) return 0;
-    memset(&first, 0, sizeof(first));
-    first.generation = 7u;
-    ordinary_config(&first.config, &vector);
-    if (tcsec_nvm_encode(NULL, slot0, sizeof(slot0), &slot0_length) != TCSEC_INVALID_ARGUMENT ||
-        tcsec_nvm_encode(&first, NULL, sizeof(slot0), &slot0_length) != TCSEC_INVALID_ARGUMENT ||
-        tcsec_nvm_encode(&first, slot0, sizeof(slot0), NULL) != TCSEC_INVALID_ARGUMENT ||
-        tcsec_nvm_encode(&first, slot0, sizeof(slot0) - 1u, &slot0_length) != TCSEC_OUTPUT_TOO_SMALL ||
-        tcsec_nvm_encode(&first, slot0, sizeof(slot0), &slot0_length) != TCSEC_OK ||
-        slot0_length != TCSEC_NVM_IMAGE_LENGTH ||
-        tcsec_nvm_decode(NULL, slot0_length, 0u, &decoded) != TCSEC_INVALID_ARGUMENT ||
-        tcsec_nvm_decode(slot0, slot0_length, 0u, NULL) != TCSEC_INVALID_ARGUMENT ||
-        tcsec_nvm_decode(slot0, slot0_length, 7u, &decoded) != TCSEC_OK ||
-        decoded.generation != first.generation ||
-        memcmp(decoded.config.profile_digest, first.config.profile_digest,
-               sizeof(first.config.profile_digest)) != 0 ||
-        decoded.config.ordinary.current_spi != vector.spi ||
-        decoded.config.ordinary.root_version != vector.root_version)
-        return 0;
-    if (init_context(&context, &decoded.config, validate_plaintext, &callbacks) != TCSEC_OK ||
+    callbacks.context_to_corrupt_on_load = &context;
+    if (tcsec_reset(&context) != TCSEC_STATE_INTEGRITY_FAILED ||
+        tcsec_reset(&context) != TCSEC_STATE_INTEGRITY_FAILED ||
         tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
-                      plaintext, sizeof(plaintext), &result) != TCSEC_OK)
+                      plaintext, sizeof(plaintext), &result) != TCSEC_STATE_INTEGRITY_FAILED ||
+        callbacks.calls != 1u)
         return 0;
-    tcsec_deinit(&context);
-
-    if (tcsec_nvm_decode(slot0, slot0_length, 8u, &decoded) != TCSEC_STATE_INTEGRITY_FAILED ||
-        tcsec_nvm_decode(slot0, slot0_length - 1u, 0u, &decoded) != TCSEC_STATE_INTEGRITY_FAILED)
-        return 0;
-    memcpy(corrupt, slot0, sizeof(corrupt)); corrupt[60] ^= 1u;
-    if (tcsec_nvm_decode(corrupt, sizeof(corrupt), 0u, &decoded) != TCSEC_STATE_INTEGRITY_FAILED)
-        return 0;
-    memcpy(corrupt, slot0, sizeof(corrupt)); corrupt[0] ^= 1u;
-    if (tcsec_nvm_decode(corrupt, sizeof(corrupt), 0u, &decoded) != TCSEC_STATE_INTEGRITY_FAILED)
-        return 0;
-
-    second = first;
-    second.generation = 8u;
-    second.config.ordinary.replay.seen = 1u;
-    second.config.ordinary.replay.highest_iv = vector.iv_counter;
-    second.config.ordinary.replay.bitmap = 1u;
-    if (tcsec_nvm_encode(&second, slot1, sizeof(slot1), &slot1_length) != TCSEC_OK ||
-        tcsec_nvm_select_latest(slot0, slot0_length, slot1, slot1_length, 7u,
-                                &decoded, &selected) != TCSEC_OK ||
-        selected != 1u || decoded.generation != 8u)
-        return 0;
-    memcpy(corrupt, slot1, sizeof(corrupt)); corrupt[90] ^= 1u;
-    if (tcsec_nvm_select_latest(slot0, slot0_length, corrupt, sizeof(corrupt), 7u,
-                                &decoded, &selected) != TCSEC_OK ||
-        selected != 0u || decoded.generation != 7u)
-        return 0;
-    if (tcsec_nvm_plan_repair(slot0, slot0_length, corrupt, sizeof(corrupt), 7u,
-                              &decoded, &selected, &repair) != TCSEC_OK ||
-        repair.required != 1u || repair.target_slot != 1u || repair.generation != 8u ||
-        tcsec_nvm_decode(repair.encoded, sizeof(repair.encoded), 8u, &decoded) != TCSEC_OK ||
-        decoded.generation != 8u ||
-        tcsec_nvm_plan_repair(slot0, slot0_length, slot1, slot1_length, 7u,
-                              &decoded, &selected, &repair) != TCSEC_OK || repair.required != 0u ||
-        tcsec_nvm_plan_repair(slot0, slot0_length, slot1, slot1_length, 7u,
-                              NULL, &selected, &repair) != TCSEC_INVALID_ARGUMENT)
-        return 0;
-    if (tcsec_nvm_select_latest(corrupt, sizeof(corrupt), corrupt, sizeof(corrupt), 7u,
-                                &decoded, &selected) != TCSEC_STATE_INTEGRITY_FAILED ||
-        tcsec_nvm_select_latest(slot0, slot0_length, slot1, slot1_length, 0u,
-                                NULL, &selected) != TCSEC_INVALID_ARGUMENT ||
-        tcsec_nvm_select_latest(slot0, slot0_length, slot1, slot1_length, 0u,
-                                &decoded, NULL) != TCSEC_INVALID_ARGUMENT)
-        return 0;
-
-    second = first;
-    second.config.recovery.root_version++;
-    if (tcsec_nvm_encode(&second, slot1, sizeof(slot1), &slot1_length) != TCSEC_OK ||
-        tcsec_nvm_select_latest(slot0, slot0_length, slot1, slot1_length, 7u,
-                                &decoded, &selected) != TCSEC_STATE_INTEGRITY_FAILED)
-        return 0;
-    second = first;
-    second.generation = 0u;
-    if (tcsec_nvm_encode(&second, slot1, sizeof(slot1), &slot1_length) != TCSEC_INVALID_CONFIGURATION)
-        return 0;
-    second = first;
-    memset(second.config.profile_digest, 0, sizeof(second.config.profile_digest));
-    if (tcsec_nvm_encode(&second, slot1, sizeof(slot1), &slot1_length) != TCSEC_INVALID_CONFIGURATION)
-        return 0;
-    second = first;
-    second.config.ordinary.pending_root_present = 1u;
-    second.config.ordinary.pending_suite = TCSEC_SUITE_SM4_HCTR;
-    memcpy(second.config.ordinary.pending_operational_root, vector.root, TCSEC_ROOT_KEY_LENGTH);
-    second.config.ordinary.pending_operational_root[0] ^= 1u;
-    second.config.ordinary.pending_operational_root_length = TCSEC_ROOT_KEY_LENGTH;
-    second.config.ordinary.pending_root_version = vector.root_version + 1u;
-    second.config.ordinary.pending_transaction_id = UINT64_C(0x1122334455667788);
-    if (tcsec_nvm_encode(&second, slot1, sizeof(slot1), &slot1_length) != TCSEC_OK ||
-        tcsec_nvm_decode(slot1, slot1_length, 0u, &decoded) != TCSEC_OK ||
-        decoded.config.ordinary.pending_root_present != 1u ||
-        decoded.config.ordinary.pending_transaction_id != UINT64_C(0x1122334455667788))
-        return 0;
-    return 1;
+    cold_restart(&context);
+    return tcsec_reset(&context) == TCSEC_NOT_INITIALIZED;
 }
 
 static int test_ordinary_vector(const char *path) {
     vector_t vector;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
-    tcsec_context_t context;
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
+    tcsec_context_t context = {0};
     tcsec_result_t result;
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
     uint8_t next_frame[TCSEC_MAX_FRAME_LENGTH];
@@ -722,11 +669,10 @@ static int test_ordinary_vector(const char *path) {
                                   vector.security_epoch + 1u, vector.root_version,
                                   next_key, sizeof(next_key)) != 0 ||
         !build_ordinary_frame(vector.suite, next_key, vector.prefix,
-                              (uint16_t)(vector.spi + 1u), 1u, vector.plaintext,
-                              vector.plaintext_length, next_frame, &next_length)) return 0;
+                              (uint16_t)(vector.spi + 1u), 1u, next_test_packet, sizeof(next_test_packet), next_frame, &next_length)) return 0;
     status = tcsec_receive(&context, next_frame, next_length, plaintext, sizeof(plaintext), &result);
     if (status != TCSEC_EPOCH_PROMOTED || result.security_epoch != vector.security_epoch + 1u ||
-        callbacks.last_kind != TCSEC_COMMIT_EPOCH_PROMOTION || context.current_spi != vector.spi + 1u)
+        callbacks.last_kind != TCSEC_COMMIT_EPOCH_PROMOTION || inspect(&context).current_spi != vector.spi + 1u)
         return 0;
     if (tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
                       plaintext, sizeof(plaintext), &result) != TCSEC_ASSOCIATION_NOT_FOUND) return 0;
@@ -737,21 +683,13 @@ static int test_ordinary_vector(const char *path) {
         tcsec_receive(&context, corrupted, vector.protected_frame_length,
                       plaintext, sizeof(plaintext), &result) != TCSEC_FECF_INVALID) return 0;
 
-    callbacks.accept_plaintext = 0;
-    callbacks.calls = 0u;
-    if (!init_ordinary(&context, &vector, &callbacks) ||
-        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
-                      plaintext, sizeof(plaintext), &result) != TCSEC_PLAINTEXT_REJECTED ||
-        callbacks.calls != 0u) return 0;
-
-    callbacks.accept_plaintext = 1;
     callbacks.result = TCSEC_COMMIT_PERSISTENCE_FAILED;
     callbacks.calls = 0u;
     memset(plaintext, 0xa5, sizeof(plaintext));
     if (!init_ordinary(&context, &vector, &callbacks) ||
         tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
                       plaintext, sizeof(plaintext), &result) != TCSEC_PERSISTENCE_FAILED ||
-        callbacks.calls != 1u || context.current_replay.seen != 0u || plaintext[0] != 0u) return 0;
+        callbacks.calls != 1u || inspect(&context).current_replay.seen != 0u || plaintext[0] != 0u) return 0;
 
     callbacks.result = TCSEC_COMMIT_NEW;
     if (tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
@@ -763,15 +701,15 @@ static int test_ordinary_vector(const char *path) {
         !init_ordinary(&context, &vector, &callbacks) ||
         tcsec_receive(&context, far_frame, far_length, plaintext, sizeof(plaintext), &result) !=
             TCSEC_IV_FORWARD_JUMP_REJECTED) return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
     return 1;
 }
 
 static int test_receive_boundaries_and_replay_motion(const char *path) {
     vector_t vector;
     tcsec_config_t config;
-    tcsec_context_t context;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
+    tcsec_context_t context = {0};
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
     tcsec_result_t result;
     uint8_t frame[TCSEC_MAX_FRAME_LENGTH];
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
@@ -779,7 +717,7 @@ static int test_receive_boundaries_and_replay_motion(const char *path) {
     size_t frame_length;
     if (!load_vector(path, &vector)) return 0;
     ordinary_config(&config, &vector);
-    if (init_context(&context, &config, validate_plaintext, &callbacks) != TCSEC_OK)
+    if (init_context(&context, &config, &callbacks) != TCSEC_OK)
         return 0;
     memcpy(frame, vector.protected_frame, vector.protected_frame_length);
     frame[3] ^= 1u;
@@ -800,16 +738,15 @@ static int test_receive_boundaries_and_replay_motion(const char *path) {
         tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
                       plaintext, vector.plaintext_length - 1u, &result) != TCSEC_OUTPUT_TOO_SMALL)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.accept_plaintext = 1;
     callbacks.result = TCSEC_COMMIT_NEW;
     ordinary_config(&config, &vector);
     config.ordinary.replay.highest_iv = 100u;
     config.ordinary.replay.bitmap = 1u;
     config.ordinary.replay.seen = 1u;
-    if (init_context(&context, &config, validate_plaintext, &callbacks) != TCSEC_OK ||
+    if (init_context(&context, &config, &callbacks) != TCSEC_OK ||
         tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
                                   vector.suite, vector.spi, vector.security_epoch,
                                   vector.root_version, working_key,
@@ -830,55 +767,44 @@ static int test_receive_boundaries_and_replay_motion(const char *path) {
         tcsec_receive(&context, frame, frame_length, plaintext,
                       sizeof(plaintext), &result) != TCSEC_REPLAY_REJECTED)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
 
     ordinary_config(&config, &vector);
     config.ordinary.replay.highest_iv = 100u;
     config.ordinary.replay.bitmap = 1u;
     config.ordinary.replay.seen = 1u;
-    if (init_context(&context, &config, validate_plaintext, &callbacks) != TCSEC_OK ||
+    if (init_context(&context, &config, &callbacks) != TCSEC_OK ||
         !build_ordinary_frame(vector.suite, working_key, vector.prefix, vector.spi,
                               5000u, vector.plaintext, vector.plaintext_length,
                               frame, &frame_length) ||
         tcsec_receive(&context, frame, frame_length, plaintext,
                       sizeof(plaintext), &result) != TCSEC_IV_FORWARD_JUMP_REJECTED)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
     return 1;
 }
 
 static int test_callback_fault_detection(const char *path) {
     vector_t vector;
-    tcsec_context_t context;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
+    tcsec_context_t context = {0};
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
     tcsec_result_t result;
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
     if (!load_vector(path, &vector)) return 0;
 
-    if (!init_ordinary(&context, &vector, &callbacks)) return 0;
-    callbacks.context_to_corrupt = &context;
-    callbacks.corrupt_context_during_validation = 1u;
-    if (tcsec_receive(&context, vector.protected_frame,
-                      vector.protected_frame_length, plaintext,
-                      sizeof(plaintext), &result) != TCSEC_STATE_INTEGRITY_FAILED)
-        return 0;
-    tcsec_deinit(&context);
-
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.accept_plaintext = 1;
     callbacks.result = TCSEC_COMMIT_NEW;
     if (!init_ordinary(&context, &vector, &callbacks)) return 0;
-    callbacks.corrupt_plaintext_during_commit = 1u;
+    callbacks.plaintext_to_corrupt = plaintext;
     memset(plaintext, 0xa5, sizeof(plaintext));
     if (tcsec_receive(&context, vector.protected_frame,
                       vector.protected_frame_length, plaintext,
                       sizeof(plaintext), &result) != TCSEC_STATE_INTEGRITY_FAILED ||
         plaintext[0] != 0u)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.accept_plaintext = 1;
     callbacks.result = TCSEC_COMMIT_NEW;
     if (!init_ordinary(&context, &vector, &callbacks)) return 0;
     callbacks.context_to_corrupt = &context;
@@ -887,15 +813,15 @@ static int test_callback_fault_detection(const char *path) {
                       vector.protected_frame_length, plaintext,
                       sizeof(plaintext), &result) != TCSEC_STATE_INTEGRITY_FAILED)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
     return 1;
 }
 
 static int test_promotion_failure_paths(const char *path) {
     vector_t vector;
     tcsec_config_t config;
-    tcsec_context_t context;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
+    tcsec_context_t context = {0};
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
     tcsec_result_t result;
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
     uint8_t frame[TCSEC_MAX_FRAME_LENGTH];
@@ -910,7 +836,7 @@ static int test_promotion_failure_paths(const char *path) {
                                   sizeof(next_key)) != 0 ||
         !build_ordinary_frame(vector.suite, next_key, vector.prefix,
                               (uint16_t)(vector.spi + 1u), 1u,
-                              vector.plaintext, vector.plaintext_length,
+                              next_test_packet, sizeof(next_test_packet),
                               frame, &frame_length)) return 0;
 
     callbacks.result = TCSEC_COMMIT_PERSISTENCE_FAILED;
@@ -918,20 +844,18 @@ static int test_promotion_failure_paths(const char *path) {
         tcsec_receive(&context, frame, frame_length, plaintext,
                       sizeof(plaintext), &result) != TCSEC_PERSISTENCE_FAILED)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.accept_plaintext = 1;
     callbacks.result = TCSEC_COMMIT_NEW;
     if (!init_ordinary(&context, &vector, &callbacks)) return 0;
-    callbacks.corrupt_plaintext_during_commit = 1u;
+    callbacks.plaintext_to_corrupt = plaintext;
     if (tcsec_receive(&context, frame, frame_length, plaintext,
                       sizeof(plaintext), &result) != TCSEC_STATE_INTEGRITY_FAILED)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.accept_plaintext = 1;
     callbacks.result = TCSEC_COMMIT_NEW;
     if (!init_ordinary(&context, &vector, &callbacks)) return 0;
     callbacks.context_to_corrupt = &context;
@@ -939,14 +863,13 @@ static int test_promotion_failure_paths(const char *path) {
     if (tcsec_receive(&context, frame, frame_length, plaintext,
                       sizeof(plaintext), &result) != TCSEC_STATE_INTEGRITY_FAILED)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.accept_plaintext = 1;
     callbacks.result = TCSEC_COMMIT_NEW;
     ordinary_config(&config, &vector);
     config.ordinary.current_epoch = UINT32_MAX - 1u;
-    if (init_context(&context, &config, validate_plaintext, &callbacks) != TCSEC_OK ||
+    if (init_context(&context, &config, &callbacks) != TCSEC_OK ||
         tcsec_derive_ordinary_key(vector.root, vector.root_length,
                                   vector.spacecraft_id, vector.suite,
                                   (uint16_t)(vector.spi + 1u), UINT32_MAX,
@@ -954,21 +877,21 @@ static int test_promotion_failure_paths(const char *path) {
                                   sizeof(next_key)) != 0 ||
         !build_ordinary_frame(vector.suite, next_key, vector.prefix,
                               (uint16_t)(vector.spi + 1u), 1u,
-                              vector.plaintext, vector.plaintext_length,
+                              next_test_packet, sizeof(next_test_packet),
                               frame, &frame_length) ||
         tcsec_receive(&context, frame, frame_length, plaintext,
-                      sizeof(plaintext), &result) != TCSEC_INVALID_CONFIGURATION)
+                      sizeof(plaintext), &result) != TCSEC_EPOCH_EXHAUSTED)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
     return 1;
 }
 
 static int test_spi_wrap(const char *path) {
     vector_t vector;
     tcsec_config_t config;
-    tcsec_context_t context;
+    tcsec_context_t context = {0};
     tcsec_result_t result;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
     uint8_t next_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
     uint8_t frame[TCSEC_MAX_FRAME_LENGTH];
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
@@ -976,35 +899,240 @@ static int test_spi_wrap(const char *path) {
     if (!load_vector(path, &vector)) return 0;
     ordinary_config(&config, &vector);
     config.ordinary.current_spi = UINT16_MAX;
-    if (init_context(&context, &config, validate_plaintext, &callbacks) != TCSEC_OK ||
+    if (init_context(&context, &config, &callbacks) != TCSEC_OK ||
         tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
                                   vector.suite, 0u, vector.security_epoch + 1u,
                                   vector.root_version, next_key, sizeof(next_key)) != 0 ||
         !build_ordinary_frame(vector.suite, next_key, vector.prefix, 0u, 1u,
-                              vector.plaintext, vector.plaintext_length,
+                              next_test_packet, sizeof(next_test_packet),
                               frame, &frame_length)) return 0;
     if (tcsec_receive(&context, frame, frame_length, plaintext, sizeof(plaintext), &result) !=
-            TCSEC_EPOCH_PROMOTED || context.current_spi != 0u || result.spi != 0u ||
-        memcmp(plaintext, vector.plaintext, vector.plaintext_length) != 0) return 0;
-    tcsec_deinit(&context);
+            TCSEC_EPOCH_PROMOTED || inspect(&context).current_spi != 0u || result.spi != 0u ||
+        memcmp(plaintext, next_test_packet, sizeof(next_test_packet)) != 0) return 0;
+    cold_restart(&context);
+    return 1;
+}
+
+/* The fixture models what the core can observe across the storage boundary.
+ * The two write faults occur before publication and after publication but
+ * before confirmation. The latter must never release plaintext twice. */
+typedef enum {
+    STORAGE_WRITABLE = 0,
+    STORAGE_INTERRUPTED,
+    STORAGE_CONFIRMATION_LOST
+} storage_fault_t;
+
+typedef struct {
+    tcsec_config_t saved;
+    tcsec_config_t cache;
+    tcsec_status_t load_error;
+    storage_fault_t fault;
+    unsigned commits;
+    uint64_t time_us;
+} storage_fixture_t;
+
+static tcsec_status_t load_storage(void *user, tcsec_config_t *config) {
+    storage_fixture_t *storage = user;
+    storage->cache = storage->saved;
+    *config = storage->cache;
+    return storage->load_error;
+}
+
+static tcsec_commit_result_t commit_storage(void *user, const tcsec_commit_t *change) {
+    storage_fixture_t *storage = user;
+    storage->cache = storage->saved;
+    tcsec_ordinary_config_t *ordinary = &storage->cache.ordinary;
+    storage->commits++;
+    if (storage->fault == STORAGE_INTERRUPTED) return TCSEC_COMMIT_PERSISTENCE_FAILED;
+    switch (change->kind) {
+    case TCSEC_COMMIT_ORDINARY_REPLAY:
+        ordinary->replay = change->replay;
+        break;
+    case TCSEC_COMMIT_ROOT_PREPARE:
+        ordinary->pending_root_present = 1u;
+        ordinary->pending_suite = change->root_prepare->ordinary_suite;
+        ordinary->pending_operational_root_length = change->root_prepare->new_operational_root_length;
+        memcpy(ordinary->pending_operational_root, change->root_prepare->new_operational_root,
+               sizeof(ordinary->pending_operational_root));
+        ordinary->pending_root_version = change->root_prepare->new_root_version;
+        ordinary->pending_transaction_id = change->root_prepare->transaction_id;
+        storage->cache.recovery.replay = change->replay;
+        break;
+    case TCSEC_COMMIT_EPOCH_PROMOTION:
+        ordinary->current_spi = change->spi;
+        ordinary->current_epoch = change->current_epoch;
+        ordinary->root_version = change->root_version;
+        ordinary->suite = change->suite;
+        ordinary->replay = change->replay;
+        if (ordinary->pending_root_present != 0u) {
+            memcpy(ordinary->operational_root, ordinary->pending_operational_root,
+                   sizeof(ordinary->operational_root));
+            ordinary->operational_root_length = ordinary->pending_operational_root_length;
+            ordinary->pending_root_present = 0u;
+            ordinary->pending_suite = (tcsec_suite_t)0;
+            memset(ordinary->pending_operational_root, 0, sizeof(ordinary->pending_operational_root));
+            ordinary->pending_operational_root_length = 0u;
+            ordinary->pending_root_version = 0u;
+            ordinary->pending_transaction_id = 0u;
+        }
+        break;
+    default:
+        return TCSEC_COMMIT_REJECTED;
+    }
+    storage->saved = storage->cache;
+    return storage->fault == STORAGE_CONFIRMATION_LOST
+               ? TCSEC_COMMIT_UNCERTAIN : TCSEC_COMMIT_NEW;
+}
+
+static void release_storage(void *user) {
+    storage_fixture_t *storage = user;
+    memset(&storage->cache, 0, sizeof(storage->cache));
+}
+
+static uint64_t storage_time(void *user) {
+    storage_fixture_t *storage = user;
+    storage->time_us += 5u;
+    return storage->time_us;
+}
+
+static int test_storage_recovery(const char *path) {
+    vector_t vector;
+    storage_fixture_t storage = {0};
+    tcsec_context_t context = {0};
+    tcsec_runtime_status_t status;
+    tcsec_result_t result;
+    uint8_t output[TCSEC_MAX_FRAME_LENGTH];
+    const uint8_t empty_cache[sizeof(storage.cache)] = {0};
+    const uint8_t empty_context[sizeof(context)] = {0};
+    tcsec_callbacks_t callbacks = {
+        .load_state = load_storage, .commit_state = commit_storage,
+        .release_state = release_storage, .monotonic_time_us = storage_time,
+        .user_context = &storage,
+    };
+    if (!load_vector(path, &vector)) return 0;
+    ordinary_config(&storage.saved, &vector);
+    if (tcsec_init(NULL, &callbacks) != TCSEC_INVALID_ARGUMENT ||
+        tcsec_reset(NULL) != TCSEC_INVALID_ARGUMENT ||
+        tcsec_reset(&context) != TCSEC_NOT_INITIALIZED ||
+        tcsec_receive(NULL, vector.protected_frame, vector.protected_frame_length,
+                      output, sizeof(output), &result) != TCSEC_INVALID_ARGUMENT)
+        return 0;
+
+
+    storage.load_error = TCSEC_PERSISTENCE_FAILED;
+    if (tcsec_init(&context, &callbacks) != TCSEC_PERSISTENCE_FAILED ||
+        memcmp(&storage.cache, empty_cache, sizeof(empty_cache)) != 0 ||
+        memcmp(&context, empty_context, sizeof(empty_context)) != 0 ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      output, sizeof(output), &result) != TCSEC_NOT_INITIALIZED)
+        return 0;
+    storage.load_error = TCSEC_OK;
+    if (tcsec_init(&context, &callbacks) != TCSEC_OK ||
+        tcsec_init(&context, &callbacks) != TCSEC_ALREADY_INITIALIZED)
+        return 0;
+
+    storage.fault = STORAGE_INTERRUPTED;
+    if (tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      output, sizeof(output), &result) != TCSEC_PERSISTENCE_FAILED ||
+        result.plaintext_length != 0u || output[0] != 0u ||
+        storage.commits != 1u || storage.saved.ordinary.replay.seen != 0u ||
+        tcsec_get_runtime_status(&context, &status) != TCSEC_OK ||
+        status.reception_paused != 1u || status.receive_count != 1u || status.last_receive_us != 5u ||
+        memcmp(&storage.cache, empty_cache, sizeof(empty_cache)) != 0)
+        return 0;
+
+    storage.load_error = TCSEC_STATE_INTEGRITY_FAILED;
+    if (tcsec_reset(&context) != TCSEC_STATE_INTEGRITY_FAILED ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      output, sizeof(output), &result) != TCSEC_RECEPTION_PAUSED ||
+        storage.commits != 1u)
+        return 0;
+    storage.load_error = TCSEC_OK;
+    storage.fault = STORAGE_CONFIRMATION_LOST;
+    if (tcsec_reset(&context) != TCSEC_OK ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      output, sizeof(output), &result) != TCSEC_STORAGE_COMMIT_UNCERTAIN ||
+        result.plaintext_length != 0u || output[0] != 0u || storage.commits != 2u ||
+        storage.saved.ordinary.replay.highest_iv != vector.iv_counter)
+        return 0;
+    storage.fault = STORAGE_WRITABLE;
+    if (tcsec_reset(&context) != TCSEC_OK ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      output, sizeof(output), &result) != TCSEC_REPLAY_REJECTED ||
+        storage.commits != 2u)
+        return 0;
+
+    cold_restart(&context);
+    if (memcmp(&storage.cache, empty_cache, sizeof(empty_cache)) != 0 ||
+        memcmp(&context, empty_context, sizeof(empty_context)) != 0)
+        return 0;
+    callbacks.monotonic_time_us = NULL;
+    if (tcsec_init(&context, &callbacks) != TCSEC_OK ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      output, sizeof(output), &result) != TCSEC_REPLAY_REJECTED ||
+        tcsec_get_runtime_status(&context, &status) != TCSEC_OK ||
+        status.reception_paused != 0u || status.receive_count != 1u || status.last_receive_us != 0u)
+        return 0;
+    cold_restart(&context);
+    return 1;
+}
+
+static int test_storage_rotation(const char *path) {
+    vector_t vector;
+    storage_fixture_t storage = {0};
+    tcsec_context_t context = {0};
+    const tcsec_callbacks_t callbacks = {
+        .load_state = load_storage, .commit_state = commit_storage,
+        .release_state = release_storage, .user_context = &storage,
+    };
+    tcsec_result_t result;
+    uint8_t output[TCSEC_MAX_FRAME_LENGTH], frame[TCSEC_MAX_FRAME_LENGTH];
+    uint8_t key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    size_t length;
+    if (!load_vector(path, &vector)) return 0;
+    recovery_config(&storage.saved, &vector);
+    if (tcsec_init(&context, &callbacks) != TCSEC_OK ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                      output, sizeof(output), &result) != TCSEC_ROOT_PREPARED ||
+        result.plaintext_length != 0u || !storage.saved.ordinary.pending_root_present ||
+        !storage.saved.recovery.replay.seen)
+        return 0;
+    cold_restart(&context);
+    const tcsec_ordinary_config_t *ordinary = &storage.saved.ordinary;
+    const uint16_t next_spi = (uint16_t)(ordinary->current_spi + 1u);
+    if (tcsec_init(&context, &callbacks) != TCSEC_OK ||
+        tcsec_derive_ordinary_key(ordinary->pending_operational_root,
+                                  ordinary->pending_operational_root_length,
+                                  ordinary->spacecraft_id, ordinary->pending_suite,
+                                  next_spi, ordinary->current_epoch + 1u,
+                                  ordinary->pending_root_version, key, sizeof(key)) != 0 ||
+        !build_ordinary_frame(ordinary->pending_suite, key, ordinary->nonce_prefix,
+                              next_spi, 1u, next_test_packet, sizeof(next_test_packet),
+                              frame, &length) ||
+        tcsec_receive(&context, frame, length, output, sizeof(output), &result) != TCSEC_EPOCH_PROMOTED ||
+        memcmp(output, next_test_packet, sizeof(next_test_packet)) != 0 ||
+        ordinary->pending_root_present != 0u || ordinary->current_spi != next_spi ||
+        storage.commits != 2u)
+        return 0;
+    cold_restart(&context);
+    if (tcsec_init(&context, &callbacks) != TCSEC_OK ||
+        tcsec_receive(&context, frame, length, output, sizeof(output), &result) != TCSEC_REPLAY_REJECTED)
+        return 0;
+    cold_restart(&context);
     return 1;
 }
 
 static int test_recovery_vector(const char *path) {
     vector_t vector;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
-    tcsec_context_t context;
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
+    tcsec_context_t context = {0};
     tcsec_result_t result;
     uint8_t output[TCSEC_MAX_FRAME_LENGTH];
     uint8_t corrupted[TCSEC_MAX_FRAME_LENGTH];
     uint8_t header_corrupted[TCSEC_MAX_FRAME_LENGTH];
     uint8_t next_frame[TCSEC_MAX_FRAME_LENGTH];
     uint8_t next_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
-    static const uint8_t command[16] = {
-        0xca,0xfe,0x01,0x02,0x03,0x04,0x05,0x06,
-        0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e
-    };
-    tcsec_context_t restored;
+    tcsec_context_t restored = {0};
     size_t next_length;
     uint16_t crc;
     tcsec_status_t status;
@@ -1012,22 +1140,22 @@ static int test_recovery_vector(const char *path) {
     status = tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
                            output, sizeof(output), &result);
     if (status != TCSEC_ROOT_PREPARED || callbacks.last_kind != TCSEC_COMMIT_ROOT_PREPARE ||
-        callbacks.transaction_id != 0x0102030405060708ULL || context.pending_root_present == 0u)
+        callbacks.transaction_id != 0x0102030405060708ULL || inspect(&context).pending_root_present == 0u)
         return 0;
     if (tcsec_derive_ordinary_key(&vector.plaintext[TCSEC_ROOT_PREPARE_FIXED_LENGTH],
                                   vector.plaintext_length - TCSEC_ROOT_PREPARE_FIXED_LENGTH,
-                                  vector.spacecraft_id, context.next_suite,
+                                  vector.spacecraft_id, inspect(&context).next_suite,
                                   (uint16_t)(vector.current_spi + 1u), vector.security_epoch + 1u,
-                                  context.pending_root_version, next_key, sizeof(next_key)) != 0 ||
-        !build_ordinary_frame(context.next_suite, next_key, (const uint8_t *)"ORDNRY",
-                              (uint16_t)(vector.current_spi + 1u), 1u, command, sizeof(command),
+                                  inspect(&context).pending_root_version, next_key, sizeof(next_key)) != 0 ||
+        !build_ordinary_frame(inspect(&context).next_suite, next_key, (const uint8_t *)"ORDNRY",
+                              (uint16_t)(vector.current_spi + 1u), 1u, next_test_packet, sizeof(next_test_packet),
                               next_frame, &next_length) ||
         !init_recovery_restored(&restored, &vector, &context, &callbacks)) return 0;
     status = tcsec_receive(&restored, next_frame, next_length, output, sizeof(output), &result);
-    if (status != TCSEC_EPOCH_PROMOTED || restored.pending_root_present != 0u ||
-        restored.current_root_version != context.pending_root_version ||
-        memcmp(output, command, sizeof(command)) != 0) return 0;
-    tcsec_deinit(&restored);
+    if (status != TCSEC_EPOCH_PROMOTED || inspect(&restored).pending_root_present != 0u ||
+        inspect(&restored).current_root_version != inspect(&context).pending_root_version ||
+        memcmp(output, next_test_packet, sizeof(next_test_packet)) != 0) return 0;
+    cold_restart(&restored);
     memcpy(corrupted, vector.protected_frame, vector.protected_frame_length);
     corrupted[TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH] ^= 1u;
     crc = frame_crc(corrupted, vector.protected_frame_length - TCSEC_FECF_LENGTH);
@@ -1051,50 +1179,48 @@ static int test_recovery_vector(const char *path) {
     if (!init_recovery(&context, &vector, &callbacks)) return 0;
     status = tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
                            output, sizeof(output), &result);
-    if (status != TCSEC_PERSISTENCE_FAILED || context.recovery_replay.seen != 0u ||
-        context.pending_root_present != 0u) return 0;
-    tcsec_deinit(&context);
+    if (status != TCSEC_PERSISTENCE_FAILED || inspect(&context).recovery_replay.seen != 0u ||
+        inspect(&context).pending_root_present != 0u) return 0;
+    cold_restart(&context);
     return 1;
 }
 
 static int test_recovery_rejections(const char *path) {
     vector_t vector;
     tcsec_config_t config;
-    tcsec_context_t context;
-    callbacks_t callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_REJECTED};
+    tcsec_context_t context = {0};
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_REJECTED};
     tcsec_result_t result;
     uint8_t output[TCSEC_MAX_FRAME_LENGTH];
     if (!load_vector(path, &vector) ||
         !init_recovery(&context, &vector, &callbacks)) return 0;
     if (tcsec_receive(&context, vector.protected_frame,
                       vector.protected_frame_length, output,
-                      sizeof(output), &result) != TCSEC_ROOT_PREPARE_REJECTED)
+                      sizeof(output), &result) != TCSEC_STATE_COMMIT_REJECTED)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.accept_plaintext = 1;
     callbacks.result = TCSEC_COMMIT_NEW;
     recovery_config(&config, &vector);
     config.ordinary.root_version++;
     callbacks.result = TCSEC_COMMIT_NEW;
-    if (init_context(&context, &config, validate_plaintext, &callbacks) != TCSEC_OK ||
+    if (init_context(&context, &config, &callbacks) != TCSEC_OK ||
         tcsec_receive(&context, vector.protected_frame,
                       vector.protected_frame_length, output,
                       sizeof(output), &result) != TCSEC_ROOT_PREPARE_REJECTED)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
 
     callbacks.result = (tcsec_commit_result_t)99;
     if (!init_recovery(&context, &vector, &callbacks) ||
         tcsec_receive(&context, vector.protected_frame,
                       vector.protected_frame_length, output,
-                      sizeof(output), &result) != TCSEC_INVALID_CONFIGURATION)
+                      sizeof(output), &result) != TCSEC_CALLBACK_RESULT_INVALID)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.accept_plaintext = 1;
     callbacks.result = TCSEC_COMMIT_NEW;
     if (!init_recovery(&context, &vector, &callbacks)) return 0;
     callbacks.context_to_corrupt = &context;
@@ -1103,10 +1229,9 @@ static int test_recovery_rejections(const char *path) {
                       vector.protected_frame_length, output,
                       sizeof(output), &result) != TCSEC_STATE_INTEGRITY_FAILED)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
 
     memset(&callbacks, 0, sizeof(callbacks));
-    callbacks.accept_plaintext = 1;
     callbacks.result = TCSEC_COMMIT_NEW;
     recovery_config(&config, &vector);
     config.ordinary.pending_root_present = 1u;
@@ -1117,22 +1242,22 @@ static int test_recovery_rejections(const char *path) {
     config.ordinary.pending_operational_root_length = TCSEC_ROOT_KEY_LENGTH;
     config.ordinary.pending_root_version = vector.current_root_version + 1u;
     config.ordinary.pending_transaction_id = UINT64_C(0x8877665544332211);
-    if (init_context(&context, &config, validate_plaintext, &callbacks) != TCSEC_OK)
+    if (init_context(&context, &config, &callbacks) != TCSEC_OK)
         return 0;
     if (tcsec_receive(&context, vector.protected_frame,
                       vector.protected_frame_length, output,
                       sizeof(output), &result) != TCSEC_ROOT_PREPARE_REJECTED)
         return 0;
-    tcsec_deinit(&context);
+    cold_restart(&context);
     return 1;
 }
 
 static int test_distinct_context_reentrancy(const char *path) {
     vector_t vector;
     tcsec_config_t config;
-    tcsec_context_t primary;
-    tcsec_context_t secondary;
-    callbacks_t secondary_callbacks = {.accept_plaintext = 1, .result = TCSEC_COMMIT_NEW};
+    tcsec_context_t primary = {0};
+    tcsec_context_t secondary = {0};
+    callbacks_t secondary_callbacks = {.result = TCSEC_COMMIT_NEW};
     reentrant_callbacks_t primary_callbacks;
     tcsec_result_t primary_result;
     uint8_t primary_plaintext[TCSEC_MAX_FRAME_LENGTH];
@@ -1140,14 +1265,17 @@ static int test_distinct_context_reentrancy(const char *path) {
     if (!load_vector(path, &vector) ||
         !init_ordinary(&secondary, &vector, &secondary_callbacks)) return 0;
     memset(&primary_callbacks, 0, sizeof(primary_callbacks));
-    primary_callbacks.base.accept_plaintext = 1;
     primary_callbacks.base.result = TCSEC_COMMIT_NEW;
     primary_callbacks.secondary_context = &secondary;
     primary_callbacks.frame = vector.protected_frame;
     primary_callbacks.frame_length = vector.protected_frame_length;
     ordinary_config(&config, &vector);
-    if (init_context(&primary, &config, validate_plaintext_reentrant,
-                     &primary_callbacks) != TCSEC_OK) return 0;
+    primary_callbacks.base.snapshot = config;
+    const tcsec_callbacks_t nested = {
+        .load_state = load_snapshot, .commit_state = commit_reentrant,
+        .monotonic_time_us = monotonic_time_us, .user_context = &primary_callbacks,
+    };
+    if (tcsec_init(&primary, &nested) != TCSEC_OK) return 0;
     primary_status = tcsec_receive(&primary, vector.protected_frame,
                                    vector.protected_frame_length,
                                    primary_plaintext, sizeof(primary_plaintext),
@@ -1158,15 +1286,222 @@ static int test_distinct_context_reentrancy(const char *path) {
         memcmp(primary_plaintext, vector.plaintext, vector.plaintext_length) != 0 ||
         memcmp(primary_callbacks.secondary_plaintext, vector.plaintext,
                vector.plaintext_length) != 0) return 0;
-    tcsec_deinit(&primary);
-    tcsec_deinit(&secondary);
+    cold_restart(&primary);
+    cold_restart(&secondary);
     return 1;
 }
+
+static int test_next_validation(const char *path) {
+    static const struct { size_t offset; uint8_t mask; } mutations[] = {
+        {0u, 0x20u}, {0u, 0x10u}, {0u, 0x08u}, {1u, 1u}, {2u, 0x40u},
+        {4u, 1u}, {5u, 1u}, {6u, 0x80u}, {7u, 0x80u}, {8u, 1u}
+    };
+    vector_t vector;
+    callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
+    tcsec_context_t context = {0};
+    tcsec_result_t result;
+    uint8_t key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t frame[TCSEC_MAX_FRAME_LENGTH];
+    uint8_t packet[sizeof(next_test_packet)] = {0};
+    uint8_t output[sizeof(next_test_packet)];
+    uint8_t header[TCSEC_PRIMARY_HEADER_LENGTH] = {0x20u, 0x01u, 0u, 0u, 0u};
+    const uint8_t zero[sizeof(output)] = {0};
+    size_t length, index;
+
+    if (!load_vector(path, &vector) || !init_ordinary(&context, &vector, &callbacks))
+        return 0;
+    if (tcsec_next_plaintext_allowed(vector.spacecraft_id, NULL, packet, sizeof(packet)) ||
+        tcsec_next_plaintext_allowed(vector.spacecraft_id, header, NULL, sizeof(packet)) ||
+        tcsec_next_plaintext_allowed(vector.spacecraft_id, header, packet, 6u) ||
+        tcsec_next_plaintext_allowed(vector.spacecraft_id, header, packet, TCSEC_MAX_FRAME_LENGTH))
+        return 0;
+    if (tcsec_next_plaintext_allowed((uint16_t)(vector.spacecraft_id ^ 1u), header,
+                                     next_test_packet, sizeof(next_test_packet)))
+        return 0;
+    header[0] ^= 0x04u;
+    if (tcsec_next_plaintext_allowed(vector.spacecraft_id, header, next_test_packet,
+                                     sizeof(next_test_packet)))
+        return 0;
+    header[0] ^= 0x04u;
+    memcpy(packet, next_test_packet, sizeof(packet));
+    packet[0] |= 7u;
+    packet[1] = 0xffu;
+    if (tcsec_next_plaintext_allowed(vector.spacecraft_id, header, packet, sizeof(packet)))
+        return 0;
+
+    if (tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
+                                  vector.suite, (uint16_t)(vector.spi + 1u),
+                                  vector.security_epoch + 1u, vector.root_version,
+                                  key, sizeof(key)) != 0)
+        return 0;
+    for (index = 0u; index <= sizeof(mutations) / sizeof(mutations[0]); ++index) {
+        uint16_t crc;
+        memcpy(packet, next_test_packet, sizeof(packet));
+        if (index < sizeof(mutations) / sizeof(mutations[0]))
+            packet[mutations[index].offset] ^= mutations[index].mask;
+        if (!build_ordinary_frame(vector.suite, key, vector.prefix, (uint16_t)(vector.spi + 1u),
+                                  1u, packet, sizeof(packet), frame, &length))
+            return 0;
+        if (index == sizeof(mutations) / sizeof(mutations[0])) {
+            frame[2] ^= 4u; /* VCID changes without changing the frame length. */
+            crc = frame_crc(frame, length - TCSEC_FECF_LENGTH);
+            frame[length - 2u] = (uint8_t)(crc >> 8);
+            frame[length - 1u] = (uint8_t)crc;
+        }
+        memset(output, 0xa5, sizeof(output));
+        if (tcsec_receive(&context, frame, length, output, sizeof(output), &result) !=
+                TCSEC_PLAINTEXT_REJECTED ||
+            result.plaintext_length != 0u || memcmp(output, zero, sizeof(output)) != 0 ||
+            callbacks.calls != 0u || inspect(&context).current_spi != vector.spi ||
+            inspect(&context).current_epoch != vector.security_epoch || inspect(&context).next_replay.seen != 0u)
+            return 0;
+    }
+    memcpy(packet, next_test_packet, sizeof(packet));
+    packet[6] = 2u; /* A second ordinary command can also trigger promotion. */
+    if (!build_ordinary_frame(vector.suite, key, vector.prefix, (uint16_t)(vector.spi + 1u),
+                              1u, packet, sizeof(packet), frame, &length) ||
+        tcsec_receive(&context, frame, length, output, sizeof(output), &result) !=
+            TCSEC_EPOCH_PROMOTED ||
+        callbacks.calls != 1u || inspect(&context).current_spi != (uint16_t)(vector.spi + 1u) ||
+        result.plaintext_length != sizeof(packet) || memcmp(output, packet, sizeof(packet)) != 0)
+        return 0;
+    cold_restart(&context);
+    return 1;
+}
+
+static int test_review_contract(const char *path) {
+    vector_t vector;
+    tcsec_config_t config;
+    tcsec_context_t context = {0};
+    storage_fixture_t storage = {0};
+    tcsec_runtime_status_t runtime;
+    tcsec_result_t result;
+    uint8_t output[TCSEC_MAX_FRAME_LENGTH], frame[TCSEC_MAX_FRAME_LENGTH], key[32];
+    size_t length;
+    unsigned index;
+    static const tcsec_status_t errors[] = {
+        TCSEC_STORAGE_UNAVAILABLE, TCSEC_STORAGE_NO_QUORUM,
+        TCSEC_STORAGE_ROLLBACK_DETECTED, TCSEC_STORAGE_NOT_COMMISSIONED,
+    };
+    tcsec_callbacks_t platform = {
+        .load_state = load_storage, .commit_state = commit_storage,
+        .release_state = release_storage, .user_context = &storage,
+    };
+    callbacks_t basic = {.result = TCSEC_COMMIT_NEW};
+    if (!load_vector(path, &vector)) return 0;
+    ordinary_config(&storage.saved, &vector);
+    memset(output, 0xa5, sizeof(output));
+    memset(&result, 0xa5, sizeof(result));
+    if (tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                     output, sizeof(output), &result) != TCSEC_NOT_INITIALIZED ||
+        result.plaintext_length != 0 || output[0] != 0 ||
+        tcsec_get_runtime_status(&context, &runtime) != TCSEC_NOT_INITIALIZED) return 0;
+    for (index = 0; index < sizeof(errors)/sizeof(errors[0]); ++index) {
+        storage.load_error = errors[index];
+        if (tcsec_init(&context, &platform) != errors[index]) return 0;
+    }
+    storage.load_error = TCSEC_INVALID_ARGUMENT;
+    if (tcsec_init(&context, &platform) != TCSEC_CALLBACK_RESULT_INVALID) return 0;
+    storage.load_error = TCSEC_OK;
+    if (tcsec_init(&context, &platform) != TCSEC_OK) return 0;
+    storage.fault = STORAGE_CONFIRMATION_LOST;
+    if (tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                     output, sizeof(output), &result) != TCSEC_STORAGE_COMMIT_UNCERTAIN ||
+        tcsec_get_runtime_status(&context, &runtime) != TCSEC_OK ||
+        runtime.last_status != TCSEC_STORAGE_COMMIT_UNCERTAIN || !runtime.reception_paused ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                     output, sizeof(output), &result) != TCSEC_RECEPTION_PAUSED) return 0;
+    storage.fault = STORAGE_WRITABLE;
+    if (tcsec_reset(&context) != TCSEC_OK ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length,
+                     output, sizeof(output), &result) != TCSEC_REPLAY_REJECTED) return 0;
+    cold_restart(&context);
+
+    ordinary_config(&config, &vector);
+    config.recovery.spi = (uint16_t)(vector.spi + 2u);
+    if (init_context(&context, &config, &basic) != TCSEC_OK ||
+        tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
+            vector.suite, (uint16_t)(vector.spi + 1u), vector.security_epoch + 1u,
+            vector.root_version, key, sizeof(key)) != 0 ||
+        !build_ordinary_frame(vector.suite, key, vector.prefix, (uint16_t)(vector.spi + 1u),
+            1, next_test_packet, sizeof(next_test_packet), frame, &length) ||
+        tcsec_receive(&context, frame, length, output, sizeof(output), &result) != TCSEC_SPI_COLLISION ||
+        basic.calls != 0 || result.plaintext_length != 0 || output[0] != 0 ||
+        tcsec_get_runtime_status(&context, &runtime) != TCSEC_OK ||
+        runtime.current_spi != vector.spi || runtime.last_status != TCSEC_SPI_COLLISION ||
+        tcsec_reset(&context) != TCSEC_OK) return 0;
+    cold_restart(&context);
+    return 1;
+}
+
+static uint64_t backwards_clock(void *user) {
+    callbacks_t *fixture = user;
+    return 100u - ++fixture->monotonic_time_us;
+}
+
+static int test_review_recovery_boundaries(const char *path) {
+    vector_t vector;
+    tcsec_context_t context = {0};
+    callbacks_t fixture = {.result=TCSEC_COMMIT_NEW};
+    tcsec_config_t config;
+    tcsec_result_t result;
+    tcsec_runtime_status_t runtime;
+    uint8_t output[TCSEC_MAX_FRAME_LENGTH];
+    const tcsec_callbacks_t callbacks = {.load_state=load_snapshot, .commit_state=commit_state,
+        .monotonic_time_us=backwards_clock, .user_context=&fixture};
+    if (!load_vector(path,&vector)) return 0;
+    recovery_config(&config,&vector);
+    config.ordinary.current_spi = (uint16_t)(config.recovery.spi-2u);
+    if (init_context(&context,&config,&fixture) != TCSEC_OK ||
+        tcsec_receive(&context,vector.protected_frame,vector.protected_frame_length,
+            output,sizeof(output),&result) != TCSEC_SPI_COLLISION || fixture.calls != 0 ||
+        result.plaintext_length != 0 || output[0] != 0) return 0;
+    cold_restart(&context);
+    recovery_config(&config,&vector);
+    config.ordinary.current_epoch = UINT32_MAX-1u;
+    if (init_context(&context,&config,&fixture) != TCSEC_OK ||
+        tcsec_receive(&context,vector.protected_frame,vector.protected_frame_length,
+            output,sizeof(output),&result) != TCSEC_EPOCH_EXHAUSTED || fixture.calls != 0) return 0;
+    cold_restart(&context);
+    recovery_config(&config,&vector);
+    config.ordinary.pending_operational_root[0] = 1;
+    if (init_context(&context,&config,&fixture) != TCSEC_INVALID_CONFIGURATION) return 0;
+    recovery_config(&config,&vector);
+    config.ordinary.pending_root_present = 1;
+    config.ordinary.pending_suite = TCSEC_SUITE_SM4_HCTR;
+    config.ordinary.pending_operational_root_length = 16;
+    config.ordinary.pending_root_version = vector.current_root_version+1;
+    config.ordinary.pending_transaction_id = UINT64_C(0x0102030405060708);
+    memcpy(config.ordinary.pending_operational_root,
+           vector.plaintext+TCSEC_ROOT_PREPARE_FIXED_LENGTH,16);
+    config.ordinary.pending_operational_root[0] ^= 1;
+    if (init_context(&context,&config,&fixture) != TCSEC_OK ||
+        tcsec_receive(&context,vector.protected_frame,vector.protected_frame_length,
+            output,sizeof(output),&result) != TCSEC_ROOT_PREPARE_REJECTED || fixture.calls != 0) return 0;
+    cold_restart(&context);
+    recovery_config(&fixture.snapshot,&vector);
+    if (tcsec_init(&context,&callbacks) != TCSEC_OK ||
+        tcsec_receive(&context,vector.protected_frame,vector.protected_frame_length,
+            output,sizeof(output),&result) != TCSEC_ROOT_PREPARED ||
+        tcsec_get_runtime_status(&context,&runtime) != TCSEC_OK ||
+        runtime.clock_anomaly_count != 1 || runtime.last_receive_us != 0) return 0;
+    corrupt_epoch(&context);
+    if (tcsec_get_runtime_status(&context,&runtime) != TCSEC_STATE_INTEGRITY_FAILED ||
+        tcsec_init(&context,&callbacks) != TCSEC_STATE_INTEGRITY_FAILED) return 0;
+    cold_restart(&context);
+    return 1;
+}
+
+#include "storage_quorum_model.h"
 
 int main(int argc, char **argv) {
     int index;
     if (argc != 3) {
         fprintf(stderr, "expected SM4-HCTR ordinary and SM4-GCM recovery vector paths\n");
+        return 1;
+    }
+    if (!test_next_validation(argv[1])) {
+        fprintf(stderr, "Next admission and promotion tests failed\n");
         return 1;
     }
     if (!test_sm4_hctr()) {
@@ -1197,6 +1532,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "runtime status/telemetry tests failed\n");
         return 1;
     }
+    if (!test_receive_without_clock(argv[1])) {
+        fprintf(stderr, "optional clock tests failed\n");
+        return 1;
+    }
     if (!test_receive_boundaries_and_replay_motion(argv[1])) {
         fprintf(stderr, "receive boundary/replay motion tests failed\n");
         return 1;
@@ -1217,8 +1556,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "transactional context reset test failed\n");
         return 1;
     }
-    if (!test_nvm_two_slot_recovery(argv[1])) {
-        fprintf(stderr, "two-slot NVM recovery tests failed\n");
+    if (!test_storage_recovery(argv[1]) || !test_storage_rotation(argv[2]) || !test_quorum_powercuts(argv[1], argv[2]) || !test_review_contract(argv[1]) || !test_review_recovery_boundaries(argv[2])) {
+        fprintf(stderr, "flight storage callback tests failed\n");
         return 1;
     }
     if (!test_distinct_context_reentrancy(argv[1])) {

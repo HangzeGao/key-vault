@@ -7,9 +7,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,6 +22,8 @@ import (
 	"github.com/kvlt/key-vault/internal/crypto/kdf"
 	"github.com/kvlt/key-vault/internal/crypto/suite"
 	protocol "github.com/kvlt/key-vault/internal/protocol/ccsds"
+	"github.com/kvlt/key-vault/internal/repository/models"
+	"github.com/kvlt/key-vault/internal/securitystate"
 )
 
 type e2eCore struct {
@@ -75,8 +80,24 @@ func TestTCDataPlaneAPIProducesFlightAcceptedVector(t *testing.T) {
 		Direction: protocol.DirectionTCTx, KeyID: "e2e-root", KeyVersion: uint32(parse("root_version", 10, 32)),
 		SecurityEpoch: uint32(parse("security_epoch", 10, 32)), PolicyVersion: 1, SuiteID: suiteID.String(),
 		State: protocol.AssociationCurrent, Parameters: protocol.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: decode("nonce_prefix")}}
-	store, err := protocol.NewMemoryStore(sa)
+	groundPath := filepath.Join(t.TempDir(), "ground.db")
+	store, err := securitystate.Open(context.Background(), groundPath)
 	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.EnsureTenant(context.Background(), "tenant-1", "E2E TEST ONLY"); err != nil {
+		t.Fatal(err)
+	}
+	key := &models.Key{ID: sa.KeyID, TenantID: sa.TenantID, Name: "E2E TEST ONLY", Purpose: "encrypt_decrypt",
+		UsageScope: models.KeyUsageProtocol, PolicyID: "default-v1", SuiteID: sa.SuiteID,
+		CurrentVersion: sa.KeyVersion, Status: "ACTIVE"}
+	version := &models.KeyVersion{ID: "e2e-version", KeyID: sa.KeyID, VersionNo: sa.KeyVersion,
+		SuiteID: sa.SuiteID, SealedMaterial: []byte("TEST ONLY fixture"), Status: "ACTIVE"}
+	if err := store.CreateProtocolKey(context.Background(), key, version); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CreateAssociation(context.Background(), sa); err != nil {
 		t.Fatal(err)
 	}
 	counter := uint32(parse("iv_counter", 16, 32))
@@ -94,22 +115,95 @@ func TestTCDataPlaneAPIProducesFlightAcceptedVector(t *testing.T) {
 	}
 	clearFrame := buildClearTCFrame(decode("plaintext"))
 	body, _ := json.Marshal(map[string]string{"frame": base64.StdEncoding.EncodeToString(clearFrame)})
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/tc:protect", bytes.NewReader(body))
+	server := httptest.NewServer(authenticatedHandler(security))
+	defer server.Close()
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/tc:protect", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
 	request.Header.Set("Authorization", "Bearer "+testDataToken())
-	response := httptest.NewRecorder()
-	authenticatedHandler(security).ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	request.Header.Set("Content-Type", "application/json")
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	responseBody, err := io.ReadAll(response.Body)
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s err=%v", response.StatusCode, responseBody, err)
 	}
 	var result struct {
 		ProtectedFrame string `json:"protected_frame"`
 	}
-	if json.Unmarshal(response.Body.Bytes(), &result) != nil {
+	if json.Unmarshal(responseBody, &result) != nil {
 		t.Fatal("invalid response")
 	}
 	protected, err := base64.StdEncoding.DecodeString(result.ProtectedFrame)
 	if err != nil || !bytes.Equal(protected, decode("protected_frame")) {
 		t.Fatalf("API frame=%x want=%s err=%v", protected, values["protected_frame"], err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := securitystate.Open(context.Background(), groundPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if next, err := restored.NextTransmitCounter(context.Background(), sa.ID); err != nil || next != counter+1 {
+		t.Fatalf("ground counter after restart=%d want=%d err=%v", next, counter+1, err)
+	}
+	if runner := os.Getenv("TC_E2E_FLIGHT_RUNNER"); runner != "" {
+		testFlightProcessRecovery(t, runner, protected)
+	}
+}
+
+func testFlightProcessRecovery(t *testing.T, runner string, frame []byte) {
+	t.Helper()
+	vector, err := filepath.Abs("../../../testdata/ccsds_tc_sm4_hctr.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, scenario := range []struct{ fault, first, restarted string }{
+		{"none", "OK", "REPLAY_REJECTED"},
+		{"before", "PERSISTENCE_FAILED", "OK"},
+		{"after", "STORAGE_COMMIT_UNCERTAIN", "REPLAY_REJECTED"},
+	} {
+		t.Run("flight-process-"+scenario.fault, func(t *testing.T) {
+			state := filepath.Join(t.TempDir(), "flight.test-state")
+			if output, err := exec.Command(runner, vector, state, "commission").CombinedOutput(); err != nil {
+				t.Fatalf("commission failed: %v %s", err, output)
+			}
+			invoke := func(fault, expected string) {
+				t.Helper()
+				output, err := exec.Command(runner, vector, state, "receive", hex.EncodeToString(frame), fault).CombinedOutput()
+				if err != nil {
+					t.Fatalf("flight process failed: %v %s", err, output)
+				}
+				var result struct {
+					Status  string `json:"status"`
+					Length  int    `json:"length"`
+					Matches bool   `json:"matches"`
+					Cleared bool   `json:"cleared"`
+				}
+				if err := json.Unmarshal(output, &result); err != nil || result.Status != expected {
+					t.Fatalf("flight result=%s want=%s err=%v", output, expected, err)
+				}
+				if expected == "OK" {
+					if !result.Matches || result.Length == 0 {
+						t.Fatal("flight plaintext mismatch")
+					}
+				} else if !result.Cleared || result.Length != 0 {
+					t.Fatal("flight released failed plaintext")
+				}
+			}
+			invoke(scenario.fault, scenario.first)
+			invoke("none", scenario.restarted)
+			if err := os.Remove(state); err != nil {
+				t.Fatal(err)
+			}
+			invoke("none", "STATE_INTEGRITY_FAILED")
+		})
 	}
 }
 

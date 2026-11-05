@@ -11,30 +11,32 @@ This freestanding C11 module receives complete TC transfer frames and implements
 - durable Pending Root restore across reset;
 - no Previous/Grace state and no compatibility parser.
 
-The caller supplies three platform callbacks: a complete ordinary plaintext
-validator, an atomic state commit adapter, and a monotonic microsecond clock.
-Plaintext is released only after validation and persistence both succeed. Root
-Prepare plaintext is consumed internally. The clock is used only for redacted
-runtime timing counters; it is not part of nonce, replay, or key derivation.
+The caller supplies an atomic state commit adapter and may supply a monotonic
+microsecond clock. Current-SPI plaintext is delivered after replay is persisted. Flight
+software validates and dispatches the command. Next-SPI plaintext also passes
+internal frame and packet checks plus a statically linked mission policy before
+promotion. Root Prepare plaintext is consumed internally. The clock measures
+processing time and records clock faults. Without it, receive attempts are
+still counted and all four timing fields remain zero.
 
-The production plaintext validator is owned by flight software and must implement
-the closed contract in
+Flight software supplies the mission policy at build time through the private
+`src/next_validation.h` contract. A flight build must link the mission's
+`tcsec_mission_next_command_allowed` implementation. The repository test policy
+is enabled only in test builds. See
 [`../../docs/TC_PLAINTEXT_VALIDATION_DESIGN.md`](../../docs/TC_PLAINTEXT_VALIDATION_DESIGN.md).
-The `CA FE` check in the C test harness is only a test double; it is forbidden in
-production builds and is not release evidence.
 
-The integration surface is `tcsec_init`, `tcsec_reset`, `tcsec_receive`,
-`tcsec_get_runtime_status`, and `tcsec_deinit`.
-The status-to-string helper lives in `tools/tc_security_diagnostics.h`. The required callback types are
-`tcsec_plaintext_validator_fn`, `tcsec_state_commit_fn`, and
-`tcsec_monotonic_time_us_fn`.
-`tcsec_init` accepts them as one `tcsec_callbacks_t` value and copies that value
-into the caller-owned context; no separate bind/unbind lifecycle exists.
+Flight applications include `tc_security.h` for the four `tcsec_*` operations.
+Pass a zero-initialized context and register the required `load_state` and
+`commit_state` callbacks with `tcsec_init`. Register `release_state` when the
+storage adapter caches secrets. Timing is optional. The status-to-string helper
+is in `tools/tc_security_diagnostics.h`.
 
-`tcsec_reset` reloads a complete durable configuration while retaining the
-callbacks and caller binding established by `tcsec_init`. It has transactional
-failure semantics: invalid or non-derivable replacement state leaves the old
-initialized context usable. It does not write NVM or silently clear replay.
+`tcsec_reset` reloads a complete durable configuration using the bound
+callbacks. A failed reload or commit I/O failure pauses reception until a
+reset succeeds. The context is an opaque, caller-owned 512-byte object that
+lives for the computer runtime. Callback bindings remain fixed. Adapter secret
+caches are released after loading and after completed receive processing.
+The storage callback owns the persistence policy and format.
 
 The module has no mutable global state. Distinct caller-owned
 `tcsec_context_t` objects may be used concurrently or through nested callbacks.
@@ -87,26 +89,13 @@ fail-closed SPI/configuration handling remain unconditional safety invariants.
 ECC/EDAC, memory scrubbing, MPU, watchdog, executable-image checking, and the
 physical NVM redundancy strategy remain platform/BSP responsibilities.
 
-`make core` builds `build/libtc_security.a` without any storage adapter. The
-flight application restores a complete configuration for `tcsec_init` or `tcsec_reset`, and implements
-`commit_state` using its storage platform.
-
-`make nvm-adapter` builds the optional flight-side `build/libtc_security_nvm.a`.
-Add `adapters/nvm` to the application include path to use `tc_security_nvm.h`.
-When linking static archives, list the adapter before the core. The adapter
-provides the fixed 175-byte, endian-stable two-slot state codec. Every slot
-carries a monotonic generation, Mission
-Security Profile SHA-256 digest, CRC32C and its inverse. Decode validates the
-complete `tcsec_config_t`; selection accepts the newest valid slot, falls back
-after an interrupted/corrupt write, rejects ambiguous equal generations, and
-enforces a caller-provided rollback floor. The BSP still owns physical erase,
-write, read-back and storage of the trusted generation floor. CRC detects
-accidental corruption; it is not an authenticity mechanism, so only trusted
-flight software may write these slots.
-When exactly one slot is invalid, `tcsec_nvm_plan_repair` returns a complete
-next-generation replacement targeting the bad slot. The BSP performs the
-physical atomic write and read-back verification before advancing its trusted
-generation floor.
+`make` or `make core` builds `build/libtc_security.a`. At final link, flight
+software supplies the mission policy. On initialization it registers its
+storage callbacks. First installation provisions the mission's initial
+security state through the authorized flight commissioning process.
+Operational startup and reset load the verified state through `load_state`.
+The flight storage service owns authentication, confidentiality, rollback
+protection and crash recovery for its data.
 
 Build and run the shared Go/C vectors:
 
@@ -129,3 +118,22 @@ under `scripts/oracle`.
 vectors and verifies them with x86 C software and ARMv7/NEON C under QEMU. The
 release gate fails if the cross toolchain, QEMU, sysroot, backend identity, full
 flight suite, or any differential record is missing.
+
+## Flight delivery and persistent reliability
+
+`make flight-package MISSION_POLICY=<approved-source>` packages only the public
+`tc_security.h` and target `libtc_security.a`, with build metadata and hashes.
+The policy is compiled into the archive. No test policy is permitted in this
+target. The compiler, ABI and approved mission rules must be frozen for delivery.
+
+The flight storage callback owns three independently writable record lanes and
+an independently protected, atomic, anti-rollback commit anchor. Each transaction
+retains anchored records, verifies all three candidate copies, then publishes the
+anchor. Loading requires two exact matching copies of the anchored version and
+repairs one failed lane before further commits. No older majority may override
+the anchor. This is a platform contract, not a physical NVM driver in the core.
+The test-only model injects cuts at every payload byte and publication step for
+replay, prepare and promotion; actual media and power-cut testing remain required.
+
+See the flight manual sections 3, 6 and appendix B for error handling, power loss,
+the business-execution window, callbacks and the implementation guide.

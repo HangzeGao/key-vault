@@ -8,6 +8,7 @@
 extern "C" {
 #endif
 
+#define TCSEC_INTERFACE_VERSION 2u
 #define TCSEC_PRIMARY_HEADER_LENGTH 5u
 #define TCSEC_SECURITY_HEADER_LENGTH 6u
 #define TCSEC_FECF_LENGTH 2u
@@ -45,7 +46,22 @@ typedef enum {
     TCSEC_EPOCH_PROMOTED,
     TCSEC_ROOT_PREPARED,
     TCSEC_ROOT_ALREADY_PREPARED,
-    TCSEC_SELF_TEST_FAILED
+    TCSEC_SELF_TEST_FAILED,
+    TCSEC_NOT_INITIALIZED,
+    TCSEC_ALREADY_INITIALIZED,
+    TCSEC_MISSING_CALLBACK,
+    TCSEC_RECEPTION_PAUSED,
+    TCSEC_STORAGE_UNAVAILABLE,
+    TCSEC_STORAGE_NO_QUORUM,
+    TCSEC_STORAGE_ROLLBACK_DETECTED,
+    TCSEC_STORAGE_NOT_COMMISSIONED,
+    TCSEC_STORAGE_COMMIT_UNCERTAIN,
+    TCSEC_STATE_COMMIT_REJECTED,
+    TCSEC_CALLBACK_RESULT_INVALID,
+    TCSEC_EPOCH_EXHAUSTED,
+    TCSEC_SPI_COLLISION,
+    TCSEC_KEY_DERIVATION_FAILED,
+    TCSEC_PROFILE_MISMATCH
 } tcsec_status_t;
 
 typedef enum {
@@ -132,13 +148,9 @@ typedef enum {
     TCSEC_COMMIT_REJECTED = 0,
     TCSEC_COMMIT_NEW = 1,
     TCSEC_COMMIT_ALREADY_APPLIED = 2,
-    TCSEC_COMMIT_PERSISTENCE_FAILED = 3
+    TCSEC_COMMIT_PERSISTENCE_FAILED = 3,
+    TCSEC_COMMIT_UNCERTAIN = 4
 } tcsec_commit_result_t;
-
-typedef int (*tcsec_plaintext_validator_fn)(void *user_context,
-                                            const uint8_t primary_header[TCSEC_PRIMARY_HEADER_LENGTH],
-                                            const uint8_t *plaintext,
-                                            size_t plaintext_length);
 
 /* Flight software atomically persists one logical state change and returns
  * only after verifying it. The core has no storage dependency. The callback
@@ -147,15 +159,26 @@ typedef int (*tcsec_plaintext_validator_fn)(void *user_context,
 typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(void *user_context,
                                                        const tcsec_commit_t *commit);
 
+/* Load one complete, verified durable snapshot into a temporary output.
+ * Return TCSEC_OK only after verifying it. The module clears the output
+ * after use. Return a storage-specific status for unavailable media, missing
+ * quorum, rollback, or an uncommissioned device. Integrity and configuration
+ * errors must be reported explicitly. Unexpected return codes are rejected.
+ * release_state clears adapter RAM after loading/receive, never durable data. */
+typedef tcsec_status_t (*tcsec_state_load_fn)(void *user_context,
+                                               tcsec_config_t *config);
+typedef void (*tcsec_state_release_fn)(void *user_context);
+
 typedef uint64_t (*tcsec_monotonic_time_us_fn)(void *user_context);
 
 /* Runtime dependencies supplied by flight software. tcsec_init copies this
  * value; the struct itself need not outlive the call, while user_context and
- * everything it references must remain valid until tcsec_deinit. */
+ * everything it references must remain valid for the running instance. */
 typedef struct {
-    tcsec_plaintext_validator_fn validate_plaintext;
-    tcsec_state_commit_fn commit_state;
-    tcsec_monotonic_time_us_fn monotonic_time_us;
+    tcsec_state_load_fn load_state;               /* Required. */
+    tcsec_state_commit_fn commit_state;           /* Required. */
+    tcsec_state_release_fn release_state;         /* Required for adapters that cache secrets. */
+    tcsec_monotonic_time_us_fn monotonic_time_us;  /* NULL disables timing. */
     void *user_context;
 } tcsec_callbacks_t;
 
@@ -180,7 +203,10 @@ typedef struct {
     uint32_t security_epoch;
     uint32_t root_version;
     uint8_t pending_root_present;
+    uint8_t reception_paused;
+    tcsec_status_t last_status;
     uint64_t receive_count;
+    /* The four timing fields are zero when no clock is configured. */
     uint64_t last_receive_us;
     uint64_t max_receive_us;
     uint64_t cycle_limit_exceeded_count;
@@ -196,61 +222,27 @@ typedef struct {
     size_t plaintext_length;
 } tcsec_result_t;
 
-/* Caller-owned fixed storage. Fields are implementation-private despite being
- * visible for freestanding-C allocation. */
+/* Caller-owned opaque object. Zero-initialize once at computer startup.
+ * Do not inspect, copy, serialize or change its storage. No heap is used. */
+#define TCSEC_CONTEXT_STORAGE_SIZE 512u
 typedef struct {
-    uint8_t profile_digest[TCSEC_PROFILE_DIGEST_LENGTH];
-    uint16_t spacecraft_id;
-    tcsec_suite_t current_suite;
-    tcsec_suite_t next_suite;
-    tcsec_suite_t recovery_suite;
-    uint8_t current_root[TCSEC_ROOT_KEY_LENGTH];
-    uint8_t pending_root[TCSEC_ROOT_KEY_LENGTH];
-    uint8_t current_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
-    uint8_t next_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
-    uint8_t recovery_key[TCSEC_SM4_KEY_LENGTH];
-    size_t current_root_length;
-    size_t pending_root_length;
-    uint32_t current_root_version;
-    uint32_t pending_root_version;
-    uint64_t pending_transaction_id;
-    uint32_t current_epoch;
-    uint16_t current_spi;
-    uint8_t ordinary_nonce_prefix[TCSEC_NONCE_PREFIX_LENGTH];
-    tcsec_replay_state_t current_replay;
-    tcsec_replay_state_t next_replay;
-    uint8_t pending_root_present;
-    uint16_t recovery_spi;
-    uint8_t recovery_nonce_prefix[TCSEC_NONCE_PREFIX_LENGTH];
-    tcsec_replay_state_t recovery_replay;
-    tcsec_callbacks_t callbacks;
-    uint64_t receive_count;
-    uint64_t last_receive_us;
-    uint64_t max_receive_us;
-    uint64_t cycle_limit_exceeded_count;
-    uint64_t clock_anomaly_count;
-    tcsec_self_test_state_t self_test_state;
-    tcsec_crypto_backend_t crypto_backend;
-    uint8_t initialized;
-    uint32_t context_integrity;
-    uint32_t context_integrity_inverse;
+    unsigned char _opaque[TCSEC_CONTEXT_STORAGE_SIZE];
 } tcsec_context_t;
 
+/* Start with a zero-initialized context. Registers callbacks and loads the
+ * initial snapshot. Callback bindings remain fixed until computer restart. */
 tcsec_status_t tcsec_init(tcsec_context_t *context,
-                          const tcsec_config_t *config,
                           const tcsec_callbacks_t *callbacks);
 
-/* Transactionally reloads all roots, derived keys, replay state, and rotation
- * state from a complete durable configuration while preserving the callbacks
- * and user_context bound by tcsec_init. If validation or derivation fails, the
- * original initialized context remains unchanged. The caller must serialize
- * this operation with tcsec_receive on the same context. */
-tcsec_status_t tcsec_reset(tcsec_context_t *context,
-                           const tcsec_config_t *config);
+/* Reloads the complete durable snapshot through the registered callback.
+ * A failed reload leaves reception paused. A successful reset resumes it.
+ * Serialize reset with receive and every other call on the same context. */
+tcsec_status_t tcsec_reset(tcsec_context_t *context);
 
-/* Receives one complete TC transfer frame. Ordinary plaintext is released only
- * after validation and durable replay/promotion commit. Root-prepare plaintext
- * is consumed internally and never copied to the output buffer.
+/* Receives one complete TC transfer frame. Current plaintext is released after
+ * durable replay commit; the caller must validate it before execution. Next
+ * plaintext additionally passes the built-in mission checks before promotion
+ * commits. Root-prepare plaintext is consumed internally.
  *
  * Reentrancy contract: the implementation has no mutable global state, so calls
  * using distinct tcsec_context_t objects may execute concurrently or from nested
@@ -268,9 +260,6 @@ tcsec_status_t tcsec_receive(tcsec_context_t *context,
 tcsec_status_t tcsec_get_runtime_status(const tcsec_context_t *context,
                                         tcsec_runtime_status_t *status);
 
-/* Deinitializes and zeroizes all roots, derived working keys, replay state,
- * callbacks, and caller binding in the context. */
-void tcsec_deinit(tcsec_context_t *context);
 
 #ifdef __cplusplus
 }

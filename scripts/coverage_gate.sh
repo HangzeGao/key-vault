@@ -34,19 +34,20 @@ mkdir -p -- "$COVERAGE_DIR"
 
 readonly C_SOURCES=(
   src/tc_security.c
-  adapters/nvm/tc_security_nvm.c
+  src/next_validation.c
   src/selftest.c
   src/sm4.c
   src/hctr.c
   src/gcm.c
   src/kdf.c
   tests/test_tc_security.c
+  tests/test_next_policy.c
 )
 
 for source in "${C_SOURCES[@]}"; do
   object="$COVERAGE_DIR/$(basename "${source%.c}").o"
-  "${CC:-cc}" -I"$C_DIR/include" -I"$C_DIR/src" -I"$C_DIR/adapters/nvm" \
-    -std=c11 -O0 -Wall -Wextra -Wpedantic -Werror --coverage \
+  "${CC:-cc}" -I"$C_DIR/include" -I"$C_DIR/src" \
+    -std=c11 -O0 -Wall -Wextra -Wpedantic -Werror -DTCSEC_TEST_NEXT_POLICY=1 --coverage \
     -c "$C_DIR/$source" -o "$object"
 done
 
@@ -55,7 +56,23 @@ done
   "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" \
   "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"
 
-"${CC:-cc}" -I"$C_DIR/include" -I"$C_DIR/src" -I"$C_DIR/adapters/nvm" -std=c11 -O2 \
+# Reuse the same instrumented production objects so injected failures contribute
+# to their actual line coverage. Only the separate test binary uses link wraps.
+fault_objects=()
+for object in "$COVERAGE_DIR"/*.o; do
+  if [[ "$(basename "$object")" != test_tc_security.o ]]; then fault_objects+=("$object"); fi
+done
+"${CC:-cc}" -I"$C_DIR/include" -I"$C_DIR/src" -std=c11 -O0 \
+  -Wall -Wextra -Wpedantic -Werror -DTCSEC_TEST_NEXT_POLICY=1 --coverage \
+  "$C_DIR/tests/test_fault_injection.c" "${fault_objects[@]}" \
+  -Wl,--wrap=tcsec_crypto_self_test -Wl,--wrap=tcsec_derive_ordinary_key \
+  -Wl,--wrap=tcsec_derive_recovery_key -Wl,--wrap=tcsec_sm4_hctr_decrypt \
+  -Wl,--wrap=tcsec_gcm_open -o "$COVERAGE_DIR/test_fault_injection"
+"$COVERAGE_DIR/test_fault_injection" \
+  "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" \
+  "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"
+
+"${CC:-cc}" -I"$C_DIR/include" -I"$C_DIR/src" -std=c11 -O2 \
   -Wall -Wextra -Wpedantic -Werror -DTCSEC_HAVE_ARMV7_NEON_ASM=1 \
   -DTCSEC_TEST_ARMV7_CAPABILITY=1 "$C_DIR/src/sm4.c" \
   "$C_DIR/tests/test_sm4_dispatch.c" -o "$COVERAGE_DIR/test_sm4_dispatch"
@@ -66,8 +83,8 @@ readonly GCOV_OUTPUT="$COVERAGE_DIR/gcov-summary.txt"
   cd "$COVERAGE_DIR"
   gcov -b -c -o . \
     "$C_DIR/src/tc_security.c" "$C_DIR/src/sm4.c" "$C_DIR/src/hctr.c" \
-    "$C_DIR/src/gcm.c" "$C_DIR/src/kdf.c" "$C_DIR/adapters/nvm/tc_security_nvm.c" \
-    "$C_DIR/src/selftest.c"
+    "$C_DIR/src/gcm.c" "$C_DIR/src/kdf.c" \
+    "$C_DIR/src/selftest.c" "$C_DIR/src/next_validation.c"
 ) | tee "$GCOV_OUTPUT"
 
 c_coverage="$(awk -F'[:%]' '/^Lines executed:/ { value=$2 } END { print value }' "$GCOV_OUTPUT")"

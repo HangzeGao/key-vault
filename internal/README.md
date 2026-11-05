@@ -27,8 +27,8 @@ API or generic persistence model is retained for that possibility.
 Rules:
 
 - Runtime modules never return plaintext protocol root or derived working
-  keys. The offline provisioner is the sole explicit seam allowed to create a
-  mode-0600 flight NVM artifact containing flight roots.
+  keys. Ground provisioning emits the authenticated Recovery frame and hash evidence.
+  Flight commissioning installs the initial state through its authorized process.
 - Allocate TC counters and commit TC state transitions transactionally.
 - Treat unknown suites, states, fields, routes, and configuration keys as errors.
 - Provision or mutate SAs only with the offline `cmd/ccsds-provision` tool.

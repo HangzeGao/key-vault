@@ -41,11 +41,11 @@ sequenceDiagram
     F->>F: "原子持久化 Pending Root，并派生 Next key"
     G->>M: "首个 Next-SPI 普通 SM4-HCTR 完整帧"
     M->>F: "原样传输"
-    F->>F: "解密 + 星务严格明文校验 + 原子提升"
+    F->>F: "解密、内部 Next 校验和原子提升"
     F-->>M: "仅此时向星务释放普通明文"
 ```
 
-Root Prepare 成功只写入 Pending。真正激活发生在第一个可正确解密且通过星务完整明文校验的 Next-SPI 普通帧。该设计不需要确认帧或第二条激活指令。
+Root Prepare 成功只写入 Pending。真正激活发生在第一个可正确解密且通过密码模块内部 Next 校验的 Next-SPI 普通帧。该设计不需要确认帧或第二条激活指令。
 
 ## 掉电一致性
 

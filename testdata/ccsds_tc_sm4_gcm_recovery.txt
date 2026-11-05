@@ -1,4 +1,5 @@
 # Ground Go -> flight C authenticated root-recovery vector.
+# Frame oracle: pyca/cryptography 50.0.2 / OpenSSL 4.0.3; refresh_tc_frame_vectors.py; TEST ONLY.
 suite_id=SM4_GCM
 root=0123456789abcdeffedcba9876543210
 ordinary_root=00112233445566778899aabbccddeeff
@@ -6,10 +7,10 @@ ordinary_suite=SM4_HCTR
 nonce_prefix=b0b1b2b3b4b5
 spi=7002
 iv_counter=01020304
-spacecraft_id=1234
+spacecraft_id=0001
 root_version=3
 current_root_version=7
 security_epoch=8
 current_spi=2001
 plaintext=0101020304050607080000000700000008000000092002001300112233445566778899aabbccddeeff
-protected_frame=2001004501700201020304c48788c3e5b5dfab053dc5d2b130bd7c30b71720417226e541d024f621b8ca0e60e6e6104f7703c50369f87cdcb469a504a6f5f83eecdd108f48be
+protected_frame=200100450170020102030436ed9a6032ffb2a111c9750ce4f141f565a3000c1300fe5f4a28b7d4b3d4a9d387296dd864cd41a97c0947b2b83f89cf7626c0fa51e7a9241a75e6

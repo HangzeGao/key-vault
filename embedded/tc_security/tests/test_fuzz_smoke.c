@@ -1,5 +1,4 @@
 #include "tc_security.h"
-#include "tc_security_nvm.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,16 +6,13 @@
 
 typedef struct {
     uint64_t now;
+    const tcsec_config_t *config;
 } callback_state_t;
 
-static int reject_plaintext(void *user,
-                            const uint8_t primary_header[TCSEC_PRIMARY_HEADER_LENGTH],
-                            const uint8_t *plaintext, size_t plaintext_length) {
-    (void)user;
-    (void)primary_header;
-    (void)plaintext;
-    (void)plaintext_length;
-    return 0;
+static tcsec_status_t load_snapshot(void *user, tcsec_config_t *config) {
+    const callback_state_t *state = user;
+    *config = *state->config;
+    return TCSEC_OK;
 }
 
 static tcsec_commit_result_t reject_commit(void *user, const tcsec_commit_t *commit) {
@@ -101,17 +97,14 @@ int main(int argc, char **argv) {
     size_t seed_length;
     uint8_t frame[TCSEC_MAX_FRAME_LENGTH + 1u];
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
-    uint8_t nvm_seed[TCSEC_NVM_IMAGE_LENGTH];
-    uint8_t nvm_input[TCSEC_NVM_IMAGE_LENGTH + 1u];
-    size_t nvm_seed_length;
-    tcsec_nvm_image_t image;
-    tcsec_nvm_image_t decoded;
     tcsec_result_t result;
     tcsec_config_t config;
-    tcsec_context_t context;
-    callback_state_t callback_state = {0u};
+    tcsec_config_t mutated_config;
+    tcsec_context_t context = {0};
+    callback_state_t callback_state = {.config = &config};
     tcsec_callbacks_t callbacks = {
-        reject_plaintext, reject_commit, monotonic_time, &callback_state
+        .load_state = load_snapshot, .commit_state = reject_commit,
+        .monotonic_time_us = monotonic_time, .user_context = &callback_state,
     };
     uint32_t random_state;
     unsigned long iterations;
@@ -121,35 +114,32 @@ int main(int argc, char **argv) {
     iterations = strtoul(argv[3], NULL, 10);
     if (random_state == 0u || iterations == 0u) return 2;
     make_config(&config);
-    image.generation = 1u;
-    image.config = config;
-    if (tcsec_nvm_encode(&image, nvm_seed, sizeof(nvm_seed), &nvm_seed_length) != TCSEC_OK)
-        return 3;
-
     for (iteration = 0u; iteration < iterations; ++iteration) {
         size_t index;
         size_t frame_length = (size_t)(next_random(&random_state) % sizeof(frame));
-        size_t nvm_length = (size_t)(next_random(&random_state) % sizeof(nvm_input));
         memcpy(frame, seed_frame, seed_length);
         for (index = seed_length; index < sizeof(frame); ++index) frame[index] = 0u;
         for (index = 0u; index < 1u + next_random(&random_state) % 16u; ++index) {
             size_t offset = (size_t)(next_random(&random_state) % sizeof(frame));
             frame[offset] ^= (uint8_t)next_random(&random_state);
         }
-        memcpy(nvm_input, nvm_seed, nvm_seed_length);
-        nvm_input[TCSEC_NVM_IMAGE_LENGTH] = 0u;
-        for (index = 0u; index < 1u + next_random(&random_state) % 16u; ++index) {
-            size_t offset = (size_t)(next_random(&random_state) % sizeof(nvm_input));
-            nvm_input[offset] ^= (uint8_t)next_random(&random_state);
-        }
+        mutated_config = config;
+        unsigned char *config_bytes = (unsigned char *)&mutated_config;
+        size_t offset = (size_t)(next_random(&random_state) % sizeof(mutated_config));
+        config_bytes[offset] ^= (unsigned char)(1u << (next_random(&random_state) % 8u));
 
-        if (tcsec_init(&context, &config, &callbacks) != TCSEC_OK) return 4;
+        if (tcsec_init(&context, &callbacks) != TCSEC_OK) return 4;
         (void)tcsec_receive(&context, frame, frame_length, plaintext,
                             sizeof(plaintext), &result);
-        tcsec_deinit(&context);
-        (void)tcsec_nvm_decode(nvm_input, nvm_length, 0u, &decoded);
-        (void)tcsec_nvm_select_latest(nvm_input, nvm_length, nvm_seed,
-                                      nvm_seed_length, 0u, &decoded, frame);
+        callback_state.config = &mutated_config;
+        const tcsec_status_t reload = tcsec_reset(&context);
+        if (reload != TCSEC_OK && reload != TCSEC_INVALID_CONFIGURATION && reload != TCSEC_PROFILE_MISMATCH) return 5;
+        if (reload != TCSEC_OK &&
+            (tcsec_receive(&context, frame, frame_length, plaintext, sizeof(plaintext), &result) !=
+                 TCSEC_RECEPTION_PAUSED || result.plaintext_length != 0u))
+            return 6;
+        callback_state.config = &config;
+        memset(&context, 0, sizeof(context));
     }
     printf("smoke fuzz passed: seed=0x%08x iterations=%lu\n",
            (unsigned)strtoul(argv[2], NULL, 0), iterations);

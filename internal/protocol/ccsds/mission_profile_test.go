@@ -2,7 +2,6 @@ package ccsds
 
 import (
 	"bytes"
-	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +48,7 @@ func TestExampleMissionProfile(t *testing.T) {
 	}
 }
 
-func TestMissionProfileOwnsGroundFlightAndRecoveryConfiguration(t *testing.T) {
+func TestMissionProfileOwnsGroundAndRecoveryConfiguration(t *testing.T) {
 	profile := loadMissionProfile(t)
 	digest, err := profile.Digest()
 	if err != nil || digest == [32]byte{} {
@@ -76,16 +75,6 @@ func TestMissionProfileOwnsGroundFlightAndRecoveryConfiguration(t *testing.T) {
 	if err != nil || command.NewRootVersion != next.KeyVersion || command.NextSPI != next.SPI ||
 		!bytes.Equal(command.NewOperationalRoot, secrets.NextRoot) || len(header) != TCPrimaryHeaderLength {
 		t.Fatalf("command=%+v header=%x err=%v", command, header, err)
-	}
-	image, err := profile.MarshalInitialFlightNVM(profile.TC.CurrentRootVersion)
-	if err != nil || len(image) != FlightNVMImageLength || string(image[:4]) != "TCS2" ||
-		binary.BigEndian.Uint32(image[8:12]) != profile.TC.CurrentRootVersion ||
-		!bytes.Equal(image[12:44], digest[:]) {
-		t.Fatalf("NVM image len=%d err=%v", len(image), err)
-	}
-	checksum := binary.BigEndian.Uint32(image[len(image)-8 : len(image)-4])
-	if checksum != crc32c(image[:len(image)-8]) || binary.BigEndian.Uint32(image[len(image)-4:]) != ^checksum {
-		t.Fatal("NVM image integrity trailer mismatch")
 	}
 }
 
@@ -133,9 +122,6 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 	if _, err := base.Associations(ids, 0); err == nil {
 		t.Fatal("zero policy version accepted")
 	}
-	if _, err := base.MarshalInitialFlightNVM(0); err == nil {
-		t.Fatal("zero NVM generation accepted")
-	}
 	var empty MissionSecrets
 	empty.Zeroize()
 	(*MissionSecrets)(nil).Zeroize()
@@ -157,8 +143,5 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 	}
 	if _, _, err := invalid.RootPrepareCommand(); err == nil {
 		t.Fatal("invalid recovery command accepted")
-	}
-	if _, err := invalid.MarshalInitialFlightNVM(1); err == nil {
-		t.Fatal("invalid NVM profile accepted")
 	}
 }

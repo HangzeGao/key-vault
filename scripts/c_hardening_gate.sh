@@ -10,20 +10,22 @@ readonly FUZZ_ITERATIONS="4096"
 readonly SANITIZERS="address,undefined"
 readonly SOURCES=(
   src/tc_security.c
-  adapters/nvm/tc_security_nvm.c
+  src/next_validation.c
   src/selftest.c
   src/sm4.c
   src/hctr.c
   src/gcm.c
   src/kdf.c
+  tests/test_next_policy.c
 )
 
 rm -rf -- "$BUILD_DIR"
 mkdir -p -- "$BUILD_DIR"
 
 common_flags=(
-  -I"$C_DIR/include" -I"$C_DIR/src" -I"$C_DIR/adapters/nvm"
+  -I"$C_DIR/include" -I"$C_DIR/src"
   -std=c11 -O1 -g -Wall -Wextra -Wpedantic -Werror
+  -DTCSEC_TEST_NEXT_POLICY=1
   -fno-omit-frame-pointer "-fsanitize=$SANITIZERS"
 )
 source_paths=()
@@ -32,6 +34,17 @@ for source in "${SOURCES[@]}"; do source_paths+=("$C_DIR/$source"); done
 "${CC:-cc}" "${common_flags[@]}" "${source_paths[@]}" \
   "$C_DIR/tests/test_tc_security.c" -o "$BUILD_DIR/test_tc_security"
 "$BUILD_DIR/test_tc_security" \
+  "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" \
+  "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"
+
+fault_links=(
+  -Wl,--wrap=tcsec_crypto_self_test -Wl,--wrap=tcsec_derive_ordinary_key
+  -Wl,--wrap=tcsec_derive_recovery_key -Wl,--wrap=tcsec_sm4_hctr_decrypt
+  -Wl,--wrap=tcsec_gcm_open
+)
+"${CC:-cc}" "${common_flags[@]}" "${source_paths[@]}" \
+  "$C_DIR/tests/test_fault_injection.c" "${fault_links[@]}" -o "$BUILD_DIR/test_fault_injection"
+"$BUILD_DIR/test_fault_injection" \
   "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" \
   "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"
 

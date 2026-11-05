@@ -10,28 +10,38 @@ flowchart LR
   G --> TPM["TPM 直接解封 Root"]
   G --> L["测控链路\n完整 TC 密帧"]
   L --> F["星载 C 模块\ntcsec_receive"]
-  F <--> NVM[("双槽 NVM\nRoot / SPI / replay")]
-  F --> V["星务明文严格校验"]
-  V --> O["星务指令处理"]
+  F <-->|注册回调| S["星务持久化服务"]
+  S <--> NVM[("受保护的安全状态")]
+  F --> O["星务明文校验与指令处理"]
 ```
 
-星载模块不感知租户、TPM、数据库、HTTP、审批、人员权限、下行密钥或地面密钥生命周期。它只感知 TC 帧结构、Current/Next/Recovery、派生上下文、重放状态、FECF、明文校验回调和原子持久化结果。
+星载模块不感知租户、TPM、数据库、HTTP、审批、人员权限、下行密钥或地面密钥生命周期。它只感知 TC 帧结构、Current/Next/Recovery、派生上下文、重放状态、FECF、Next 明文校验和原子持久化结果。
 
-明文规则来自测控团队冻结的遥控包 ICD，但校验实现属于星务软件。必选规则与职责以 [TC_PLAINTEXT_VALIDATION_DESIGN.md](TC_PLAINTEXT_VALIDATION_DESIGN.md) 为准。
+明文规则来自测控团队冻结的遥控包 ICD，由星务提供任务规则并在构建时链接到密码模块。必选规则与职责以 [TC_PLAINTEXT_VALIDATION_DESIGN.md](TC_PLAINTEXT_VALIDATION_DESIGN.md) 为准。
 
 ## 配置、装星与轮换
 
-Mission Security Profile 是星地 TC 配置的唯一源。`ccsds-provision` 严格解析一次受控输入，直接 TPM 封装 Current/Next/Recovery Root，并生成初始星载双槽 NVM、完整 Recovery Root Prepare 帧和不含明文密钥的哈希证据。不存在中间 CRK/SWK。
+星地使用同一份受控任务配置。地面 `ccsds-provision` 将 Current、Next 和 Recovery 根密钥封装到 TPM，输出完整的恢复通道换根准备帧及哈希证据。地面制备证据版本为 2，记录任务配置摘要和恢复帧哈希。
+
+### 星载首装与运行恢复
+
+首装在受控的装星工序中完成。星务的首装工具确认装星授权和目标设备身份，验证配置来源与完整性，并通过受保护的通道交付每星根密钥。配置绑定任务、设备及版本。编译产物可携带公开的格式版本、公开验证材料和任务参数。生产根密钥由受控工序灌装。
+
+首装事务写入完整的初始状态并读回验证，其中包含 Current 和 Recovery 根密钥、SPI、初始安全代次、空重放窗口及任务配置摘要。Next 根通过已认证的换根准备事务交付。星务需要在可信持久状态中记录首装是否完成。首装过程中断时，由受控工序根据已提交记录完成或回收事务。已服役设备的状态缺失、损坏或回退时停止收帧，进入授权恢复流程。
 
 ```mermaid
 flowchart LR
-  M["Mission Security Profile"] --> P["ccsds-provision"]
-  P --> T["TPM sealed Roots\nCurrent / Next / Recovery"]
-  P --> I["星载 NVM\nCurrent + Recovery"]
-  P --> R["Recovery GCM\nRoot Prepare TC frame"]
-  R --> F["星载 Pending Root"]
-  F --> S["首个合法 Next SPI 帧\n自动提交切换"]
+  M["受控任务配置"] --> P["地面制备工具"]
+  P --> T["TPM 封装 Current、Next 和 Recovery 根"]
+  P --> R["生成恢复通道换根准备帧"]
+  M --> I["星务首装工序"]
+  I --> S["验证授权与设备身份"]
+  S --> W["原子灌装并确认初始状态"]
+  W --> L["load_state 加载经验证的完整状态"]
+  L --> F["tcsec_init 成功后开放收帧"]
 ```
+
+首装载体、信任锚和工装由星务接口设计确定。验收覆盖错误设备、签名或配置损坏、首装重复执行、灌装中断，以及服役后状态回退。装星记录只保留设备标识、配置摘要和结果。
 
 地面轮换状态为 `PREPARED → SWITCHING → ACTIVE`。星上收到首个合法 Next SPI 密文后自动提交 Pending Root，不新增测控链路管理指令。普通接收槽只有 Current/Next/Recovery，不存在 Previous 或 Grace。
 
@@ -52,17 +62,18 @@ sequenceDiagram
   L->>F: 完整 TC 密帧
   F->>F: 长度/FECF/SPI/replay/最大前跳检查
   F->>F: 派生工作密钥并 HCTR 解密
-  F->>S: 请求严格明文校验
-  S-->>F: 接受或拒绝
-  F->>F: 原子提交 replay/切换状态
-  F-->>S: 仅成功时释放明文
+  opt 首个 Next SPI 帧
+    F->>F: 校验包结构和任务规则
+  end
+  F->>F: 原子提交 replay 或切换状态
+  F-->>S: 成功时释放明文
+  S->>S: 业务校验与指令处理
 ```
 
 ## 星载最小公开接口
 
 ```c
 tcsec_status_t tcsec_init(tcsec_context_t *context,
-                          const tcsec_config_t *config,
                           const tcsec_callbacks_t *callbacks);
 
 tcsec_status_t tcsec_receive(tcsec_context_t *context,
@@ -72,10 +83,23 @@ tcsec_status_t tcsec_receive(tcsec_context_t *context,
                              size_t plaintext_capacity,
                              tcsec_result_t *result);
 
-tcsec_status_t tcsec_reset(tcsec_context_t *context,
-                           const tcsec_config_t *config);
+tcsec_status_t tcsec_reset(tcsec_context_t *context);
 
-void tcsec_deinit(tcsec_context_t *context);
+tcsec_status_t tcsec_get_runtime_status(const tcsec_context_t *context,
+                                        tcsec_runtime_status_t *status);
+
 ```
 
-每个独立接收状态机使用一个 `tcsec_context_t`。模块无可变全局状态，不同 context 可并发；同一 context 必须由星务串行调用，回调不得重入同一 context。`tcsec_reset` 用完整有效 NVM 快照重载状态并保留初始化时绑定的回调；失败时旧 context 继续可用，接口本身不清 replay、不写 NVM。
+每个独立接收状态机使用一个 `tcsec_context_t`。模块无可变全局状态，不同 context 可并发；同一 context 必须由星务串行调用，回调不得重入同一 context。`tcsec_init` 注册星务提供的回调。`tcsec_reset` 沿用已注册的 `load_state` 重载完整持久化快照，失败时暂停收帧，成功后恢复。
+
+### 星务接口与掉电一致性
+
+星务入口收敛为 init、reset、receive 和运行状态查询。上下文采用 512 字节
+不透明存储对象，私有成员不进入交付头文件。交付采用公开 .h 与目标 .a，
+正式任务规则由模块开发侧编译进库。
+
+星务存储回调负责三个独立区域和受保护的原子防回退提交锚。提交时保留旧记录，
+写完并验证三份新记录后发布锚。恢复时从锚指定的记录中取得完整多数并修复，
+不能从不同版本拼接字段，不能退回旧多数。密码模块只在确认安全提交后交付明文，
+星务通过业务事务号与执行记录处理安全提交和业务执行之间的掉电窗口。
+详细约定见星务接口手册第 3 节和附录 B。

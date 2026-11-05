@@ -12,7 +12,7 @@ cd "$ROOT_DIR"
 bash -n start.sh
 GO_BIN="$go_bin" bash scripts/go_security_gate.sh
 GO_BIN="$go_bin" bash scripts/c_hardening_gate.sh
-"$go_bin" test -count=1 -run '^TestTCDataPlaneAPIProducesFlightAcceptedVector$' ./internal/api/ccsds
+GO_BIN="$go_bin" bash scripts/tc_process_gate.sh
 
 GO_BIN="$go_bin" bash scripts/external_vector_gate.sh
 
@@ -35,6 +35,7 @@ access_coverage="$(printf '%s\n' "$coverage_output" | awk '/Ground access Go sta
 if [[ -z "$c_coverage" || -z "$go_coverage" || -z "$access_coverage" ]]; then echo "release gate failed: coverage evidence missing" >&2; exit 1; fi
 
 mkdir -p "$EVIDENCE_DIR"
+GO_BIN="$go_bin" bash scripts/flight_package_gate.sh
 "$go_bin" build -o "$EVIDENCE_DIR/key-vault-gate" ./cmd/key-vault
 if ! diff -u <("$go_bin" list ./...) <("$go_bin" list -tags downlink ./...); then
   echo "release gate failed: obsolete downlink build tag changes package set" >&2
@@ -49,7 +50,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then dirty=true; fi
 fi
 source_manifest_hash="$({
-  find cmd examples internal scripts embedded/tc_security/src embedded/tc_security/include embedded/tc_security/adapters embedded/tc_security/tools \
+  find cmd examples internal scripts embedded/tc_security/src embedded/tc_security/include embedded/tc_security/tools \
     embedded/tc_security/tests embedded/downlink_security/src embedded/downlink_security/include \
     embedded/downlink_security/tests -type f -print
   printf '%s\n' Makefile embedded/tc_security/Makefile embedded/downlink_security/Makefile start.sh go.mod go.sum
@@ -60,7 +61,7 @@ external_vector_hash="$(sha256sum testdata/crypto/cryptography-sm4-v1.tsv | awk 
 external_generator_hash="$(sha256sum scripts/oracle/cryptography_vector_generator.py | awk '{print $1}')"
 cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
 {
-  "format_version": 8,
+  "format_version": 9,
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_commit": "$commit",
   "dirty_worktree": $dirty,
@@ -86,6 +87,7 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "rfc8998_sm4_gcm": "passed",
   "external_sm4_block_cmac_gcm_hctr_kdf": "passed",
   "api_to_flight_vector": "passed",
+  "current_tc_http_sqlite_c_process_recovery": "passed",
   "downlink_data_field_c_to_go": "passed",
   "downlink_c_line_coverage": $downlink_c_coverage,
   "downlink_go_statement_coverage": $downlink_go_coverage,
@@ -103,6 +105,7 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "armv7_qemu_neon": "passed",
   "go_x86_armv7_differential_records": 256,
   "operations_cli_test": "passed",
+  "flight_public_header_archive_link": "passed",
   "browser_asset_chain": "absent"
 }
 EOF

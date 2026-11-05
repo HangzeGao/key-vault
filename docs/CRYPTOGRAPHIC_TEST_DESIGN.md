@@ -31,7 +31,7 @@
 | Recovery Root Prepare | SM4-GCM，12 字节 nonce，16 字节 Tag | 加密和认证 |
 | 工作密钥派生 | SP 800-108 Counter KDF，PRF=SM4-CMAC | 从随机 SM4 Root 做确定性域隔离派生 |
 | 普通 TC 工作材料 | 16 字节 SM4 key + 16 字节 HCTR hash key | 总安全强度不超过 128 位 Root |
-| 星载状态保护 | live-context CRC32C/inverse、重复派生/比较、双槽 NVM | 故障检测；CRC 不提供对主动攻击者的认证 |
+| 星载状态保护 | live-context CRC32C/inverse、重复派生与比较、原子持久化回调 | 故障检测；CRC 不提供对主动攻击者的认证 |
 
 不允许通过测试参数临时启用旧 CTR/AES TC profile、空校验器、跳过 replay 或宽松帧解析。
 
@@ -165,7 +165,7 @@ SM4-HCTR 是本项目定制组合，不属于 NIST ACVP 标准项目，也不能
 - 与产品源码无共享实现的简洁参考模型做差分测试；
 - 所有固定向量携带规范版本和生成器哈希。
 
-HCTR 测试只能证明实现一致，不能补足其缺少 Tag 的认证能力。普通 TC 仍必须通过正式星务明文校验，相关场景遵循下位 TC 端到端设计。
+HCTR 测试只能证明实现一致，不能补足其缺少 Tag 的认证能力。首个 Next 帧在切换前必须通过内部明文校验与正式任务规则。Current 帧交付后由星务执行明文校验。相关场景见 TC 端到端测试设计。
 
 ## 6. TC 协议、状态机和端到端测试
 
@@ -179,7 +179,8 @@ HCTR 测试只能证明实现一致，不能补足其缺少 Tag 的认证能力�
 - Root Prepare、重启恢复 Pending Root、第一帧 Next SPI 原子提升；
 - NVM 提交失败时不释放明文、不推进状态；
 - 并发 IV 分配、服务重启和允许跳号但禁止重号；
-- 正式明文校验器拒绝 HCTR 篡改结果；
+- Next 内部校验使用正式任务规则拒绝所测试的 HCTR 篡改结果；
+- Current 明文交付后，即使星务拒绝指令也保留已提交的 IV；
 - HTTP scope、租户隔离、未知字段和旧数据域 API 拒绝。
 
 共享固定向量属于 L1/L2；只有真实 HTTP 服务、持久化存储、编译后的 C harness 和 NVM adapter 都实际参与，才可标记 L3 通过。
@@ -207,7 +208,7 @@ logs/artifacts contain no Root, working key, token or sensitive plaintext
 | Replay | 重复、过旧、窗口边界、最大前跳±1、counter 耗尽 |
 | Context | 每个关键字段 bit flip，context CRC/inverse 损坏 |
 | KDF | 双计算结果不一致、输入域字段损坏、输出缓冲不足 |
-| NVM | magic/version/length/digest/config/CRC/inverse bit flip，半写、双槽冲突、generation 回滚 |
+| 星务持久化 | 主机覆盖配置篡改、提交中断、提交确认丢失、加载完整性失败、复位重放。目标存储另验证实际格式、半写和版本回退 |
 | 回调 | validator 拒绝、commit 失败、错误返回、另一个 context 嵌套调用 |
 | 地面持久化 | 事务冲突、磁盘满、写失败、进程在分配 IV 后响应前终止 |
 
@@ -220,8 +221,7 @@ logs/artifacts contain no Root, working key, token or sensitive plaintext
 影响 C 帧解析、密码模式、状态或 NVM 的提交必须对以下入口执行有界 fuzz：
 
 - `tcsec_receive`；
-- `tcsec_nvm_decode`；
-- `tcsec_nvm_select_latest`；
+- `tcsec_reset`，由 `load_state` 提供变异的安全状态；
 - Mission Security Profile 严格解析；
 - 地面 TC HTTP JSON/Base64/完整帧解析。
 
@@ -348,14 +348,14 @@ AES 的 383 条向量和生成器哈希、覆盖率及加固结果写入发布�
 | --- | --- |
 | Go/C 共享普通 HCTR 与 Recovery GCM 互操作向量 | 已有 |
 | HTTP API 生成完整密帧并与星载向量比较 | 已有 |
-| Replay、Next promotion、Recovery、NVM 双槽负向测试 | 已有 |
+| Replay、Next promotion、Recovery、持久化回调故障测试 | 已有 |
 | Go/C 95% 覆盖率门禁、运维 CLI/API 测试、发布哈希证据 | 已有 |
 | GB/T/GM/T SM4 单分组权威 KAT | 已有；启动自检和单元测试共同覆盖 |
 | RFC 8998 SM4-GCM 权威 KAT | 已有；Go/C 共用固定向量并逐字节验证 ciphertext/tag |
 | SM4/CMAC/GCM 独立开源 Oracle 差分 | 已有；`pyca/cryptography 49.0.0` / OpenSSL 4.0.1 生成固定边界向量 |
 | 与产品无共享实现的 HCTR 参考模型和批量差分 | 已有；独立 Python 组合模型仅调用外部 SM4 分组原语，覆盖 16/17/31/32/33/64/1011 字节 |
 | SP 800-108/SM4-CMAC 独立参考向量 | 已有；16/32 字节输出由外部 CMAC 原语生成并由 Go/C 共同验证 |
-| ASan/UBSan 自动门禁和有界 fuzz runner | 已纳入 `make release-gate`；固定 seed、4096 次有界变异覆盖 `tcsec_receive`、`tcsec_nvm_decode` 和 `tcsec_nvm_select_latest` |
+| ASan/UBSan 自动门禁和有界 fuzz runner | 已纳入 `make release-gate`；固定 seed、4096 次有界变异覆盖 `tcsec_receive` 和 `tcsec_reset` 的状态加载 |
 | 星载启动 KAT 与失败锁定 | 已有；实际选中后端执行，失败锁定 receive/reset |
 | 自动 context/NVM/状态 bit-flip campaign | **待补 P1** |
 | 目标板 WCET、栈高水位、编译器交叉验证 | **待补 P1（飞行发布前）** |
@@ -419,3 +419,27 @@ SP 800-108/SM4-CMAC 派生向量。向量文件同时固定生成器源码 SHA-2
 - GM/T 0028-2024《密码模块安全要求》
 - GM/T 0039-2024《密码模块安全检测要求》
 - LLVM AddressSanitizer、UndefinedBehaviorSanitizer 与 coverage-guided fuzz 文档
+
+## 15 星务接口与三副本恢复加固
+
+接口及持久化变更必须验证四个公开入口、不透明上下文、缺失回调与调用顺序、
+精确错误码及 last_status。核心测试集对普通重放、Root Prepare 和 Next 提升，
+在每个候选负载字节、校验信息、完成标记、提交锚更新和回调确认点注入中断。
+测试必须分别断言旧锚恢复完整旧状态、新锚恢复完整新状态、已提交 IV 不重放、
+单副本故障可恢复、旧多数不能覆盖新锚、无多数失败关闭、提交不确定后停收并重载。
+
+主机模型把可信锚作为原子平台原语，不能替代板级 NVM 验收。目标硬件另须执行
+实际写入与擦除断电、控制器缓存、刷写确认、独立区域共因故障、可信锚防回退、
+存储加密封装、寿命与修复中断测试。业务执行意图和外部动作之间的中断由星务
+业务集成测试覆盖，不把密码重放保护等同于业务恰好执行一次。
+
+SPI 边界必须覆盖 Current=Recovery-2 的 Next 提升被拒绝，原关联不推进、
+不提交、不释放明文且 reset 可恢复，及 16 位 SPI 回绕和 32 位 epoch 耗尽。
+完成安全提交后任何回调返回非法或确认丢失，都不得继续在未确认的运行状态上收帧。
+
+
+主机完整门禁增加 `scripts/tc_process_gate.sh`，将实际 HTTP/SQLite 地面输出
+送入独立 C 进程，以测试专用持久化回调验证正常提交、提交前中断、提交确认丢失、
+每次调用的进程重启、重放拒绝及状态缺失的失败关闭。链接级故障注入独立于
+生产二进制，覆盖 KAT 锁定、重复 KDF 不一致、解密故障及候选密钥派生失败，
+其生产源码覆盖率合并计入同一个 95% 门禁，不能排除难测路径。
