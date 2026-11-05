@@ -931,10 +931,18 @@ typedef struct {
     uint64_t time_us;
 } storage_fixture_t;
 
+/* Test-visible scratch owned by the storage callbacks, never by the core. */
+static void clear_storage_scratch(storage_fixture_t *storage) {
+    volatile unsigned char *cursor = (volatile unsigned char *)&storage->cache;
+    size_t length = sizeof(storage->cache);
+    while (length-- != 0u) *cursor++ = 0u;
+}
+
 static tcsec_status_t load_storage(void *user, tcsec_config_t *config) {
     storage_fixture_t *storage = user;
     storage->cache = storage->saved;
-    *config = storage->cache;
+    if (storage->load_error == TCSEC_OK) *config = storage->cache;
+    clear_storage_scratch(storage);
     return storage->load_error;
 }
 
@@ -942,8 +950,12 @@ static tcsec_commit_result_t commit_storage(void *user, const tcsec_commit_t *ch
     storage_fixture_t *storage = user;
     storage->cache = storage->saved;
     tcsec_ordinary_config_t *ordinary = &storage->cache.ordinary;
+    tcsec_commit_result_t result = TCSEC_COMMIT_REJECTED;
     storage->commits++;
-    if (storage->fault == STORAGE_INTERRUPTED) return TCSEC_COMMIT_PERSISTENCE_FAILED;
+    if (storage->fault == STORAGE_INTERRUPTED) {
+        result = TCSEC_COMMIT_PERSISTENCE_FAILED;
+        goto cleanup;
+    }
     switch (change->kind) {
     case TCSEC_COMMIT_ORDINARY_REPLAY:
         ordinary->replay = change->replay;
@@ -977,22 +989,63 @@ static tcsec_commit_result_t commit_storage(void *user, const tcsec_commit_t *ch
         }
         break;
     default:
-        return TCSEC_COMMIT_REJECTED;
+        goto cleanup;
     }
     storage->saved = storage->cache;
-    return storage->fault == STORAGE_CONFIRMATION_LOST
-               ? TCSEC_COMMIT_UNCERTAIN : TCSEC_COMMIT_NEW;
-}
-
-static void release_storage(void *user) {
-    storage_fixture_t *storage = user;
-    memset(&storage->cache, 0, sizeof(storage->cache));
+    result = storage->fault == STORAGE_CONFIRMATION_LOST
+                 ? TCSEC_COMMIT_UNCERTAIN : TCSEC_COMMIT_NEW;
+cleanup:
+    clear_storage_scratch(storage);
+    return result;
 }
 
 static uint64_t storage_time(void *user) {
     storage_fixture_t *storage = user;
     storage->time_us += 5u;
     return storage->time_us;
+}
+
+static int test_storage_callback_cleanup(const char *path) {
+    vector_t vector;
+    storage_fixture_t storage = {0};
+    tcsec_config_t output = {0}, initial;
+    tcsec_commit_t change = {0};
+    const unsigned char empty[sizeof(storage.cache)] = {0};
+    const unsigned char empty_output[sizeof(output)] = {0};
+    if (!load_vector(path, &vector)) return 0;
+    ordinary_config(&storage.saved, &vector);
+    initial = storage.saved;
+    /* Direct calls prove cleanup happens before returning to the core. */
+    if (load_storage(&storage, &output) != TCSEC_OK ||
+        memcmp(&output, &initial, sizeof(output)) != 0 ||
+        memcmp(&storage.cache, empty, sizeof(empty)) != 0) return 0;
+    memset(&output, 0, sizeof(output));
+    storage.load_error = TCSEC_STATE_INTEGRITY_FAILED;
+    if (load_storage(&storage, &output) != TCSEC_STATE_INTEGRITY_FAILED ||
+        memcmp(&output, empty_output, sizeof(output)) != 0 ||
+        memcmp(&storage.cache, empty, sizeof(empty)) != 0) return 0;
+    change.kind = (tcsec_commit_kind_t)99;
+    if (commit_storage(&storage, &change) != TCSEC_COMMIT_REJECTED ||
+        memcmp(&storage.saved, &initial, sizeof(initial)) != 0 ||
+        memcmp(&storage.cache, empty, sizeof(empty)) != 0) return 0;
+    change.kind = TCSEC_COMMIT_ORDINARY_REPLAY;
+    change.replay.seen = 1;
+    change.replay.highest_iv = 9;
+    change.replay.bitmap = 1;
+    storage.fault = STORAGE_INTERRUPTED;
+    if (commit_storage(&storage, &change) != TCSEC_COMMIT_PERSISTENCE_FAILED ||
+        memcmp(&storage.saved, &initial, sizeof(initial)) != 0 ||
+        memcmp(&storage.cache, empty, sizeof(empty)) != 0) return 0;
+    storage.fault = STORAGE_CONFIRMATION_LOST;
+    if (commit_storage(&storage, &change) != TCSEC_COMMIT_UNCERTAIN ||
+        storage.saved.ordinary.replay.highest_iv != 9 ||
+        memcmp(&storage.cache, empty, sizeof(empty)) != 0) return 0;
+    storage.fault = STORAGE_WRITABLE;
+    change.replay.highest_iv = 10;
+    if (commit_storage(&storage, &change) != TCSEC_COMMIT_NEW ||
+        storage.saved.ordinary.replay.highest_iv != 10 ||
+        memcmp(&storage.cache, empty, sizeof(empty)) != 0) return 0;
+    return 1;
 }
 
 static int test_storage_recovery(const char *path) {
@@ -1006,7 +1059,7 @@ static int test_storage_recovery(const char *path) {
     const uint8_t empty_context[sizeof(context)] = {0};
     tcsec_callbacks_t callbacks = {
         .load_state = load_storage, .commit_state = commit_storage,
-        .release_state = release_storage, .monotonic_time_us = storage_time,
+        .monotonic_time_us = storage_time,
         .user_context = &storage,
     };
     if (!load_vector(path, &vector)) return 0;
@@ -1083,7 +1136,7 @@ static int test_storage_rotation(const char *path) {
     tcsec_context_t context = {0};
     const tcsec_callbacks_t callbacks = {
         .load_state = load_storage, .commit_state = commit_storage,
-        .release_state = release_storage, .user_context = &storage,
+        .user_context = &storage,
     };
     tcsec_result_t result;
     uint8_t output[TCSEC_MAX_FRAME_LENGTH], frame[TCSEC_MAX_FRAME_LENGTH];
@@ -1385,7 +1438,7 @@ static int test_review_contract(const char *path) {
     };
     tcsec_callbacks_t platform = {
         .load_state = load_storage, .commit_state = commit_storage,
-        .release_state = release_storage, .user_context = &storage,
+        .user_context = &storage,
     };
     callbacks_t basic = {.result = TCSEC_COMMIT_NEW};
     if (!load_vector(path, &vector)) return 0;
@@ -1556,7 +1609,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "transactional context reset test failed\n");
         return 1;
     }
-    if (!test_storage_recovery(argv[1]) || !test_storage_rotation(argv[2]) || !test_quorum_powercuts(argv[1], argv[2]) || !test_review_contract(argv[1]) || !test_review_recovery_boundaries(argv[2])) {
+    if (!test_storage_callback_cleanup(argv[1]) || !test_storage_recovery(argv[1]) || !test_storage_rotation(argv[2]) || !test_quorum_powercuts(argv[1], argv[2]) || !test_review_contract(argv[1]) || !test_review_recovery_boundaries(argv[2])) {
         fprintf(stderr, "flight storage callback tests failed\n");
         return 1;
     }

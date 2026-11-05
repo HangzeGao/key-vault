@@ -71,14 +71,15 @@ tcsec_status_t tcsec_reset(tcsec_context_t *context);
 
 ### 1.1 星务回调约定
 
-星务在 `tcsec_init` 中注册下表中的回调，可以直接对接星务现有的持久化服务。只需包含 `tc_security.h` 并链接密码核心库。统一注册与收帧示例见第 1.6 节。`tcsec_callbacks_t` 是星务填写的注册对象，保存四个回调函数指针及共享的 `user_context`。运行时，星务通过 `load_state` 写出完整快照，通过 `commit_state` 读取一次状态变化。
+星务在 `tcsec_init` 中注册下表中的回调，可以直接对接星务现有的持久化服务。只需包含 `tc_security.h` 并链接密码核心库。统一注册与收帧示例见第 1.5 节。`tcsec_callbacks_t` 是星务填写的注册对象，保存三个回调函数指针及共享的 `user_context`。运行时，星务通过 `load_state` 写出完整快照，通过 `commit_state` 读取一次状态变化。
 
 | 回调 | 是否必需 | 调用约定 |
 | --- | --- | --- |
 | `load_state` | 必需 | 初始化和复位时加载已验证的完整配置。成功返回 `TCSEC_OK`。根据具体失败返回存储不可用、无可信多数副本、回退、未装星或完整性错误。具体错误码见第 4 节。 |
 | `commit_state` | 必需 | 收帧时同步提交本次安全状态变化。只有确认更新已原子持久化后，才能报告成功。保存内容与返回值见第 1.3 节。 |
-| `release_state` | 有敏感缓存时必需 | 每次状态加载结束及正常结束的收帧处理后清除回调实现持有的 RAM 缓存。保留持久化数据。无敏感缓存时可填 `NULL`。 |
 | `monotonic_time_us` | 可选 | 读取单调微秒时间。填 `NULL` 时跳过计时。 |
+
+`load_state` 和 `commit_state` 必须在返回前清理各自拥有的临时根密钥、解封装缓冲和候选快照，成功、拒绝、写入失败及提交结果不确定的出口均须覆盖。星务存储服务内部使用的临时缓存由该服务同步清理，不能依赖密码模块后续调用。`load_state` 交给模块的输出配置保留有效内容，由模块在使用后清零。`commit_state` 的只读输入及其根准备对象由模块清理，星务不得改写或提前清除。
 
 自有持久化服务须能在掉电或提交结果不确定后恢复可信状态。密码模块提供逻辑状态和变化记录，星务决定存储格式、介质和读写方式。
 
@@ -100,7 +101,7 @@ typedef tcsec_status_t (*tcsec_state_load_fn)(
 
 #### 加载回调示例
 
-示例中的两个底层函数由星务实现。先核对首装记录，再读取并验证状态。两步均成功时才交回完整快照。
+示例中的两个底层函数由星务实现，其内部临时数据也在返回前自行清理。回调先核对首装记录，再将可信状态读入自己的临时对象。两步均成功时复制到输出，最后清除临时对象。清理使用逐字节 volatile 写入，避免普通清零被优化掉。
 
 ```c
 #include "tc_security.h"
@@ -110,13 +111,25 @@ tcsec_status_t flight_check_commissioning(void *service);
 tcsec_status_t flight_read_verified_snapshot(
     void *service, tcsec_config_t *out);
 
+/* 星务示例内部使用的内存清理函数，不注册为模块回调。 */
+static void flight_wipe(void *memory, size_t length)
+{
+    volatile unsigned char *cursor = memory;
+    while (length-- != 0u) *cursor++ = 0u;
+}
+
 static tcsec_status_t flight_load_state(void *service, tcsec_config_t *out)
 {
-    /* 未完成首装或记录无法确认时，返回具体错误。 */
-    const tcsec_status_t status = flight_check_commissioning(service);
-    if (status != TCSEC_OK) return status;
-    /* 同时检查完整性和防回退条件，成功后填写 out。 */
-    return flight_read_verified_snapshot(service, out);
+    tcsec_config_t temporary = {0};
+    /* 未完成首装时也经过下方统一清理出口。 */
+    tcsec_status_t status = flight_check_commissioning(service);
+    if (status == TCSEC_OK) {
+        status = flight_read_verified_snapshot(service, &temporary);
+    }
+    /* 只发布完整可信状态，保留输出供密码模块使用。 */
+    if (status == TCSEC_OK) *out = temporary;
+    flight_wipe(&temporary, sizeof(temporary));
+    return status;
 }
 ```
 
@@ -232,7 +245,7 @@ typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(
 
 本例收到普通帧 IV 9 后，模块在 `commit->replay` 中给出包含该 IV 的完整窗口。星务保存窗口，并在确认写入后返回 `TCSEC_COMMIT_NEW`。模块才交付明文。下次开机恢复该窗口，同一帧会被拒绝。
 
-下列存储函数由星务实现。每个函数在返回前完成对应的原子写入和结果确认，并直接返回上表中的枚举值。
+下列存储函数由星务实现。每个函数在返回前完成对应的原子写入和结果确认，并在所有出口清除自身的临时根密钥、候选快照及封装缓冲，再返回上表中的枚举值。回调自身只做分发，不保留敏感缓存。具体事务算法见附录 B。
 
 ```c
 tcsec_commit_result_t flight_save_replay(
@@ -258,26 +271,7 @@ static tcsec_commit_result_t flight_commit_state(
 }
 ```
 
-### 1.4 清理缓存回调 release_state
-
-```c
-typedef void (*tcsec_state_release_fn)(void *user_context);
-```
-
-唯一入参是注册时传入的星务服务句柄。无出参和返回值。回调清除星务适配层持有的敏感 RAM 缓存，保留持久化状态及服务句柄。每次加载结束均调用，已进入收帧处理尾部的调用结束前也会调用。自检在复位中失败时，模块可能调用它清理原缓存。前置拒绝可能不调用，回调本身应及时清除局部敏感数据，清理逻辑必须允许缓存为空或重复清理。无敏感缓存时填 `NULL`。提交实现每次从可信持久状态构建候选快照，不能假设加载回调留下的缓存仍存在。
-
-示例调用星务的内存清理操作。这个操作允许缓存为空，也允许重复调用。
-
-```c
-void flight_storage_clear_sensitive_ram(void *service);
-
-static void flight_release_cache(void *service)
-{
-    flight_storage_clear_sensitive_ram(service);
-}
-```
-
-### 1.5 单调计时回调 monotonic_time_us
+### 1.4 单调计时回调 monotonic_time_us
 
 ```c
 typedef uint64_t (*tcsec_monotonic_time_us_fn)(void *user_context);
@@ -296,11 +290,11 @@ static uint64_t flight_time_us(void *service)
 }
 ```
 
-### 1.6 回调注册与星务调用示例
+### 1.5 回调注册与星务调用示例
 
 #### 注册与启动
 
-前面四段回调实现与本节示例可放在同一 C 源文件中。星务提供的 `service` 须在本次计算机运行期间持续有效。启动示例用于已完成首装验收并获准运行的设备。首装验收期间，星务在维护模式下调用初始化和状态查询，TC 入口保持关闭。
+前面三段回调实现与本节示例可放在同一 C 源文件中。星务提供的 `service` 须在本次计算机运行期间持续有效。启动示例用于已完成首装验收并获准运行的设备。首装验收期间，星务在维护模式下调用初始化和状态查询，TC 入口保持关闭。
 
 ```c
 /* 控制星务侧 TC 入口。调用方负责串行化。 */
@@ -313,8 +307,6 @@ static tcsec_status_t start_tc(void *service)
     const tcsec_callbacks_t callbacks = {
         .load_state = flight_load_state,
         .commit_state = flight_commit_state,
-        /* 服务没有敏感缓存时可填 NULL。 */
-        .release_state = flight_release_cache,
         /* 无需采集耗时时可填 NULL。 */
         .monotonic_time_us = flight_time_us,
         .user_context = service,
@@ -622,11 +614,10 @@ sequenceDiagram
     S->>C: 传入上下文和回调
     C->>C: 运行自检，失败时锁定
     C->>P: load_state
+    P->>P: 返回前清理自有临时数据
     P-->>C: 返回已验证配置或错误
     C->>C: 校验配置并派生工作密钥
-    opt 已注册 release_state
-        C->>P: 清除星务敏感 RAM 缓存
-    end
+    C->>C: 清零模块临时配置
     C-->>S: 返回初始化结果，成功后开放接收
 ```
 
@@ -640,12 +631,10 @@ sequenceDiagram
     S->>C: 在帧间请求重载
     C->>C: 检查上下文并运行自检
     C->>P: load_state
+    P->>P: 返回前清理自有临时数据
     P-->>C: 返回已验证配置或错误
     C->>C: 构建并校验候选上下文
     C->>C: 成功则替换并恢复接收，失败则保持停收
-    opt 已注册 release_state
-        C->>P: 清除星务敏感 RAM 缓存
-    end
     C-->>S: 返回重载结果
 ```
 
@@ -671,11 +660,9 @@ sequenceDiagram
         C->>C: 检查重放窗口，认证解密并检查换根事务
     end
     C->>P: commit_state 同步提交
+    P->>P: 返回前清理候选与临时密钥
     P-->>C: 返回已确认的提交结果
     C->>C: 成功时更新状态，存储故障时停收
-    opt 已注册 release_state
-        C->>P: 清除星务敏感 RAM 缓存
-    end
     C-->>S: 返回明文、管理事件或失败状态
 ```
 
@@ -724,6 +711,7 @@ sequenceDiagram
     P->>N: 原子推进代数与摘要
     Note over P,N: 此后掉电，重启按新锚恢复新状态
     N-->>P: 确认提交锚及三份记录
+    P->>P: 清除候选和封装临时数据
     P-->>C: 返回已确认成功
     C->>C: 发布运行状态和普通明文
 ```
@@ -839,11 +827,11 @@ sequenceDiagram
 
 ## 附录 B 星务代码开发指导
 
-本附录面向星务集成人员。以下步骤描述可实现的存储算法和调用约定，板级读写、刷写、加密封装和提交锚原语须由星务平台实现。手册中的 `flight_*` 名称都是星务示例函数，不属于密码模块静态库，也不假定已有 BSP 提供同名函数。回调注册的完整 C 示例位于第 1.2 至 1.6 节。
+本附录面向星务集成人员。以下步骤描述可实现的存储算法和调用约定，板级读写、刷写、加密封装和提交锚原语须由星务平台实现。手册中的 `flight_*` 名称都是星务示例函数，不属于密码模块静态库，也不假定已有 BSP 提供同名函数。回调注册的完整 C 示例位于第 1.2 至 1.5 节。
 
 ### B.1 交付文件与编译集成
 
-业务集成包包含 `tc_security.h` 和 `libtc_security.a`。随包记录版本、文件 SHA-256、目标架构、编译器、编译选项、字节序、调用约定、枚举及 size_t 宽度、浮点 ABI、任务规则版本和门禁证据。头文件与静态库必须成对使用，升级时重编译调用方。内部头文件、算法接口、测试策略和根密钥不进入业务集成包。
+业务集成包包含 `tc_security.h` 和 `libtc_security.a`，当前头文件接口版本宏 `TCSEC_INTERFACE_VERSION` 为 3。随包记录版本、文件 SHA-256、目标架构、编译器、编译选项、字节序、调用约定、枚举及 size_t 宽度、浮点 ABI、任务规则版本和门禁证据。头文件与静态库必须成对使用，升级时重编译调用方。内部头文件、算法接口、测试策略和根密钥不进入业务集成包。
 
 模块开发侧在干净构建目录中运行下列命令。`MISSION_POLICY` 指向已评审的正式任务规则源码，由模块侧编译进静态库。星务业务代码不需要调用或实现该内部函数。仓库测试策略不能用于飞行交付。
 
@@ -943,6 +931,7 @@ commit_state(service, change)
 | 确认丢失 | 新状态已提交而回调报告不确定，模块不释放明文，reset 后重复帧被拒绝。 |
 | 换根与重启 | Pending 根及恢复窗口一起恢复，Next 提升后新 Current 与清除 Pending 同时恢复。 |
 | 业务掉电窗口 | 分别在安全提交、明文交付、业务执行意图、外部动作和结果记录之后断电，地面能够区分接收与执行结果。 |
+| 回调清理 | 加载成功和失败、提交成功、拒绝、写入失败和结果不确定的各出口均清除自有临时数据。加载成功的输出快照仍完整，持久状态保持正确。 |
 | 资源和机密 | 实测 WCET、栈、存储寿命和刷写时延，日志和工件无真实根密钥、工作密钥或敏感明文。 |
 
 仓库的主机三副本模型覆盖普通重放、换根准备和提升的逐字节中断，以及单副本损坏和旧记录不能覆盖提交锚的场景。模型假定平台提供可信原子提交锚，未模拟真实擦除、电源波形和控制器缓存。物理断电、共因故障和锚原语须在最终板卡上完成验收。

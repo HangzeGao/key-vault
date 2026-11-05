@@ -348,11 +348,6 @@ static tcsec_status_t configure(tcsec_private_context_t *context, const tcsec_co
     return TCSEC_OK;
 }
 
-static void release_state(const tcsec_callbacks_t *callbacks) {
-    if (callbacks->release_state != NULL)
-        callbacks->release_state(callbacks->user_context);
-}
-
 static tcsec_status_t load_configuration(tcsec_private_context_t *candidate,
                                           const tcsec_private_context_t *previous,
                                           const tcsec_callbacks_t *callbacks) {
@@ -365,8 +360,6 @@ static tcsec_status_t load_configuration(tcsec_private_context_t *candidate,
             memcpy(candidate->profile_digest, previous->profile_digest,
                    TCSEC_PROFILE_DIGEST_LENGTH);
         context_seal(candidate);
-        if (previous != NULL && previous->reception_paused == 0u)
-            release_state(callbacks);
         return TCSEC_SELF_TEST_FAILED;
     }
 
@@ -389,7 +382,6 @@ static tcsec_status_t load_configuration(tcsec_private_context_t *candidate,
         status = configure(candidate, &config, callbacks);
     }
     zeroize(&config, sizeof(config));
-    release_state(callbacks);
     if (status != TCSEC_OK) {
         zeroize(candidate, sizeof(*candidate));
     }
@@ -786,7 +778,6 @@ finish:
         pause_reception(context);
     }
     context_seal(context);
-    release_state(&context->callbacks);
     return status;
 }
 

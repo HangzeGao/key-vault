@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define TCSEC_INTERFACE_VERSION 2u
+#define TCSEC_INTERFACE_VERSION 3u
 #define TCSEC_PRIMARY_HEADER_LENGTH 5u
 #define TCSEC_SECURITY_HEADER_LENGTH 6u
 #define TCSEC_FECF_LENGTH 2u
@@ -155,7 +155,8 @@ typedef enum {
 /* Flight software atomically persists one logical state change and returns
  * only after verifying it. The core has no storage dependency. The callback
  * must not execute or enqueue ordinary plaintext. root_prepare is non-NULL
- * only for ROOT_PREPARE. */
+ * only for ROOT_PREPARE. The callback must clear its own temporary secrets
+ * before returning on every success and failure path. */
 typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(void *user_context,
                                                        const tcsec_commit_t *commit);
 
@@ -164,10 +165,10 @@ typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(void *user_context,
  * after use. Return a storage-specific status for unavailable media, missing
  * quorum, rollback, or an uncommissioned device. Integrity and configuration
  * errors must be reported explicitly. Unexpected return codes are rejected.
- * release_state clears adapter RAM after loading/receive, never durable data. */
+ * The callback clears its own temporary secrets before returning on every
+ * path, but leaves the output intact. The module clears the output after use. */
 typedef tcsec_status_t (*tcsec_state_load_fn)(void *user_context,
                                                tcsec_config_t *config);
-typedef void (*tcsec_state_release_fn)(void *user_context);
 
 typedef uint64_t (*tcsec_monotonic_time_us_fn)(void *user_context);
 
@@ -177,7 +178,6 @@ typedef uint64_t (*tcsec_monotonic_time_us_fn)(void *user_context);
 typedef struct {
     tcsec_state_load_fn load_state;               /* Required. */
     tcsec_state_commit_fn commit_state;           /* Required. */
-    tcsec_state_release_fn release_state;         /* Required for adapters that cache secrets. */
     tcsec_monotonic_time_us_fn monotonic_time_us;  /* NULL disables timing. */
     void *user_context;
 } tcsec_callbacks_t;

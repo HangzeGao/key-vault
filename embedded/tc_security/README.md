@@ -27,15 +27,16 @@ is enabled only in test builds. See
 
 Flight applications include `tc_security.h` for the four `tcsec_*` operations.
 Pass a zero-initialized context and register the required `load_state` and
-`commit_state` callbacks with `tcsec_init`. Register `release_state` when the
-storage adapter caches secrets. Timing is optional. The status-to-string helper
+`commit_state` callbacks with `tcsec_init`. Each callback clears its own
+temporary secret data on every return path. Timing is optional. The status-to-string helper
 is in `tools/tc_security_diagnostics.h`.
 
 `tcsec_reset` reloads a complete durable configuration using the bound
 callbacks. A failed reload or commit I/O failure pauses reception until a
 reset succeeds. The context is an opaque, caller-owned 512-byte object that
-lives for the computer runtime. Callback bindings remain fixed. Adapter secret
-caches are released after loading and after completed receive processing.
+lives for the computer runtime. Callback bindings remain fixed. Storage callbacks
+and their helpers clear their own temporary secrets before returning. The core
+clears the loaded configuration after use and manages its internal key material.
 The storage callback owns the persistence policy and format.
 
 The module has no mutable global state. Distinct caller-owned
