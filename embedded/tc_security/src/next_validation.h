@@ -1,7 +1,7 @@
 #ifndef TCSEC_NEXT_VALIDATION_H
 #define TCSEC_NEXT_VALIDATION_H
 
-#include "tc_security.h"
+#include "parameters.h"
 
 /* Private compile-time seam. A flight build must link the mission's fixed
  * policy; there is no default policy or runtime callback. Return exactly 1

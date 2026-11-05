@@ -77,16 +77,12 @@ static void make_config(tcsec_config_t *config) {
     memset(config, 0, sizeof(*config));
     memset(config->profile_digest, 0xa5, sizeof(config->profile_digest));
     config->ordinary.spacecraft_id = 0x23u;
-    config->ordinary.suite = TCSEC_SUITE_SM4_HCTR;
     memcpy(config->ordinary.operational_root, operational_root, sizeof(operational_root));
-    config->ordinary.operational_root_length = sizeof(operational_root);
     config->ordinary.root_version = 1u;
     config->ordinary.current_epoch = 1u;
     config->ordinary.current_spi = 0x1001u;
     memcpy(config->ordinary.nonce_prefix, "ORDNRY", TCSEC_NONCE_PREFIX_LENGTH);
-    config->recovery.suite = TCSEC_SUITE_SM4_GCM;
     memcpy(config->recovery.recovery_root, recovery_root, sizeof(recovery_root));
-    config->recovery.recovery_root_length = sizeof(recovery_root);
     config->recovery.root_version = 1u;
     config->recovery.spi = 0x7001u;
     memcpy(config->recovery.nonce_prefix, "RECOVR", TCSEC_NONCE_PREFIX_LENGTH);

@@ -1,7 +1,7 @@
 #ifndef TCSEC_GCM_H
 #define TCSEC_GCM_H
 
-#include "tc_security.h"
+#include "parameters.h"
 
 #include <stddef.h>
 #include <stdint.h>

@@ -1,7 +1,7 @@
 #ifndef TC_SECURITY_KDF_H
 #define TC_SECURITY_KDF_H
 
-#include "tc_security.h"
+#include "parameters.h"
 
 #include <stddef.h>
 #include <stdint.h>

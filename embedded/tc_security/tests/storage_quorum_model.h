@@ -123,10 +123,10 @@ static int test_quorum_powercuts(const char *ordinary_path, const char *recovery
                         TCSEC_ROOT_PREPARED || model_load(&store, &initial) != TCSEC_OK) return 0;
                 cold_restart(&context);
                 if (tcsec_derive_ordinary_key(initial.ordinary.pending_operational_root, 16,
-                        initial.ordinary.spacecraft_id, initial.ordinary.pending_suite,
+                        initial.ordinary.spacecraft_id, TCSEC_SUITE_SM4_HCTR,
                         (uint16_t)(initial.ordinary.current_spi + 1u), initial.ordinary.current_epoch + 1u,
                         initial.ordinary.pending_root_version, key, sizeof(key)) != 0 ||
-                    !build_ordinary_frame(initial.ordinary.pending_suite, key,
+                    !build_ordinary_frame(TCSEC_SUITE_SM4_HCTR, key,
                         initial.ordinary.nonce_prefix, (uint16_t)(initial.ordinary.current_spi + 1u),
                         1, next_test_packet, sizeof(next_test_packet), frame, &frame_length)) return 0;
                 event = TCSEC_EPOCH_PROMOTED;

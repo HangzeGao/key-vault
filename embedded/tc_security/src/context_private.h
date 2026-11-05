@@ -1,21 +1,16 @@
 #ifndef TCSEC_CONTEXT_PRIVATE_H
 #define TCSEC_CONTEXT_PRIVATE_H
 
-#include "tc_security.h"
+#include "parameters.h"
 
 typedef struct {
     uint8_t profile_digest[TCSEC_PROFILE_DIGEST_LENGTH];
     uint16_t spacecraft_id;
-    tcsec_suite_t current_suite;
-    tcsec_suite_t next_suite;
-    tcsec_suite_t recovery_suite;
     uint8_t current_root[TCSEC_ROOT_KEY_LENGTH];
     uint8_t pending_root[TCSEC_ROOT_KEY_LENGTH];
     uint8_t current_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
     uint8_t next_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
     uint8_t recovery_key[TCSEC_SM4_KEY_LENGTH];
-    size_t current_root_length;
-    size_t pending_root_length;
     uint32_t current_root_version;
     uint32_t pending_root_version;
     uint64_t pending_transaction_id;

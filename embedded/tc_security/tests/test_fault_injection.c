@@ -9,6 +9,7 @@ static int fail_derive;
 static int corrupt_ordinary_repeat;
 static int corrupt_recovery_repeat;
 static int fail_hctr;
+static int corrupt_prepare_suite;
 static unsigned fail_gcm_call;
 static unsigned derive_calls, recovery_calls, gcm_calls;
 
@@ -16,14 +17,17 @@ int __real_tcsec_crypto_self_test(tcsec_crypto_backend_t *backend);
 int __wrap_tcsec_crypto_self_test(tcsec_crypto_backend_t *backend) {
     int result, saved_derive = fail_derive, saved_hctr = fail_hctr;
     int saved_ordinary = corrupt_ordinary_repeat, saved_recovery = corrupt_recovery_repeat;
+    int saved_suite = corrupt_prepare_suite;
     unsigned saved_gcm = fail_gcm_call;
     if (fail_selftest) return -1;
     fail_derive = fail_hctr = corrupt_ordinary_repeat = corrupt_recovery_repeat = 0;
+    corrupt_prepare_suite = 0;
     fail_gcm_call = 0;
     result = __real_tcsec_crypto_self_test(backend);
     fail_derive = saved_derive; fail_hctr = saved_hctr;
     corrupt_ordinary_repeat = saved_ordinary; corrupt_recovery_repeat = saved_recovery;
     fail_gcm_call = saved_gcm;
+    corrupt_prepare_suite = saved_suite;
     derive_calls = recovery_calls = gcm_calls = 0;
     return result;
 }
@@ -62,7 +66,10 @@ int __wrap_tcsec_gcm_open(tcsec_suite_t suite, const uint8_t *key, const uint8_t
                          const uint8_t *aad, size_t aad_length, const uint8_t *in,
                          size_t length, const uint8_t *tag, uint8_t *out) {
     if (++gcm_calls == fail_gcm_call) return -1;
-    return __real_tcsec_gcm_open(suite,key,nonce,aad,aad_length,in,length,tag,out);
+    int result = __real_tcsec_gcm_open(suite,key,nonce,aad,aad_length,in,length,tag,out);
+    if (result == 0 && corrupt_prepare_suite && length == TCSEC_ROOT_PREPARE_SM4_LENGTH)
+        out[23] ^= 0x80u;
+    return result;
 }
 
 int main(int argc, char **argv) {
@@ -132,6 +139,14 @@ int main(int argc, char **argv) {
     if (tcsec_receive(&context,recovery.protected_frame,recovery.protected_frame_length,
             output,sizeof(output),&result) != TCSEC_KEY_DERIVATION_FAILED ||
         output[0] != 0 || fixture.calls != 0) return 16;
-    puts("Link-time faults passed: self-test, repeated KDF, HCTR, GCM and candidate keys");
+    fail_derive = 0;
+    if (tcsec_reset(&context) != TCSEC_OK) return 17;
+    /* Fixed algorithms are not caller configuration. The authenticated command
+     * still has a suite field, and a corrupted unsupported value must fail closed. */
+    corrupt_prepare_suite = 1;
+    if (tcsec_receive(&context,recovery.protected_frame,recovery.protected_frame_length,
+            output,sizeof(output),&result) != TCSEC_ROOT_PREPARE_REJECTED ||
+        output[0] != 0 || fixture.calls != 0) return 18;
+    puts("Link-time faults passed: self-test, KDF, HCTR, GCM, candidate keys and fixed wire suite");
     return 0;
 }

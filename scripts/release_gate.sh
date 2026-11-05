@@ -10,6 +10,7 @@ if [[ -z "$go_bin" && -x /usr/local/go/bin/go ]]; then go_bin=/usr/local/go/bin/
 if [[ -z "$go_bin" ]]; then echo "release gate failed: Go toolchain not found" >&2; exit 1; fi
 cd "$ROOT_DIR"
 bash -n start.sh
+"$go_bin" run ./scripts/tools/flight-manual-header --check
 GO_BIN="$go_bin" bash scripts/go_security_gate.sh
 GO_BIN="$go_bin" bash scripts/c_hardening_gate.sh
 GO_BIN="$go_bin" bash scripts/tc_process_gate.sh
@@ -61,11 +62,15 @@ external_vector_hash="$(sha256sum testdata/crypto/cryptography-sm4-v1.tsv | awk 
 external_generator_hash="$(sha256sum scripts/oracle/cryptography_vector_generator.py | awk '{print $1}')"
 cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
 {
-  "format_version": 9,
+  "format_version": 10,
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_commit": "$commit",
   "dirty_worktree": $dirty,
   "source_manifest_sha256": "$source_manifest_hash",
+  "flight_public_header_sha256": "$(sha256sum embedded/tc_security/include/tc_security.h | awk '{print $1}')",
+  "flight_interface_manual_md_sha256": "$(sha256sum docs/FLIGHT_INTERFACE_MANUAL.md | awk '{print $1}')",
+  "flight_interface_manual_docx_sha256": "$(sha256sum docs/星务端密码模块接口手册.docx | awk '{print $1}')",
+  "flight_manual_header_reference": "passed",
   "go_toolchain": "$("$go_bin" env GOVERSION)",
   "c_compiler": "$("${CC:-cc}" --version | head -1)",
   "go_race": "passed",

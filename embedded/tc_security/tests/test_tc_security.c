@@ -266,16 +266,12 @@ static void ordinary_config(tcsec_config_t *config, const vector_t *vector) {
     memset(config, 0, sizeof(*config));
     memset(config->profile_digest, 0x5au, sizeof(config->profile_digest));
     config->ordinary.spacecraft_id = vector->spacecraft_id;
-    config->ordinary.suite = vector->suite;
     memcpy(config->ordinary.operational_root, vector->root, vector->root_length);
-    config->ordinary.operational_root_length = vector->root_length;
     config->ordinary.root_version = vector->root_version;
     config->ordinary.current_epoch = vector->security_epoch;
     config->ordinary.current_spi = vector->spi;
     memcpy(config->ordinary.nonce_prefix, vector->prefix, sizeof(config->ordinary.nonce_prefix));
-    config->recovery.suite = TCSEC_SUITE_SM4_GCM;
     memcpy(config->recovery.recovery_root, recovery_root, sizeof(recovery_root));
-    config->recovery.recovery_root_length = sizeof(recovery_root);
     config->recovery.root_version = 3u;
     config->recovery.spi = 0x7002u;
     memcpy(config->recovery.nonce_prefix, "RECOVR", 6u);
@@ -291,16 +287,12 @@ static void recovery_config(tcsec_config_t *config, const vector_t *vector) {
     memset(config, 0, sizeof(*config));
     memset(config->profile_digest, 0x5au, sizeof(config->profile_digest));
     config->ordinary.spacecraft_id = vector->spacecraft_id;
-    config->ordinary.suite = vector->ordinary_suite;
     memcpy(config->ordinary.operational_root, vector->ordinary_root, vector->ordinary_root_length);
-    config->ordinary.operational_root_length = vector->ordinary_root_length;
     config->ordinary.root_version = vector->current_root_version;
     config->ordinary.current_epoch = vector->security_epoch;
     config->ordinary.current_spi = vector->current_spi;
     memcpy(config->ordinary.nonce_prefix, "ORDNRY", 6u);
-    config->recovery.suite = vector->suite;
     memcpy(config->recovery.recovery_root, vector->root, vector->root_length);
-    config->recovery.recovery_root_length = vector->root_length;
     config->recovery.root_version = vector->root_version;
     config->recovery.spi = vector->spi;
     memcpy(config->recovery.nonce_prefix, vector->prefix, sizeof(config->recovery.nonce_prefix));
@@ -317,10 +309,8 @@ static int init_recovery_restored(tcsec_context_t *context, const vector_t *vect
     tcsec_config_t config;
     recovery_config(&config, vector);
     config.ordinary.pending_root_present = inspect(prepared).pending_root_present;
-    config.ordinary.pending_suite = inspect(prepared).next_suite;
     memcpy(config.ordinary.pending_operational_root, inspect(prepared).pending_root,
-           inspect(prepared).pending_root_length);
-    config.ordinary.pending_operational_root_length = inspect(prepared).pending_root_length;
+           TCSEC_ROOT_KEY_LENGTH);
     config.ordinary.pending_root_version = inspect(prepared).pending_root_version;
     config.ordinary.pending_transaction_id = inspect(prepared).pending_transaction_id;
     config.recovery.replay = inspect(prepared).recovery_replay;
@@ -962,8 +952,6 @@ static tcsec_commit_result_t commit_storage(void *user, const tcsec_commit_t *ch
         break;
     case TCSEC_COMMIT_ROOT_PREPARE:
         ordinary->pending_root_present = 1u;
-        ordinary->pending_suite = change->root_prepare->ordinary_suite;
-        ordinary->pending_operational_root_length = change->root_prepare->new_operational_root_length;
         memcpy(ordinary->pending_operational_root, change->root_prepare->new_operational_root,
                sizeof(ordinary->pending_operational_root));
         ordinary->pending_root_version = change->root_prepare->new_root_version;
@@ -974,16 +962,12 @@ static tcsec_commit_result_t commit_storage(void *user, const tcsec_commit_t *ch
         ordinary->current_spi = change->spi;
         ordinary->current_epoch = change->current_epoch;
         ordinary->root_version = change->root_version;
-        ordinary->suite = change->suite;
         ordinary->replay = change->replay;
         if (ordinary->pending_root_present != 0u) {
             memcpy(ordinary->operational_root, ordinary->pending_operational_root,
                    sizeof(ordinary->operational_root));
-            ordinary->operational_root_length = ordinary->pending_operational_root_length;
             ordinary->pending_root_present = 0u;
-            ordinary->pending_suite = (tcsec_suite_t)0;
             memset(ordinary->pending_operational_root, 0, sizeof(ordinary->pending_operational_root));
-            ordinary->pending_operational_root_length = 0u;
             ordinary->pending_root_version = 0u;
             ordinary->pending_transaction_id = 0u;
         }
@@ -1155,11 +1139,11 @@ static int test_storage_rotation(const char *path) {
     const uint16_t next_spi = (uint16_t)(ordinary->current_spi + 1u);
     if (tcsec_init(&context, &callbacks) != TCSEC_OK ||
         tcsec_derive_ordinary_key(ordinary->pending_operational_root,
-                                  ordinary->pending_operational_root_length,
-                                  ordinary->spacecraft_id, ordinary->pending_suite,
+                                  TCSEC_ROOT_KEY_LENGTH,
+                                  ordinary->spacecraft_id, TCSEC_SUITE_SM4_HCTR,
                                   next_spi, ordinary->current_epoch + 1u,
                                   ordinary->pending_root_version, key, sizeof(key)) != 0 ||
-        !build_ordinary_frame(ordinary->pending_suite, key, ordinary->nonce_prefix,
+        !build_ordinary_frame(TCSEC_SUITE_SM4_HCTR, key, ordinary->nonce_prefix,
                               next_spi, 1u, next_test_packet, sizeof(next_test_packet),
                               frame, &length) ||
         tcsec_receive(&context, frame, length, output, sizeof(output), &result) != TCSEC_EPOCH_PROMOTED ||
@@ -1197,10 +1181,10 @@ static int test_recovery_vector(const char *path) {
         return 0;
     if (tcsec_derive_ordinary_key(&vector.plaintext[TCSEC_ROOT_PREPARE_FIXED_LENGTH],
                                   vector.plaintext_length - TCSEC_ROOT_PREPARE_FIXED_LENGTH,
-                                  vector.spacecraft_id, inspect(&context).next_suite,
+                                  vector.spacecraft_id, TCSEC_SUITE_SM4_HCTR,
                                   (uint16_t)(vector.current_spi + 1u), vector.security_epoch + 1u,
                                   inspect(&context).pending_root_version, next_key, sizeof(next_key)) != 0 ||
-        !build_ordinary_frame(inspect(&context).next_suite, next_key, (const uint8_t *)"ORDNRY",
+        !build_ordinary_frame(TCSEC_SUITE_SM4_HCTR, next_key, (const uint8_t *)"ORDNRY",
                               (uint16_t)(vector.current_spi + 1u), 1u, next_test_packet, sizeof(next_test_packet),
                               next_frame, &next_length) ||
         !init_recovery_restored(&restored, &vector, &context, &callbacks)) return 0;
@@ -1288,11 +1272,9 @@ static int test_recovery_rejections(const char *path) {
     callbacks.result = TCSEC_COMMIT_NEW;
     recovery_config(&config, &vector);
     config.ordinary.pending_root_present = 1u;
-    config.ordinary.pending_suite = TCSEC_SUITE_SM4_HCTR;
     memcpy(config.ordinary.pending_operational_root,
            vector.ordinary_root, TCSEC_ROOT_KEY_LENGTH);
     config.ordinary.pending_operational_root[0] ^= 1u;
-    config.ordinary.pending_operational_root_length = TCSEC_ROOT_KEY_LENGTH;
     config.ordinary.pending_root_version = vector.current_root_version + 1u;
     config.ordinary.pending_transaction_id = UINT64_C(0x8877665544332211);
     if (init_context(&context, &config, &callbacks) != TCSEC_OK)
@@ -1521,8 +1503,6 @@ static int test_review_recovery_boundaries(const char *path) {
     if (init_context(&context,&config,&fixture) != TCSEC_INVALID_CONFIGURATION) return 0;
     recovery_config(&config,&vector);
     config.ordinary.pending_root_present = 1;
-    config.ordinary.pending_suite = TCSEC_SUITE_SM4_HCTR;
-    config.ordinary.pending_operational_root_length = 16;
     config.ordinary.pending_root_version = vector.current_root_version+1;
     config.ordinary.pending_transaction_id = UINT64_C(0x0102030405060708);
     memcpy(config.ordinary.pending_operational_root,

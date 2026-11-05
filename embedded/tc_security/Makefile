@@ -25,7 +25,7 @@ ifeq ($(ARMV7_NEON),1)
 CPPFLAGS += -DTCSEC_HAVE_ARMV7_NEON_ASM=1
 ASM_SOURCES += src/sm4_armv7_neon.S
 endif
-CORE_HEADERS := include/tc_security.h include/tc_security_kdf.h src/context_private.h src/next_validation.h src/selftest.h src/sm4.h src/hctr.h src/gcm.h
+CORE_HEADERS := include/tc_security.h include/tc_security_kdf.h src/parameters.h src/context_private.h src/next_validation.h src/selftest.h src/sm4.h src/hctr.h src/gcm.h
 CORE_LIB := $(BUILD_DIR)/libtc_security.a
 CORE_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(TC_SOURCES)) \
                 $(patsubst src/%.S,$(BUILD_DIR)/%.o,$(ASM_SOURCES))

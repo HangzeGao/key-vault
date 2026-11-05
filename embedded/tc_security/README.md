@@ -138,3 +138,13 @@ replay, prepare and promotion; actual media and power-cut testing remain require
 
 See the flight manual sections 3, 6 and appendix B for error handling, power loss,
 the business-execution window, callbacks and the implementation guide.
+
+
+The public header exposes fixed-size roots and semantic state, with no suite or
+root-length configuration. Ordinary and Recovery suites are fixed internally;
+the Recovery command's on-wire suite is still validated. Protocol/algorithm
+constants live in `src/parameters.h`, which is not shipped to flight callers.
+The exact public header is referenced in both manual appendices. Run
+`go run ./scripts/tools/flight-manual-header --sync`, rebuild Word with
+`scripts/build_flight_manual.py`, then run the same Go tool with `--check`.
+The release gate rejects stale or missing header references in either manual.

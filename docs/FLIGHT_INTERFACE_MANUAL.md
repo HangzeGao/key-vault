@@ -69,6 +69,9 @@ tcsec_status_t tcsec_reset(tcsec_context_t *context);
 
 四个公开入口为 `tcsec_init`、`tcsec_reset`、`tcsec_receive`、`tcsec_get_runtime_status`。星务集成只依赖公开头文件和静态库。
 
+普通通道固定使用 SM4-HCTR，恢复通道固定使用 SM4-GCM，根密钥固定为 16 字节数组。星务无需填写算法选择和根密钥长度。帧中的协议套件字段仍由模块严格检查，非法值被拒绝。对外头文件完整内容见附录 C。
+
+
 ### 1.1 星务回调约定
 
 星务在 `tcsec_init` 中注册下表中的回调，可以直接对接星务现有的持久化服务。只需包含 `tc_security.h` 并链接密码核心库。统一注册与收帧示例见第 1.5 节。`tcsec_callbacks_t` 是星务填写的注册对象，保存三个回调函数指针及共享的 `user_context`。运行时，星务通过 `load_state` 写出完整快照，通过 `commit_state` 读取一次状态变化。
@@ -149,13 +152,13 @@ static tcsec_status_t flight_load_state(void *service, tcsec_config_t *out)
 
 | 字段 | 填写内容 |
 | --- | --- |
-| `spacecraft_id`、`suite` | 任务配置中的航天器编号，范围为 0 至 1023。当前套件填 `TCSEC_SUITE_SM4_HCTR`。 |
-| `operational_root`、`operational_root_length` | 当前业务根密钥和长度，长度填 16 字节。 |
+| `spacecraft_id` | 任务配置中的航天器编号，范围为 0 至 1023。 |
+| `operational_root` | 固定 16 字节的当前业务根密钥。 |
 | `root_version`、`current_epoch` | 当前业务根版本和安全代次，均为非零。安全代次须小于 `UINT32_MAX`，递增和上限规则见第 2.2 节。 |
 | `current_spi`、`nonce_prefix` | 当前安全关联 SPI 及 6 字节 Nonce 前缀。 |
 | `replay` | 普通通道的完整重放窗口。 |
 | `pending_root_present` | 有已持久化的待生效根时填 1，否则填 0。 |
-| `pending_suite`、`pending_operational_root`、`pending_operational_root_length` | 待生效套件、新业务根及长度。当前套件为 SM4-HCTR，根密钥为 16 字节。 |
+| `pending_operational_root` | 固定 16 字节的待生效业务根。 |
 | `pending_root_version`、`pending_transaction_id` | 待生效根版本和对应换根事务号。根版本须大于当前业务根版本，事务号须非零。 |
 
 `pending_root_present = 0` 时，其他待生效字段全部填零。模块据此判断是否需要使用待生效根来派生 Next 工作密钥。
@@ -164,8 +167,8 @@ static tcsec_status_t flight_load_state(void *service, tcsec_config_t *out)
 
 | 字段 | 填写内容 |
 | --- | --- |
-| `recovery.suite`、`recovery.spi` | 恢复套件填 `TCSEC_SUITE_SM4_GCM`，Recovery SPI 须与 Current 和 Next SPI 区分。 |
-| `recovery.recovery_root`、`recovery.recovery_root_length` | 恢复通道根密钥及长度，长度填 16 字节。 |
+| `recovery.spi` | Recovery SPI 须与 Current 和 Next SPI 区分。 |
+| `recovery.recovery_root` | 固定 16 字节的恢复通道根密钥。 |
 | `recovery.root_version`、`recovery.nonce_prefix` | 非零的恢复根版本及 6 字节恢复通道 Nonce 前缀。 |
 | `recovery.replay` | 恢复通道独立的重放窗口。 |
 
@@ -206,7 +209,7 @@ typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(
 | 字段 | 内容 |
 | --- | --- |
 | `kind` | 提交类型，决定应更新哪一组状态。 |
-| `spi`、`suite` | 本次帧所属的安全关联和算法套件。发生切换时，这两项对应将成为 Current 的关联。 |
+| `spi` | 本次帧所属的安全关联。发生切换时，对应将成为 Current 的关联。 |
 | `replay` | 本次处理后的完整重放窗口，含最高 IV、位图和有效标志。 |
 | `current_epoch`、`root_version` | 业务安全代次和业务根版本。切换时是生效后的值。恢复通道请求中仍是当前业务值，Recovery 根版本保存在持久化快照中。 |
 | `root_prepare` | 指向 `tcsec_root_prepare_t`。仅换根准备时非空。 |
@@ -219,14 +222,14 @@ typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(
 | --- | --- |
 | `transaction_id` | 换根事务号，保存到 `pending_transaction_id`。 |
 | `expected_current_root_version` | 请求预期的当前业务根版本，用于核对已保存的 Current 状态。 |
-| `new_root_version`、`ordinary_suite` | 待生效根版本和算法套件，分别保存到 `pending_root_version` 和 `pending_suite`。 |
+| `new_root_version` | 待生效根版本，保存到 `pending_root_version`。 |
 | `next_security_epoch`、`next_spi` | 本次事务所指的下一安全代次和 SPI。用于核对切换目标，准备阶段保持当前关联。 |
-| `new_operational_root`、`new_operational_root_length` | 新业务根及长度，保存到 `pending_operational_root` 和 `pending_operational_root_length`。 |
+| `new_operational_root` | 固定 16 字节的新业务根，保存到 `pending_operational_root`。 |
 
 | 提交类型 | 原子写入内容 |
 | --- | --- |
 | `TCSEC_COMMIT_ORDINARY_REPLAY` | 保存普通通道新的完整重放窗口。 |
-| `TCSEC_COMMIT_EPOCH_PROMOTION` | 保存新 Current SPI、套件、代次、根版本和重放窗口。存在待生效根时，在同一事务中启用该根并清除待生效记录。 |
+| `TCSEC_COMMIT_EPOCH_PROMOTION` | 保存新 Current SPI、代次、根版本和重放窗口。存在待生效根时，在同一事务中启用该根并清除待生效记录。 |
 | `TCSEC_COMMIT_ROOT_PREPARE` | 将待生效根及事务信息和新的 Recovery 重放窗口一起保存。当前业务根继续生效。 |
 
 **待生效根的切换时点。** 换根准备只写入待生效记录。首个 Next SPI 普通帧通过重放检查和任务规则检查，并确认切换状态已持久化后，模块才将 Next 提升为 Current。没有待生效根时，Next 工作密钥使用当前业务根和下一关联的 SPI、代次派生。
@@ -389,7 +392,7 @@ tcsec_status_t tcsec_receive(tcsec_context_t *context,
 | `context` | 已初始化的密码模块上下文 |
 | `frame`、`frame_length` | 完整 TC 密帧及实际长度，最大 1024 字节；包含主导头、安全域和 FECF |
 | `plaintext`、`plaintext_capacity` | 普通 TC 明文数据域缓冲区及容量；最大数据域 1011 字节 |
-| `result` | 输出 SPI、IV 计数器、处理后的安全 epoch、profile、suite 和明文长度 |
+| `result` | 输出 SPI、IV 计数器、处理后的安全 epoch、profile 和明文长度 |
 
 主导头为 5 字节，安全域为 6 字节（SPI 2 字节、IV 计数器 4 字节），尾部帧校验序列（FECF）为 2 字节。普通遥控使用 SM4-HCTR，无认证标签。恢复通道换根准备使用 SM4-GCM，认证标签为 16 字节。SPI 范围为 `0x0000～0xFFFF`，Next SPI 为 `(Current SPI + 1) mod 65536`。
 
@@ -547,7 +550,7 @@ tcsec_status_t tcsec_get_runtime_status(const tcsec_context_t *context,
 | `TCSEC_NOT_INITIALIZED` | 对象尚未成功初始化。 | 关闭入口，先完成初始化。 |
 | `TCSEC_ALREADY_INITIALIZED` | 对已初始化的可信实例再次初始化。 | 运行中使用 reset。 |
 | `TCSEC_MISSING_CALLBACK` | 未注册 load_state 或 commit_state。 | 补齐必需回调。 |
-| `TCSEC_INVALID_CONFIGURATION` | 配置字段、套件、根长度、重放窗口或 SPI 组合非法。 | 核对加载快照和第 1.2 节字段规则。 |
+| `TCSEC_INVALID_CONFIGURATION` | 航天器编号、代次、根版本、重放窗口、Pending 状态或 SPI 组合非法。 | 核对加载快照和第 1.2 节字段规则。 |
 | `TCSEC_PROFILE_MISMATCH` | 复位加载的任务摘要与本实例绑定值不一致。 | 停收并核对任务配置，禁止静默换任务。 |
 | `TCSEC_FRAME_LENGTH_INVALID` | 实际帧长、主导头声明长度或受保护数据长度非法。 | 丢弃帧，检查地面组帧与链路截断。 |
 | `TCSEC_FECF_INVALID` | 帧校验序列不匹配。 | 丢弃帧，定位链路误码或帧拼接。 |
@@ -831,7 +834,7 @@ sequenceDiagram
 
 ### B.1 交付文件与编译集成
 
-业务集成包包含 `tc_security.h` 和 `libtc_security.a`，当前头文件接口版本宏 `TCSEC_INTERFACE_VERSION` 为 3。随包记录版本、文件 SHA-256、目标架构、编译器、编译选项、字节序、调用约定、枚举及 size_t 宽度、浮点 ABI、任务规则版本和门禁证据。头文件与静态库必须成对使用，升级时重编译调用方。内部头文件、算法接口、测试策略和根密钥不进入业务集成包。
+业务集成包包含 `tc_security.h` 和 `libtc_security.a`，接口版本由附录 C 中的 `TCSEC_INTERFACE_VERSION` 定义。随包记录版本、文件 SHA-256、目标架构、编译器、编译选项、字节序、调用约定、枚举及 size_t 宽度、浮点 ABI、任务规则版本和门禁证据。头文件与静态库必须成对使用，升级时重编译调用方。内部头文件、算法接口、测试策略和根密钥不进入业务集成包。
 
 模块开发侧在干净构建目录中运行下列命令。`MISSION_POLICY` 指向已评审的正式任务规则源码，由模块侧编译进静态库。星务业务代码不需要调用或实现该内部函数。仓库测试策略不能用于飞行交付。
 
@@ -880,13 +883,13 @@ load_state(service, out)
 
 ### B.4 构建三类提交的完整候选
 
-`commit_state` 的入参由模块临时提供，回调不能保存指针供异步线程继续使用。先在同一事务内读取当前可信快照，检查提交 SPI、代次、根版本、套件及重放窗口与当前状态相符，再复制为候选。必须核对变化的前置条件，不能直接信任一份长期 RAM 缓存。
+`commit_state` 的入参由模块临时提供，回调不能保存指针供异步线程继续使用。先在同一事务内读取当前可信快照，检查提交 SPI、代次、根版本及重放窗口与当前状态相符，再复制为候选。必须核对变化的前置条件，不能直接信任一份长期 RAM 缓存。
 
 | kind | 候选快照的具体更新 |
 | --- | --- |
-| `TCSEC_COMMIT_ORDINARY_REPLAY` | 核对 `spi == ordinary.current_spi`，根版本、代次和套件与 Current 一致。将 `ordinary.replay` 替换为请求中的完整窗口。 |
-| `TCSEC_COMMIT_ROOT_PREPARE` | 核对 Recovery SPI、套件及事务预期的 Current 版本。保存新 Pending 根、长度、套件、版本和事务号，同时替换 `recovery.replay`。Current 根和代次保持原值。 |
-| `TCSEC_COMMIT_EPOCH_PROMOTION` | 核对目标 SPI 为 Current 加 1、代次为当前加 1。存在 Pending 时将其根及版本移为 Current。更新普通套件、SPI、代次、根版本和重放窗口，然后将所有 Pending 字段及根字节清零。没有 Pending 时沿用 Current 根。 |
+| `TCSEC_COMMIT_ORDINARY_REPLAY` | 核对 `spi == ordinary.current_spi`，根版本和代次与 Current 一致。将 `ordinary.replay` 替换为请求中的完整窗口。 |
+| `TCSEC_COMMIT_ROOT_PREPARE` | 核对 Recovery SPI 及事务预期的 Current 版本。保存新 Pending 根、版本和事务号，同时替换 `recovery.replay`。Current 根和代次保持原值。 |
+| `TCSEC_COMMIT_EPOCH_PROMOTION` | 核对目标 SPI 为 Current 加 1、代次为当前加 1。存在 Pending 时将其根及版本移为 Current。更新普通 SPI、代次、根版本和重放窗口，然后将所有 Pending 字段及根字节清零。没有 Pending 时沿用 Current 根。 |
 
 同一 Root Prepare 事务可用新的 Recovery IV 重试，仍须提交新的完整 Recovery 窗口。返回 `ALREADY_APPLIED` 之前必须确认请求的全部效果已落盘，包含本次窗口。普通重放提交只允许 `NEW`。请求与持久状态不相符时返回 `REJECTED`，不能静默改写请求。
 
@@ -935,3 +938,262 @@ commit_state(service, change)
 | 资源和机密 | 实测 WCET、栈、存储寿命和刷写时延，日志和工件无真实根密钥、工作密钥或敏感明文。 |
 
 仓库的主机三副本模型覆盖普通重放、换根准备和提升的逐字节中断，以及单副本损坏和旧记录不能覆盖提交锚的场景。模型假定平台提供可信原子提交锚，未模拟真实擦除、电源波形和控制器缓存。物理断电、共因故障和锚原语须在最终板卡上完成验收。
+
+
+### B.8 字段与参数的接入边界
+
+| 信息 | 接入约定和保留原因 |
+| --- | --- |
+| 固定算法和根密钥尺寸 | 由模块确定，星务只提供固定 16 字节根数组。算法实现、派生尺寸和协议内部常量不进入对外头文件。 |
+| frame_length、plaintext_capacity、plaintext_length | 分别表示实际输入长度、可写容量和有效输出长度，用于边界检查和安全消费，不能相互替代。 |
+| SPI、代次、根版本、IV、事务号、配置摘要 | 分别标识关联、派生域、根材料版本、防重放状态、换根事务和任务绑定，须独立保存和核对。 |
+| Pending 标志及重放窗口 | 显式状态和一致性校验用于发现半写、损坏和重放，按完整逻辑快照恢复。 |
+| user_context 和运行诊断输出 | 服务句柄支持独立实例。诊断中已计算的 Next SPI 等信息由模块提供，星务无需重复计算。 |
+
+## 附录 C 对外头文件
+
+本附录逐字引用 `embedded/tc_security/include/tc_security.h`，与静态库按同一接口版本发布。
+
+<!-- flight-public-header:begin -->
+```c
+#ifndef TC_SECURITY_H
+#define TC_SECURITY_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define TCSEC_INTERFACE_VERSION 4u
+#define TCSEC_MAX_FRAME_LENGTH 1024u
+#define TCSEC_ROOT_KEY_LENGTH 16u
+#define TCSEC_NONCE_PREFIX_LENGTH 6u
+#define TCSEC_PROFILE_DIGEST_LENGTH 32u
+
+typedef enum {
+    TCSEC_OK = 0,
+    TCSEC_INVALID_ARGUMENT,
+    TCSEC_INVALID_CONFIGURATION,
+    TCSEC_FRAME_LENGTH_INVALID,
+    TCSEC_FECF_INVALID,
+    TCSEC_ASSOCIATION_NOT_FOUND,
+    TCSEC_REPLAY_REJECTED,
+    TCSEC_IV_FORWARD_JUMP_REJECTED,
+    TCSEC_AUTHENTICATION_FAILED,
+    TCSEC_OUTPUT_TOO_SMALL,
+    TCSEC_PLAINTEXT_REJECTED,
+    TCSEC_ROOT_PREPARE_REJECTED,
+    TCSEC_PERSISTENCE_FAILED,
+    TCSEC_STATE_INTEGRITY_FAILED,
+    TCSEC_EPOCH_PROMOTED,
+    TCSEC_ROOT_PREPARED,
+    TCSEC_ROOT_ALREADY_PREPARED,
+    TCSEC_SELF_TEST_FAILED,
+    TCSEC_NOT_INITIALIZED,
+    TCSEC_ALREADY_INITIALIZED,
+    TCSEC_MISSING_CALLBACK,
+    TCSEC_RECEPTION_PAUSED,
+    TCSEC_STORAGE_UNAVAILABLE,
+    TCSEC_STORAGE_NO_QUORUM,
+    TCSEC_STORAGE_ROLLBACK_DETECTED,
+    TCSEC_STORAGE_NOT_COMMISSIONED,
+    TCSEC_STORAGE_COMMIT_UNCERTAIN,
+    TCSEC_STATE_COMMIT_REJECTED,
+    TCSEC_CALLBACK_RESULT_INVALID,
+    TCSEC_EPOCH_EXHAUSTED,
+    TCSEC_SPI_COLLISION,
+    TCSEC_KEY_DERIVATION_FAILED,
+    TCSEC_PROFILE_MISMATCH
+} tcsec_status_t;
+
+typedef enum {
+    TCSEC_PROFILE_ORDINARY_CURRENT = 1,
+    TCSEC_PROFILE_ORDINARY_NEXT = 2,
+    TCSEC_PROFILE_ROOT_PREPARE = 3
+} tcsec_profile_t;
+
+typedef struct {
+    uint32_t highest_iv;
+    uint64_t bitmap;
+    uint8_t seen;
+} tcsec_replay_state_t;
+
+typedef struct {
+    uint16_t spacecraft_id;
+    uint8_t operational_root[TCSEC_ROOT_KEY_LENGTH];
+    uint32_t root_version;
+    uint32_t current_epoch;
+    uint16_t current_spi;
+    uint8_t nonce_prefix[TCSEC_NONCE_PREFIX_LENGTH];
+    tcsec_replay_state_t replay;
+    /* Restored durable Root Prepare state. A zero pending_root_present requires
+     * every other pending_* field to be zero. */
+    uint8_t pending_root_present;
+    uint8_t pending_operational_root[TCSEC_ROOT_KEY_LENGTH];
+    uint32_t pending_root_version;
+    uint64_t pending_transaction_id;
+} tcsec_ordinary_config_t;
+
+typedef struct {
+    uint8_t recovery_root[TCSEC_ROOT_KEY_LENGTH];
+    uint32_t root_version;
+    uint16_t spi;
+    uint8_t nonce_prefix[TCSEC_NONCE_PREFIX_LENGTH];
+    tcsec_replay_state_t replay;
+} tcsec_recovery_config_t;
+
+typedef struct {
+    uint8_t profile_digest[TCSEC_PROFILE_DIGEST_LENGTH];
+    tcsec_ordinary_config_t ordinary;
+    tcsec_recovery_config_t recovery;
+} tcsec_config_t;
+
+typedef struct {
+    uint64_t transaction_id;
+    uint32_t expected_current_root_version;
+    uint32_t new_root_version;
+    uint32_t next_security_epoch;
+    uint16_t next_spi;
+    uint8_t new_operational_root[TCSEC_ROOT_KEY_LENGTH];
+} tcsec_root_prepare_t;
+
+typedef enum {
+    TCSEC_COMMIT_ORDINARY_REPLAY = 1,
+    TCSEC_COMMIT_EPOCH_PROMOTION = 2,
+    TCSEC_COMMIT_ROOT_PREPARE = 3
+} tcsec_commit_kind_t;
+
+typedef struct {
+    tcsec_commit_kind_t kind;
+    uint16_t spi;
+    tcsec_replay_state_t replay;
+    uint32_t current_epoch;
+    uint32_t root_version;
+    const tcsec_root_prepare_t *root_prepare;
+} tcsec_commit_t;
+
+typedef enum {
+    TCSEC_COMMIT_REJECTED = 0,
+    TCSEC_COMMIT_NEW = 1,
+    TCSEC_COMMIT_ALREADY_APPLIED = 2,
+    TCSEC_COMMIT_PERSISTENCE_FAILED = 3,
+    TCSEC_COMMIT_UNCERTAIN = 4
+} tcsec_commit_result_t;
+
+/* Flight software atomically persists one logical state change and returns
+ * only after verifying it. The core has no storage dependency. The callback
+ * must not execute or enqueue ordinary plaintext. root_prepare is non-NULL
+ * only for ROOT_PREPARE. The callback must clear its own temporary secrets
+ * before returning on every success and failure path. */
+typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(void *user_context,
+                                                       const tcsec_commit_t *commit);
+
+/* Load one complete, verified durable snapshot into a temporary output.
+ * Return TCSEC_OK only after verifying it. The module clears the output
+ * after use. Return a storage-specific status for unavailable media, missing
+ * quorum, rollback, or an uncommissioned device. Integrity and configuration
+ * errors must be reported explicitly. Unexpected return codes are rejected.
+ * The callback clears its own temporary secrets before returning on every
+ * path, but leaves the output intact. The module clears the output after use. */
+typedef tcsec_status_t (*tcsec_state_load_fn)(void *user_context,
+                                               tcsec_config_t *config);
+
+typedef uint64_t (*tcsec_monotonic_time_us_fn)(void *user_context);
+
+/* Runtime dependencies supplied by flight software. tcsec_init copies this
+ * value; the struct itself need not outlive the call, while user_context and
+ * everything it references must remain valid for the running instance. */
+typedef struct {
+    tcsec_state_load_fn load_state;               /* Required. */
+    tcsec_state_commit_fn commit_state;           /* Required. */
+    tcsec_monotonic_time_us_fn monotonic_time_us;  /* NULL disables timing. */
+    void *user_context;
+} tcsec_callbacks_t;
+
+typedef enum {
+    TCSEC_SELF_TEST_NOT_RUN = 0,
+    TCSEC_SELF_TEST_PASSED = 1,
+    TCSEC_SELF_TEST_LOCKED = 2
+} tcsec_self_test_state_t;
+
+typedef enum {
+    TCSEC_CRYPTO_BACKEND_SOFTWARE = 0,
+    TCSEC_CRYPTO_BACKEND_ARMV7_NEON = 1
+} tcsec_crypto_backend_t;
+
+typedef struct {
+    tcsec_self_test_state_t self_test;
+    tcsec_crypto_backend_t crypto_backend;
+    uint8_t profile_digest[TCSEC_PROFILE_DIGEST_LENGTH];
+    uint16_t current_spi;
+    uint16_t next_spi;
+    uint16_t recovery_spi;
+    uint32_t security_epoch;
+    uint32_t root_version;
+    uint8_t pending_root_present;
+    uint8_t reception_paused;
+    tcsec_status_t last_status;
+    uint64_t receive_count;
+    /* The four timing fields are zero when no clock is configured. */
+    uint64_t last_receive_us;
+    uint64_t max_receive_us;
+    uint64_t cycle_limit_exceeded_count;
+    uint64_t clock_anomaly_count;
+} tcsec_runtime_status_t;
+
+typedef struct {
+    uint16_t spi;
+    uint32_t iv_counter;
+    uint32_t security_epoch;
+    tcsec_profile_t profile;
+    size_t plaintext_length;
+} tcsec_result_t;
+
+/* Caller-owned opaque object. Zero-initialize once at computer startup.
+ * Do not inspect, copy, serialize or change its storage. No heap is used. */
+#define TCSEC_CONTEXT_STORAGE_SIZE 512u
+typedef struct {
+    unsigned char _opaque[TCSEC_CONTEXT_STORAGE_SIZE];
+} tcsec_context_t;
+
+/* Start with a zero-initialized context. Registers callbacks and loads the
+ * initial snapshot. Callback bindings remain fixed until computer restart. */
+tcsec_status_t tcsec_init(tcsec_context_t *context,
+                          const tcsec_callbacks_t *callbacks);
+
+/* Reloads the complete durable snapshot through the registered callback.
+ * A failed reload leaves reception paused. A successful reset resumes it.
+ * Serialize reset with receive and every other call on the same context. */
+tcsec_status_t tcsec_reset(tcsec_context_t *context);
+
+/* Receives one complete TC transfer frame. Current plaintext is released after
+ * durable replay commit; the caller must validate it before execution. Next
+ * plaintext additionally passes the built-in mission checks before promotion
+ * commits. Root-prepare plaintext is consumed internally.
+ *
+ * Reentrancy contract: the implementation has no mutable global state, so calls
+ * using distinct tcsec_context_t objects may execute concurrently or from nested
+ * callbacks. A single context owns one replay/rotation state machine and must be
+ * serialized by its caller; callbacks must not re-enter that same context. */
+tcsec_status_t tcsec_receive(tcsec_context_t *context,
+                             const uint8_t *frame,
+                             size_t frame_length,
+                             uint8_t *plaintext,
+                             size_t plaintext_capacity,
+                             tcsec_result_t *result);
+
+/* Returns a semantic, carrier-independent snapshot for housekeeping/AOS
+ * publication. It never exposes roots or derived keys. */
+tcsec_status_t tcsec_get_runtime_status(const tcsec_context_t *context,
+                                        tcsec_runtime_status_t *status);
+
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+```
+<!-- flight-public-header:end -->

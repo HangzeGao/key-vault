@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define TCSEC_HCTR_WORKING_KEY_LENGTH 32u
+#include "parameters.h"
 #define TCSEC_HCTR_TWEAK_LENGTH 16u
 
 int tcsec_sm4_hctr_encrypt(const uint8_t working_key[TCSEC_HCTR_WORKING_KEY_LENGTH],

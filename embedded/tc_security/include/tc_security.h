@@ -8,25 +8,11 @@
 extern "C" {
 #endif
 
-#define TCSEC_INTERFACE_VERSION 3u
-#define TCSEC_PRIMARY_HEADER_LENGTH 5u
-#define TCSEC_SECURITY_HEADER_LENGTH 6u
-#define TCSEC_FECF_LENGTH 2u
+#define TCSEC_INTERFACE_VERSION 4u
 #define TCSEC_MAX_FRAME_LENGTH 1024u
-#define TCSEC_SM4_KEY_LENGTH 16u
 #define TCSEC_ROOT_KEY_LENGTH 16u
-#define TCSEC_HCTR_WORKING_KEY_LENGTH 32u
 #define TCSEC_NONCE_PREFIX_LENGTH 6u
-#define TCSEC_GCM_NONCE_LENGTH 12u
-#define TCSEC_GCM_TAG_LENGTH 16u
 #define TCSEC_PROFILE_DIGEST_LENGTH 32u
-#define TCSEC_RECEIVE_CYCLE_LIMIT_US 120000u
-#define TCSEC_RECOVERY_AAD_LENGTH (TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH)
-#define TCSEC_REPLAY_WINDOW_BITS 64u
-#define TCSEC_MAX_FORWARD_JUMP 4096u
-#define TCSEC_ROOT_PREPARE_FORMAT_VERSION 1u
-#define TCSEC_ROOT_PREPARE_FIXED_LENGTH 25u
-#define TCSEC_ROOT_PREPARE_SM4_LENGTH 41u
 
 typedef enum {
     TCSEC_OK = 0,
@@ -65,11 +51,6 @@ typedef enum {
 } tcsec_status_t;
 
 typedef enum {
-    TCSEC_SUITE_SM4_HCTR = 0x0013,
-    TCSEC_SUITE_SM4_GCM = 0x0002
-} tcsec_suite_t;
-
-typedef enum {
     TCSEC_PROFILE_ORDINARY_CURRENT = 1,
     TCSEC_PROFILE_ORDINARY_NEXT = 2,
     TCSEC_PROFILE_ROOT_PREPARE = 3
@@ -83,9 +64,7 @@ typedef struct {
 
 typedef struct {
     uint16_t spacecraft_id;
-    tcsec_suite_t suite;
     uint8_t operational_root[TCSEC_ROOT_KEY_LENGTH];
-    size_t operational_root_length;
     uint32_t root_version;
     uint32_t current_epoch;
     uint16_t current_spi;
@@ -94,17 +73,13 @@ typedef struct {
     /* Restored durable Root Prepare state. A zero pending_root_present requires
      * every other pending_* field to be zero. */
     uint8_t pending_root_present;
-    tcsec_suite_t pending_suite;
     uint8_t pending_operational_root[TCSEC_ROOT_KEY_LENGTH];
-    size_t pending_operational_root_length;
     uint32_t pending_root_version;
     uint64_t pending_transaction_id;
 } tcsec_ordinary_config_t;
 
 typedef struct {
-    tcsec_suite_t suite;
     uint8_t recovery_root[TCSEC_ROOT_KEY_LENGTH];
-    size_t recovery_root_length;
     uint32_t root_version;
     uint16_t spi;
     uint8_t nonce_prefix[TCSEC_NONCE_PREFIX_LENGTH];
@@ -123,9 +98,7 @@ typedef struct {
     uint32_t new_root_version;
     uint32_t next_security_epoch;
     uint16_t next_spi;
-    tcsec_suite_t ordinary_suite;
     uint8_t new_operational_root[TCSEC_ROOT_KEY_LENGTH];
-    size_t new_operational_root_length;
 } tcsec_root_prepare_t;
 
 typedef enum {
@@ -140,7 +113,6 @@ typedef struct {
     tcsec_replay_state_t replay;
     uint32_t current_epoch;
     uint32_t root_version;
-    tcsec_suite_t suite;
     const tcsec_root_prepare_t *root_prepare;
 } tcsec_commit_t;
 
@@ -218,7 +190,6 @@ typedef struct {
     uint32_t iv_counter;
     uint32_t security_epoch;
     tcsec_profile_t profile;
-    tcsec_suite_t suite;
     size_t plaintext_length;
 } tcsec_result_t;
 
