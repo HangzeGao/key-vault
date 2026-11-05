@@ -7,11 +7,11 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,14 +26,21 @@ import (
 	"github.com/kvlt/key-vault/internal/securitystate"
 )
 
-type e2eCore struct {
-	root  []byte
-	suite suite.ID
+// TEST ONLY key source; no TPM or production key lease is claimed here.
+type e2eKey struct {
+	root    []byte
+	suite   suite.ID
+	version uint32
 }
+type e2eCore struct{ keys map[string]e2eKey }
 
 func (core e2eCore) ProtectDerived(_ context.Context, request protection.ProtectRequest,
 	derivation protection.Derivation) (*protection.ProtectResult, error) {
-	key, err := kdf.CMACCounter(core.root, core.suite, derivation.Label, derivation.Context)
+	material, ok := core.keys[request.KeyID]
+	if !ok || material.version != request.KeyVersion {
+		return nil, fmt.Errorf("test key binding unavailable")
+	}
+	key, err := kdf.CMACCounter(material.root, material.suite, derivation.Label, derivation.Context)
 	if err != nil {
 		return nil, err
 	}
@@ -42,14 +49,14 @@ func (core e2eCore) ProtectDerived(_ context.Context, request protection.Protect
 			key[index] = 0
 		}
 	}()
-	primitive, err := aead.New(core.suite, key)
+	primitive, err := aead.New(material.suite, key)
 	if err != nil {
 		return nil, err
 	}
 	data, tag := primitive.Encrypt(request.Data, request.Nonce, request.AAD)
 	return &protection.ProtectResult{Data: data, Nonce: append([]byte(nil), request.Nonce...), Tag: tag,
-		KeyVersion: request.KeyVersion, PolicyVersion: request.PolicyVersion, SuiteID: core.suite,
-		ServiceType: core.suite.ServiceType()}, nil
+		KeyVersion: request.KeyVersion, PolicyVersion: request.PolicyVersion, SuiteID: material.suite,
+		ServiceType: material.suite.ServiceType()}, nil
 }
 
 func (e2eCore) Unprotect(context.Context, protection.UnprotectRequest) (*protection.UnprotectResult, error) {
@@ -106,7 +113,7 @@ func TestTCDataPlaneAPIProducesFlightAcceptedVector(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	security, err := protocol.New(e2eCore{root: decode("root"), suite: suiteID}, store, protocol.Options{
+	security, err := protocol.New(e2eCore{keys: map[string]e2eKey{sa.KeyID: {root: decode("root"), suite: suiteID, version: sa.KeyVersion}}}, store, protocol.Options{
 		MaxFrameLength: 2048, NodeID: "e2e-ground",
 		TCSpacecraftID: uint16(parse("spacecraft_id", 16, 16)),
 	})
@@ -164,6 +171,10 @@ func testFlightProcessRecovery(t *testing.T, runner string, frame []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	plaintext, err := hex.DecodeString(readVector(t, vector)["plaintext"])
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, scenario := range []struct{ fault, first, restarted string }{
 		{"none", "OK", "REPLAY_REJECTED"},
 		{"before", "PERSISTENCE_FAILED", "OK"},
@@ -171,38 +182,17 @@ func testFlightProcessRecovery(t *testing.T, runner string, frame []byte) {
 	} {
 		t.Run("flight-process-"+scenario.fault, func(t *testing.T) {
 			state := filepath.Join(t.TempDir(), "flight.test-state")
-			if output, err := exec.Command(runner, vector, state, "commission").CombinedOutput(); err != nil {
-				t.Fatalf("commission failed: %v %s", err, output)
-			}
-			invoke := func(fault, expected string) {
-				t.Helper()
-				output, err := exec.Command(runner, vector, state, "receive", hex.EncodeToString(frame), fault).CombinedOutput()
-				if err != nil {
-					t.Fatalf("flight process failed: %v %s", err, output)
-				}
-				var result struct {
-					Status  string `json:"status"`
-					Length  int    `json:"length"`
-					Matches bool   `json:"matches"`
-					Cleared bool   `json:"cleared"`
-				}
-				if err := json.Unmarshal(output, &result); err != nil || result.Status != expected {
-					t.Fatalf("flight result=%s want=%s err=%v", output, expected, err)
-				}
-				if expected == "OK" {
-					if !result.Matches || result.Length == 0 {
-						t.Fatal("flight plaintext mismatch")
-					}
-				} else if !result.Cleared || result.Length != 0 {
-					t.Fatal("flight released failed plaintext")
-				}
-			}
-			invoke(scenario.fault, scenario.first)
-			invoke("none", scenario.restarted)
+			commissionFlight(t, runner, vector, state)
+			p := startFlight(t, runner, vector, state, "OK")
+			p.receive(scenario.fault, frame).require(t, scenario.first, successPlaintext(scenario.first, plaintext))
+			p.close()
+			p = startFlight(t, runner, vector, state, "OK")
+			p.receive("none", frame).require(t, scenario.restarted, successPlaintext(scenario.restarted, plaintext))
+			p.close()
 			if err := os.Remove(state); err != nil {
 				t.Fatal(err)
 			}
-			invoke("none", "STATE_INTEGRITY_FAILED")
+			startFlight(t, runner, vector, state, "STATE_INTEGRITY_FAILED")
 		})
 	}
 }

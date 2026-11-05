@@ -14,6 +14,8 @@ bash -n start.sh
 GO_BIN="$go_bin" bash scripts/go_security_gate.sh
 GO_BIN="$go_bin" bash scripts/c_hardening_gate.sh
 GO_BIN="$go_bin" bash scripts/tc_process_gate.sh
+tc_process_count="$(awk '/"scenario_count":/ {gsub(/,/,"",$2); print $2}' "$ROOT_DIR/build/tc-process-gate/optimized-report.json")"
+if [[ ! "$tc_process_count" =~ ^[1-9][0-9]*$ ]]; then echo 'release gate failed: TC scenario count missing' >&2; exit 1; fi
 
 GO_BIN="$go_bin" bash scripts/external_vector_gate.sh
 
@@ -62,7 +64,7 @@ external_vector_hash="$(sha256sum testdata/crypto/cryptography-sm4-v1.tsv | awk 
 external_generator_hash="$(sha256sum scripts/oracle/cryptography_vector_generator.py | awk '{print $1}')"
 cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
 {
-  "format_version": 10,
+  "format_version": 11,
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_commit": "$commit",
   "dirty_worktree": $dirty,
@@ -93,6 +95,14 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "external_sm4_block_cmac_gcm_hctr_kdf": "passed",
   "api_to_flight_vector": "passed",
   "current_tc_http_sqlite_c_process_recovery": "passed",
+  "tc_process_scenario_count": $tc_process_count,
+  "tc_process_scenario_executions": $((tc_process_count * 2)),
+  "tc_process_scenario_failures": 0,
+  "tc_process_scenario_skips": 0,
+  "tc_process_scenario_manifest_sha256": "$(sha256sum testdata/tc-process-scenarios.json | awk '{print $1}')",
+  "tc_process_optimized_report_sha256": "$(sha256sum build/tc-process-gate/optimized-report.json | awk '{print $1}')",
+  "tc_process_sanitized_report_sha256": "$(sha256sum build/tc-process-gate/sanitized-report.json | awk '{print $1}')",
+  "tc_process_scope": "host HTTP/SQLite/C process with test key source, synthetic Next policy and file-backed persistence; physical TPM/NVM and mission rules excluded",
   "downlink_data_field_c_to_go": "passed",
   "downlink_c_line_coverage": $downlink_c_coverage,
   "downlink_go_statement_coverage": $downlink_go_coverage,

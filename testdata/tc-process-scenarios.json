@@ -1,0 +1,112 @@
+{
+  "format_version": 1,
+  "scope": "TC host process scenarios; public test roots, synthetic Next policy, file-backed persistence; excludes physical TPM/NVM and mission business validation",
+  "groups": [
+    {
+      "test": "TestTCDataPlaneAPIProducesFlightAcceptedVector",
+      "scenarios": [
+        "flight-process-none",
+        "flight-process-before",
+        "flight-process-after"
+      ]
+    },
+    {
+      "test": "TestTCFlightLinkFaults",
+      "scenarios": [
+        "empty",
+        "truncated",
+        "oversized",
+        "declared-length",
+        "fecf-bit",
+        "ciphertext-bit",
+        "unknown-spi-valid-fecf",
+        "iv-jump-valid-fecf"
+      ]
+    },
+    {
+      "test": "TestTCFlightReplayWindowAndRestart",
+      "scenarios": [
+        ""
+      ]
+    },
+    {
+      "test": "TestTCFlightGroundRestartAndReprotect",
+      "scenarios": [
+        ""
+      ]
+    },
+    {
+      "test": "TestTCFlightRepeatedStorageFailures",
+      "scenarios": [
+        "before",
+        "partial"
+      ]
+    },
+    {
+      "test": "TestTCFlightStateLoss",
+      "scenarios": [
+        "missing",
+        "truncated",
+        "corrupt"
+      ]
+    },
+    {
+      "test": "TestTCFlightCurrentCorruptionRequiresBusinessCheck",
+      "scenarios": [
+        ""
+      ]
+    },
+    {
+      "test": "TestTCFlightRecoveryAuthentication",
+      "scenarios": [
+        "header",
+        "iv",
+        "ciphertext",
+        "tag",
+        "wrong-key"
+      ]
+    },
+    {
+      "test": "TestTCFlightNextRejection",
+      "scenarios": [
+        "command",
+        "ciphertext"
+      ]
+    },
+    {
+      "test": "TestTCFlightCommitRecovery",
+      "scenarios": [
+        "ordinary-none",
+        "ordinary-before",
+        "ordinary-partial",
+        "ordinary-after",
+        "ordinary-crash-before",
+        "ordinary-crash-partial",
+        "ordinary-crash-after",
+        "prepare-none",
+        "prepare-before",
+        "prepare-partial",
+        "prepare-after",
+        "prepare-crash-before",
+        "prepare-crash-partial",
+        "prepare-crash-after",
+        "promotion-none",
+        "promotion-before",
+        "promotion-partial",
+        "promotion-after",
+        "promotion-crash-before",
+        "promotion-crash-partial",
+        "promotion-crash-after"
+      ]
+    },
+    {
+      "test": "TestTCFlightGroundInputRejections",
+      "scenarios": [
+        "invalid-base64",
+        "unknown-field",
+        "short-frame",
+        "bad-fecf"
+      ]
+    }
+  ]
+}
