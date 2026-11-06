@@ -18,14 +18,14 @@ TEST_BIN := $(BUILD_DIR)/test_tc_security
 DISPATCH_TEST_BIN := $(BUILD_DIR)/test_sm4_dispatch
 SELFTEST_FAILURE_BIN := $(BUILD_DIR)/test_selftest_failure
 EXTERNAL_VECTOR_TEST_BIN := $(BUILD_DIR)/test_external_vectors
-TC_SOURCES := src/tc_security.c src/next_validation.c src/selftest.c src/sm4.c src/hctr.c src/gcm.c src/kdf.c
+TC_SOURCES := src/tc_security.c src/next_validation.c src/selftest.c src/sm4.c src/gcm.c src/kdf.c
 TEST_POLICY := tests/test_next_policy.c
 ASM_SOURCES :=
 ifeq ($(ARMV7_NEON),1)
 CPPFLAGS += -DTCSEC_HAVE_ARMV7_NEON_ASM=1
 ASM_SOURCES += src/sm4_armv7_neon.S
 endif
-CORE_HEADERS := include/tc_security.h include/tc_security_kdf.h src/parameters.h src/context_private.h src/next_validation.h src/selftest.h src/sm4.h src/hctr.h src/gcm.h
+CORE_HEADERS := include/tc_security.h include/tc_security_kdf.h src/parameters.h src/context_private.h src/next_validation.h src/selftest.h src/sm4.h src/gcm.h
 CORE_LIB := $(BUILD_DIR)/libtc_security.a
 CORE_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(TC_SOURCES)) \
                 $(patsubst src/%.S,$(BUILD_DIR)/%.o,$(ASM_SOURCES))
@@ -49,7 +49,7 @@ $(BUILD_DIR)/%.o: src/%.S
 $(CORE_LIB): $(CORE_OBJECTS)
 	$(AR) rcs $@ $^
 
-$(TEST_BIN): tests/test_tc_security.c tests/storage_quorum_model.h $(TEST_POLICY) $(CORE_LIB) tools/tc_security_diagnostics.h
+$(TEST_BIN): tests/test_tc_security.c tests/storage_quorum_model.h tests/test_gcm_seal.h $(TEST_POLICY) $(CORE_LIB) tools/tc_security_diagnostics.h
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DTCSEC_TEST_NEXT_POLICY=1 \
 		tests/test_tc_security.c $(TEST_POLICY) $(CORE_LIB) $(LDFLAGS) -o $@
@@ -65,14 +65,14 @@ $(SELFTEST_FAILURE_BIN): $(TC_SOURCES) $(CORE_HEADERS) $(TEST_POLICY) tests/test
 		$(TC_SOURCES) $(TEST_POLICY) \
 		tests/test_selftest_failure.c $(LDFLAGS) -o $(SELFTEST_FAILURE_BIN)
 
-$(EXTERNAL_VECTOR_TEST_BIN): src/sm4.c src/hctr.c src/gcm.c src/kdf.c tests/test_external_vectors.c
+$(EXTERNAL_VECTOR_TEST_BIN): src/sm4.c src/gcm.c src/kdf.c tests/test_external_vectors.c
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DTCSEC_TEST_CRYPTO_PRIMITIVES=1 \
-		src/sm4.c src/hctr.c src/gcm.c src/kdf.c tests/test_external_vectors.c \
+		src/sm4.c src/gcm.c src/kdf.c tests/test_external_vectors.c \
 		$(LDFLAGS) -o $(EXTERNAL_VECTOR_TEST_BIN)
 
 test: $(TEST_BIN) $(DISPATCH_TEST_BIN) $(SELFTEST_FAILURE_BIN) $(EXTERNAL_VECTOR_TEST_BIN)
-	$(TEST_BIN) ../../testdata/ccsds_tc_sm4_hctr.txt \
+	$(TEST_BIN) ../../testdata/ccsds_tc_sm4_gcm_ordinary.txt \
 		../../testdata/ccsds_tc_sm4_gcm_recovery.txt
 	$(DISPATCH_TEST_BIN)
 	$(SELFTEST_FAILURE_BIN)

@@ -142,7 +142,7 @@ func (s *Store) ReadTCRotationState(ctx context.Context, tenantID string) (*ccsd
 	state.Phase = ccsds.TCRotationPhase(phase)
 	state.TransactionID, err = strconv.ParseUint(transactionID, 10, 64)
 	if err != nil || state.TransactionID == 0 || state.NextSPI != ccsds.NextSPI(state.CurrentSPI) ||
-		state.NextRootVersion <= state.CurrentRootVersion ||
+		state.NextRootVersion < state.CurrentRootVersion ||
 		(state.Phase != ccsds.TCRotationPrepared && state.Phase != ccsds.TCRotationSwitching && state.Phase != ccsds.TCRotationActive) {
 		return nil, errors.New("securitystate: invalid persisted TC rotation state")
 	}
@@ -193,8 +193,8 @@ func (s *Store) ObserveFlightSecurityStatus(ctx context.Context, tenantID string
 	_, err := s.db.ExecContext(ctx, `INSERT INTO flight_security_status(
 		tenant_id,format_version,profile_digest,self_test,crypto_backend,current_spi,next_spi,recovery_spi,
 		security_epoch,root_version,pending_root_present,receive_count,last_receive_us,max_receive_us,
-		cycle_limit_exceeded_count,clock_anomaly_count,observed_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		cycle_limit_exceeded_count,clock_anomaly_count,current_auth_used,next_auth_used,reception_paused,observed_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(tenant_id) DO UPDATE SET
 		format_version=excluded.format_version,profile_digest=excluded.profile_digest,self_test=excluded.self_test,
 		crypto_backend=excluded.crypto_backend,current_spi=excluded.current_spi,next_spi=excluded.next_spi,
@@ -202,11 +202,12 @@ func (s *Store) ObserveFlightSecurityStatus(ctx context.Context, tenantID string
 		pending_root_present=excluded.pending_root_present,receive_count=excluded.receive_count,
 		last_receive_us=excluded.last_receive_us,max_receive_us=excluded.max_receive_us,
 		cycle_limit_exceeded_count=excluded.cycle_limit_exceeded_count,clock_anomaly_count=excluded.clock_anomaly_count,
-		observed_at=excluded.observed_at`, tenantID, status.FormatVersion, status.ProfileDigest[:], string(status.SelfTest),
+		current_auth_used=excluded.current_auth_used,next_auth_used=excluded.next_auth_used,reception_paused=excluded.reception_paused,
+ observed_at=excluded.observed_at`, tenantID, status.FormatVersion, status.ProfileDigest[:], string(status.SelfTest),
 		string(status.CryptoBackend), status.CurrentSPI, status.NextSPI, status.RecoverySPI, status.SecurityEpoch,
 		status.RootVersion, status.PendingRootPresent, strconv.FormatUint(status.ReceiveCount, 10),
 		strconv.FormatUint(status.LastReceiveUS, 10), strconv.FormatUint(status.MaxReceiveUS, 10),
-		strconv.FormatUint(status.CycleLimitExceededCount, 10), strconv.FormatUint(status.ClockAnomalyCount, 10),
+		strconv.FormatUint(status.CycleLimitExceededCount, 10), strconv.FormatUint(status.ClockAnomalyCount, 10), status.CurrentAuthUsed, status.NextAuthUsed, status.ReceptionPaused,
 		formatTime(time.Now()))
 	return wrap("observe flight security status", err)
 }
@@ -217,10 +218,10 @@ func (s *Store) ReadFlightSecurityStatus(ctx context.Context, tenantID string) (
 	var selfTest, backend, receiveCount, lastUS, maxUS, exceeded, anomalies, observedAt string
 	err := s.db.QueryRowContext(ctx, `SELECT format_version,profile_digest,self_test,crypto_backend,current_spi,
 		next_spi,recovery_spi,security_epoch,root_version,pending_root_present,receive_count,last_receive_us,
-		max_receive_us,cycle_limit_exceeded_count,clock_anomaly_count,observed_at
+		max_receive_us,cycle_limit_exceeded_count,clock_anomaly_count,current_auth_used,next_auth_used,reception_paused,observed_at
 		FROM flight_security_status WHERE tenant_id=?`, tenantID).Scan(&status.FormatVersion, &digest, &selfTest,
 		&backend, &status.CurrentSPI, &status.NextSPI, &status.RecoverySPI, &status.SecurityEpoch, &status.RootVersion,
-		&status.PendingRootPresent, &receiveCount, &lastUS, &maxUS, &exceeded, &anomalies, &observedAt)
+		&status.PendingRootPresent, &receiveCount, &lastUS, &maxUS, &exceeded, &anomalies, &status.CurrentAuthUsed, &status.NextAuthUsed, &status.ReceptionPaused, &observedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ccsds.ErrAssociationNotFound
 	}
@@ -252,7 +253,7 @@ func (s *Store) ReadFlightSecurityStatus(ctx context.Context, tenantID string) (
 
 func (s *Store) MarkTCRotationPrepared(ctx context.Context, tenantID string, state ccsds.TCRotationState) error {
 	if state.Phase != ccsds.TCRotationPrepared || state.TransactionID == 0 ||
-		state.NextSPI != ccsds.NextSPI(state.CurrentSPI) || state.NextRootVersion <= state.CurrentRootVersion {
+		state.NextSPI != ccsds.NextSPI(state.CurrentSPI) || state.NextRootVersion < state.CurrentRootVersion {
 		return ccsds.ErrAssociationState
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -328,13 +329,24 @@ func (s *Store) PromoteNextTC(ctx context.Context, tenantID string) error {
 		FROM tc_rotation_states WHERE tenant_id=?`, tenantID).Scan(&rotationPhase, &transactionID,
 		&rotationCurrentSPI, &rotationNextSPI, &rotationCurrentVersion, &rotationNextVersion)
 	parsedTransactionID, parseErr := strconv.ParseUint(transactionID, 10, 64)
-	if err != nil || parseErr != nil || parsedTransactionID == 0 || rotationPhase != string(ccsds.TCRotationPrepared) ||
-		rotationCurrentSPI != current.SPI || rotationNextSPI != next.SPI ||
-		rotationCurrentVersion != current.KeyVersion || rotationNextVersion != next.KeyVersion {
+	prepared := err == nil && parseErr == nil && parsedTransactionID != 0 && rotationPhase == string(ccsds.TCRotationPrepared) &&
+		rotationCurrentSPI == current.SPI && rotationNextSPI == next.SPI && rotationCurrentVersion == current.KeyVersion && rotationNextVersion == next.KeyVersion
+	routine := next.KeyVersion == current.KeyVersion && next.KeyID == current.KeyID
+	if routine {
+		var observed int
+		err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM flight_security_status WHERE tenant_id=? AND current_spi=? AND security_epoch=? AND root_version=? AND pending_root_present=0 AND reception_paused=0 AND self_test='PASSED' AND next_auth_used<2048 AND profile_digest=(SELECT profile_digest FROM mission_profiles WHERE tenant_id=flight_security_status.tenant_id)`, tenantID, current.SPI, current.SecurityEpoch, current.KeyVersion).Scan(&observed)
+		if err != nil || observed != 1 {
+			return ccsds.ErrAssociationState
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO tc_rotation_states(tenant_id,phase,transaction_id,current_spi,next_spi,current_root_version,next_root_version,updated_at) VALUES(?,'PREPARED',?,?,?,?,?,?)
+            ON CONFLICT(tenant_id) DO UPDATE SET phase='PREPARED',transaction_id=excluded.transaction_id,current_spi=excluded.current_spi,next_spi=excluded.next_spi,current_root_version=excluded.current_root_version,next_root_version=excluded.next_root_version,updated_at=excluded.updated_at`, tenantID, strconv.FormatUint(uint64(next.SecurityEpoch), 10), current.SPI, next.SPI, current.KeyVersion, next.KeyVersion, formatTime(time.Now()))
+		if err != nil {
+			return wrap("prepare working-key rotation", err)
+		}
+	} else if !prepared || next.KeyVersion <= current.KeyVersion {
 		return ccsds.ErrAssociationState
 	}
-	if next.SPI != ccsds.NextSPI(current.SPI) ||
-		next.SecurityEpoch != current.SecurityEpoch+1 || string(next.Parameters.NoncePrefix) != string(current.Parameters.NoncePrefix) {
+	if current.SecurityEpoch >= ^uint32(0)-1 || next.SPI != ccsds.NextSPI(current.SPI) || next.SecurityEpoch != current.SecurityEpoch+1 || !bytes.Equal(next.Parameters.NoncePrefix, current.Parameters.NoncePrefix) {
 		return ccsds.ErrAssociationState
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE security_associations SET state='DISABLED' WHERE id=? AND state='CURRENT'`, current.ID)
@@ -359,6 +371,21 @@ func (s *Store) PromoteNextTC(ctx context.Context, tenantID string) error {
 	if count, _ := result.RowsAffected(); count != 1 {
 		return ccsds.ErrAssociationState
 	}
+	// Reuse an old SPI slot only after it is disabled; the epoch keeps key domains distinct.
+	futureSPI := ccsds.NextSPI(next.SPI)
+	_, err = tx.ExecContext(ctx, `DELETE FROM security_associations WHERE tenant_id=? AND direction='TC_TX' AND spi=? AND state='DISABLED'`, tenantID, futureSPI)
+	if err != nil {
+		return wrap("retire wrapped SPI", err)
+	}
+	futureID := fmt.Sprintf("tc:%s:epoch:%d", tenantID, next.SecurityEpoch+1)
+	_, err = tx.ExecContext(ctx, `INSERT INTO security_associations (`+associationColumns+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, futureID, tenantID, futureSPI, string(ccsds.DirectionTCTx), next.KeyID, next.KeyVersion, next.SecurityEpoch+1, next.PolicyVersion, next.SuiteID, string(ccsds.AssociationNext), next.Parameters.SequenceNumberLength, next.Parameters.TransmittedIVLength, next.Parameters.TagLength, next.Parameters.ReplayWindow, next.Parameters.NoncePrefix)
+	if err != nil {
+		return conflict("create future working-key association", err)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO tx_states(association_id,next_iv,updated_at) VALUES(?,0,?)`, futureID, formatTime(time.Now()))
+	if err != nil {
+		return wrap("initialize future counter", err)
+	}
 	return wrap("commit TC promotion", tx.Commit())
 }
 
@@ -367,7 +394,7 @@ func (s *Store) NextTransmitCounter(ctx context.Context, associationID string) (
 	err := s.db.QueryRowContext(ctx, `UPDATE tx_states SET next_iv=next_iv+1,updated_at=?
 		WHERE association_id=? AND next_iv<4294967296 AND EXISTS(
 			SELECT 1 FROM security_associations sa WHERE sa.id=tx_states.association_id AND
-			((sa.direction='TC_TX' AND sa.state='CURRENT') OR (sa.direction='TC_RECOVERY_TX' AND sa.state='ACTIVE')))
+			((sa.direction='TC_TX' AND sa.state='CURRENT' AND tx_states.next_iv<1024) OR (sa.direction='TC_RECOVERY_TX' AND sa.state='ACTIVE')))
 		RETURNING next_iv-1`, formatTime(time.Now()), associationID).Scan(&allocated)
 	if err == nil {
 		return uint32(allocated), nil
@@ -385,7 +412,7 @@ func (s *Store) NextTransmitCounter(ctx context.Context, associationID string) (
 	if err != nil {
 		return 0, wrap("read transmit IV state", err)
 	}
-	if next >= int64(uint64(1)<<32) {
+	if (direction == string(ccsds.DirectionTCTx) && next >= ccsds.TCOrdinaryFrameLimit) || next >= int64(uint64(1)<<32) {
 		return 0, ccsds.ErrCounterExhausted
 	}
 	return 0, ccsds.ErrAssociationState

@@ -205,7 +205,7 @@ func (s *MemoryStore) ReadTCRotationState(_ context.Context, tenantID string) (*
 
 func (s *MemoryStore) MarkTCRotationPrepared(_ context.Context, tenantID string, state TCRotationState) error {
 	if state.Phase != TCRotationPrepared || state.TransactionID == 0 || state.CurrentRootVersion == 0 ||
-		state.NextRootVersion <= state.CurrentRootVersion || state.NextSPI != NextSPI(state.CurrentSPI) {
+		state.NextRootVersion < state.CurrentRootVersion || state.NextSPI != NextSPI(state.CurrentSPI) {
 		return ErrAssociationState
 	}
 	s.mu.Lock()
@@ -262,17 +262,39 @@ func (s *MemoryStore) PromoteNextTC(_ context.Context, tenantID string) error {
 	current := s.byID[currentID]
 	next := s.byID[nextID]
 	rotation, rotationOK := s.rotation[tenantID]
-	if currentID == "" || nextID == "" ||
+	routine := next.KeyVersion == current.KeyVersion && next.KeyID == current.KeyID
+	flight, flightOK := s.flight[tenantID]
+	routineAllowed := routine && flightOK && flight.SelfTest == FlightSelfTestPassed &&
+		flight.ProfileDigest == s.profiles[tenantID] && flight.NextAuthUsed < TCOrdinaryAuthLimit &&
+		!flight.ReceptionPaused && !flight.PendingRootPresent &&
+		flight.CurrentSPI == current.SPI && flight.SecurityEpoch == current.SecurityEpoch && flight.RootVersion == current.KeyVersion
+	prepared := rotationOK && rotation.Phase == TCRotationPrepared && rotation.CurrentSPI == current.SPI &&
+		rotation.NextSPI == next.SPI && rotation.CurrentRootVersion == current.KeyVersion && rotation.NextRootVersion == next.KeyVersion
+	if currentID == "" || nextID == "" || current.SecurityEpoch >= ^uint32(0)-1 ||
 		next.SecurityEpoch != current.SecurityEpoch+1 || next.SPI != NextSPI(current.SPI) ||
-		!equalBytes(next.Parameters.NoncePrefix, current.Parameters.NoncePrefix) || !rotationOK ||
-		rotation.Phase != TCRotationPrepared || rotation.CurrentSPI != current.SPI || rotation.NextSPI != next.SPI ||
-		rotation.CurrentRootVersion != current.KeyVersion || rotation.NextRootVersion != next.KeyVersion {
+		!equalBytes(next.Parameters.NoncePrefix, current.Parameters.NoncePrefix) || (!routineAllowed && !prepared) ||
+		(next.KeyVersion == current.KeyVersion && !routineAllowed) {
 		return ErrAssociationState
+	}
+	if routine {
+		rotation = TCRotationState{TransactionID: uint64(next.SecurityEpoch), CurrentSPI: current.SPI,
+			NextSPI: next.SPI, CurrentRootVersion: current.KeyVersion, NextRootVersion: next.KeyVersion}
 	}
 	current.State = AssociationDisabled
 	next.State = AssociationCurrent
 	s.byID[currentID] = current
 	s.byID[nextID] = next
+	future := cloneAssociation(next)
+	future.ID = fmt.Sprintf("tc:%s:epoch:%d", tenantID, next.SecurityEpoch+1)
+	future.SPI = NextSPI(next.SPI)
+	future.SecurityEpoch++
+	future.State = AssociationNext
+	if oldID, exists := s.bySPI[spiKey(tenantID, DirectionTCTx, future.SPI)]; exists {
+		delete(s.byID, oldID)
+		delete(s.txNext, oldID)
+	}
+	s.byID[future.ID] = future
+	s.bySPI[spiKey(tenantID, DirectionTCTx, future.SPI)] = future.ID
 	rotation.Phase = TCRotationSwitching
 	s.rotation[tenantID] = rotation
 	return nil
@@ -291,7 +313,7 @@ func (s *MemoryStore) NextTransmitCounter(_ context.Context, associationID strin
 		return 0, ErrAssociationState
 	}
 	next := s.txNext[associationID]
-	if next >= uint64(1)<<32 {
+	if (sa.Direction == DirectionTCTx && next >= TCOrdinaryFrameLimit) || next >= uint64(1)<<32 {
 		return 0, ErrCounterExhausted
 	}
 	s.txNext[associationID] = next + 1

@@ -67,7 +67,7 @@ func TestSchemaVersionAndFilesystemFailures(t *testing.T) {
 	if _, err := store.db.ExecContext(ctx, `PRAGMA ignore_check_constraints=ON`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.ExecContext(ctx, `UPDATE schema_meta SET version=4`); err != nil {
+	if _, err := store.db.ExecContext(ctx, `UPDATE schema_meta SET version=3`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.db.ExecContext(ctx, `PRAGMA ignore_check_constraints=OFF`); err != nil {
@@ -143,7 +143,7 @@ func provisionTestTC(t *testing.T, store *Store) {
 	for _, spec := range []struct {
 		id, suite string
 		version   uint32
-	}{{"current-root", "SM4_HCTR", 1}, {"next-root", "SM4_HCTR", 2}, {"recovery-root", "SM4_GCM", 1}} {
+	}{{"current-root", "SM4_GCM_32", 1}, {"next-root", "SM4_GCM_32", 2}, {"recovery-root", "SM4_GCM", 1}} {
 		key, version := testKey("tenant-1", spec.id, spec.suite, spec.version)
 		if err := store.CreateProtocolKey(ctx, key, version); err != nil {
 			t.Fatal(err)
@@ -152,11 +152,11 @@ func provisionTestTC(t *testing.T, store *Store) {
 	prefix := []byte{1, 2, 3, 4, 5, 6}
 	associations := []ccsds.SecurityAssociation{
 		{ID: "current", TenantID: "tenant-1", SPI: 0x1001, Direction: ccsds.DirectionTCTx,
-			KeyID: "current-root", KeyVersion: 1, SecurityEpoch: 1, PolicyVersion: 1, SuiteID: "SM4_HCTR",
-			State: ccsds.AssociationCurrent, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: prefix}},
+			KeyID: "current-root", KeyVersion: 1, SecurityEpoch: 1, PolicyVersion: 1, SuiteID: "SM4_GCM_32",
+			State: ccsds.AssociationCurrent, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 2, TagLength: 4, NoncePrefix: prefix}},
 		{ID: "next", TenantID: "tenant-1", SPI: 0x1002, Direction: ccsds.DirectionTCTx,
-			KeyID: "next-root", KeyVersion: 2, SecurityEpoch: 2, PolicyVersion: 1, SuiteID: "SM4_HCTR",
-			State: ccsds.AssociationNext, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: prefix}},
+			KeyID: "next-root", KeyVersion: 2, SecurityEpoch: 2, PolicyVersion: 1, SuiteID: "SM4_GCM_32",
+			State: ccsds.AssociationNext, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 2, TagLength: 4, NoncePrefix: prefix}},
 		{ID: "recovery", TenantID: "tenant-1", SPI: 0x7001, Direction: ccsds.DirectionTCRecoveryTx,
 			KeyID: "recovery-root", KeyVersion: 1, PolicyVersion: 1, SuiteID: "SM4_GCM",
 			State: ccsds.AssociationActive, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 4, TagLength: 16, NoncePrefix: prefix}},

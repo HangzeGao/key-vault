@@ -1,5 +1,5 @@
 # EXAMPLE ONLY. These deterministic roots must never be used for flight.
-format_version: 1
+format_version: 2
 mission_id: example-satellite
 tenant_id: t-default
 spacecraft_id: 291

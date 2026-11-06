@@ -144,8 +144,8 @@ func (s *Service) protect(ctx context.Context, req ProtectRequest, derivation *D
 	if err != nil || suiteID.KeyPurpose() != k.Purpose {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "key purpose does not match suite", false)
 	}
-	if suiteID == suite.SM4HCTR && derivation == nil {
-		return nil, errorsx.New(errorsx.CodePolicyDenied, "SM4_HCTR requires protocol-bound key derivation", false)
+	if suiteID == suite.SM4GCM32 && derivation == nil {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "SM4_GCM_32 requires protocol-bound key derivation", false)
 	}
 	kv, err := s.store.GetKeyVersionByNo(ctx, k.ID, req.KeyVersion)
 	if err != nil || kv.SuiteID != k.SuiteID {
@@ -220,8 +220,8 @@ func (s *Service) Unprotect(ctx context.Context, req UnprotectRequest) (*Unprote
 	if err != nil || suiteID.KeyPurpose() != k.Purpose {
 		return nil, errorsx.New(errorsx.CodePolicyDenied, "key purpose does not match suite", false)
 	}
-	if suiteID == suite.SM4HCTR {
-		return nil, errorsx.New(errorsx.CodePolicyDenied, "SM4_HCTR receive is owned by the protocol module", false)
+	if suiteID == suite.SM4GCM32 {
+		return nil, errorsx.New(errorsx.CodePolicyDenied, "SM4_GCM_32 receive is owned by the protocol module", false)
 	}
 	if err := validateInputs(suiteID, req.Nonce, req.AAD, req.AuthenticationInput); err != nil {
 		return nil, err

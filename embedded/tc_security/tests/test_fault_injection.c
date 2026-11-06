@@ -8,27 +8,31 @@ static int fail_selftest;
 static int fail_derive;
 static int corrupt_ordinary_repeat;
 static int corrupt_recovery_repeat;
-static int fail_hctr;
+static int fail_short;
+static unsigned corrupt_short_repeat, short_calls;
 static int corrupt_prepare_suite;
 static unsigned fail_gcm_call;
 static unsigned derive_calls, recovery_calls, gcm_calls;
 
 int __real_tcsec_crypto_self_test(tcsec_crypto_backend_t *backend);
 int __wrap_tcsec_crypto_self_test(tcsec_crypto_backend_t *backend) {
-    int result, saved_derive = fail_derive, saved_hctr = fail_hctr;
+    int result, saved_derive = fail_derive, saved_short = fail_short;
     int saved_ordinary = corrupt_ordinary_repeat, saved_recovery = corrupt_recovery_repeat;
     int saved_suite = corrupt_prepare_suite;
-    unsigned saved_gcm = fail_gcm_call;
+    unsigned saved_gcm = fail_gcm_call, saved_short_corrupt = corrupt_short_repeat;
+    corrupt_short_repeat = 0;
     if (fail_selftest) return -1;
-    fail_derive = fail_hctr = corrupt_ordinary_repeat = corrupt_recovery_repeat = 0;
+    fail_derive = fail_short = corrupt_ordinary_repeat = corrupt_recovery_repeat = 0;
     corrupt_prepare_suite = 0;
     fail_gcm_call = 0;
     result = __real_tcsec_crypto_self_test(backend);
-    fail_derive = saved_derive; fail_hctr = saved_hctr;
+    fail_derive = saved_derive;
+    fail_short = saved_short;
     corrupt_ordinary_repeat = saved_ordinary; corrupt_recovery_repeat = saved_recovery;
     fail_gcm_call = saved_gcm;
     corrupt_prepare_suite = saved_suite;
-    derive_calls = recovery_calls = gcm_calls = 0;
+    derive_calls = recovery_calls = gcm_calls = short_calls = 0;
+    corrupt_short_repeat = saved_short_corrupt;
     return result;
 }
 
@@ -54,10 +58,16 @@ int __wrap_tcsec_derive_recovery_key(const uint8_t *root, size_t length, uint16_
     return result;
 }
 
-int __real_tcsec_sm4_hctr_decrypt(const uint8_t *, const uint8_t *, const uint8_t *, uint8_t *, size_t);
-int __wrap_tcsec_sm4_hctr_decrypt(const uint8_t *key, const uint8_t *tweak,
-                                 const uint8_t *in, uint8_t *out, size_t length) {
-    return fail_hctr ? -1 : __real_tcsec_sm4_hctr_decrypt(key,tweak,in,out,length);
+int __real_tcsec_gcm_open_short(const uint8_t *, const uint8_t *, const uint8_t *, size_t,
+                                const uint8_t *, size_t, const uint8_t *, uint8_t *);
+int __wrap_tcsec_gcm_open_short(const uint8_t *key, const uint8_t *nonce, const uint8_t *aad,
+                                size_t an, const uint8_t *in, size_t n, const uint8_t *tag,
+                                uint8_t *out) {
+    int result =
+        fail_short ? -1 : __real_tcsec_gcm_open_short(key, nonce, aad, an, in, n, tag, out);
+    if (result == 0 && corrupt_short_repeat && ++short_calls == 2)
+        out[0] ^= 1;
+    return result;
 }
 
 int __real_tcsec_gcm_open(tcsec_suite_t, const uint8_t *, const uint8_t *, const uint8_t *,
@@ -79,7 +89,7 @@ int main(int argc, char **argv) {
     tcsec_runtime_status_t runtime;
     tcsec_result_t result;
     tcsec_config_t config;
-    uint8_t output[TCSEC_MAX_FRAME_LENGTH], frame[TCSEC_MAX_FRAME_LENGTH], key[32];
+    uint8_t output[TCSEC_MAX_FRAME_LENGTH], frame[TCSEC_MAX_FRAME_LENGTH], key[16];
     size_t frame_length;
     const tcsec_callbacks_t callbacks = {.load_state=load_snapshot, .commit_state=commit_state,
                                          .user_context=&fixture};
@@ -111,16 +121,29 @@ int main(int argc, char **argv) {
     if (tcsec_init(&context,&callbacks) != TCSEC_KEY_DERIVATION_FAILED) return 8;
     corrupt_recovery_repeat = 0;
     if (tcsec_init(&context,&callbacks) != TCSEC_OK) return 9;
-    fail_hctr = 1;
-    if (tcsec_receive(&context,ordinary.protected_frame,ordinary.protected_frame_length,
-                     output,sizeof(output),&result) != TCSEC_INVALID_CONFIGURATION ||
-        result.plaintext_length != 0 || output[0] != 0 || fixture.calls != 0) return 10;
-    fail_hctr = 0;
-    if (tcsec_derive_ordinary_key(ordinary.root,ordinary.root_length,ordinary.spacecraft_id,
-            ordinary.suite,(uint16_t)(ordinary.spi+1u),ordinary.security_epoch+1u,
-            ordinary.root_version,key,sizeof(key)) != 0 ||
-        !build_ordinary_frame(ordinary.suite,key,ordinary.prefix,(uint16_t)(ordinary.spi+1u),
-            1,next_test_packet,sizeof(next_test_packet),frame,&frame_length)) return 11;
+    fail_short = 1;
+    if (tcsec_receive(&context, ordinary.protected_frame, ordinary.protected_frame_length, output,
+                      sizeof(output), &result) != TCSEC_AUTHENTICATION_FAILED ||
+        result.plaintext_length != 0 || output[0] != 0 || fixture.calls != 0)
+        return 10;
+    fail_short = 0;
+    corrupt_short_repeat = 1;
+    short_calls = 0;
+    if (tcsec_receive(&context, ordinary.protected_frame, ordinary.protected_frame_length, output,
+                      sizeof(output), &result) != TCSEC_STATE_INTEGRITY_FAILED ||
+        output[0] != 0 || result.plaintext_length != 0)
+        return 19;
+    corrupt_short_repeat = 0;
+    if (tcsec_reset(&context) != TCSEC_OK)
+        return 20;
+    if (tcsec_derive_ordinary_key(ordinary.root, ordinary.root_length, ordinary.spacecraft_id,
+                                  ordinary.suite, (uint16_t)(ordinary.spi + 1u),
+                                  ordinary.security_epoch + 1u, ordinary.root_version, key,
+                                  sizeof(key)) != 0 ||
+        !build_ordinary_frame(ordinary.suite, key, ordinary.prefix, (uint16_t)(ordinary.spi + 1u),
+                              ordinary.security_epoch + 1u, 1, next_test_packet,
+                              sizeof(next_test_packet), frame, &frame_length))
+        return 11;
     fail_derive = 1;
     if (tcsec_receive(&context,frame,frame_length,output,sizeof(output),&result) !=
             TCSEC_KEY_DERIVATION_FAILED || output[0] != 0 || fixture.calls != 0) return 12;
@@ -147,6 +170,7 @@ int main(int argc, char **argv) {
     if (tcsec_receive(&context,recovery.protected_frame,recovery.protected_frame_length,
             output,sizeof(output),&result) != TCSEC_ROOT_PREPARE_REJECTED ||
         output[0] != 0 || fixture.calls != 0) return 18;
-    puts("Link-time faults passed: self-test, KDF, HCTR, GCM, candidate keys and fixed wire suite");
+    puts(
+        "Link-time faults passed: self-test, KDF, GCM32, GCM, candidate keys and fixed wire suite");
     return 0;
 }

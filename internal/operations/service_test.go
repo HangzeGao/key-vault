@@ -23,7 +23,7 @@ func (f fakeStore) Diagnostics(context.Context) (*securitystate.Diagnostics, err
 	if f.fail {
 		return nil, errors.New("down")
 	}
-	return &securitystate.Diagnostics{Schema: 3, IntegrityOK: true, Associations: 3, AuditEvents: 2}, nil
+	return &securitystate.Diagnostics{Schema: 4, IntegrityOK: true, Associations: 3, AuditEvents: 2}, nil
 }
 
 type fakeResolver bool

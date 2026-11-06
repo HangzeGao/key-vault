@@ -18,7 +18,7 @@
 | 术语 | 含义 |
 | --- | --- |
 | 安全关联（SA） | 星地共同使用的一组帧保护参数和运行状态，包括算法、所用密钥、SPI 及 IV 或重放窗口。普通关联还包括安全代次。 |
-| 安全参数索引（SPI） | TC 帧安全域开头的 2 字节编号，范围为 `0x0000～0xFFFF`。星载模块读取编号，选出本帧对应的安全关联。 |
+| 安全参数索引（SPI） | 内部保存的 16 位逻辑关联编号，参与工作密钥和 nonce 派生。空口使用安全代次模 3 得到的 2 位选择值；完整 SPI 不在帧中发送。 |
 | 当前、下一和恢复关联（Current、Next、Recovery） | Current 处理当前普通遥控，Next 处理下一安全代次的普通遥控，Recovery 处理已认证的换根准备。 |
 | 恢复通道换根准备（Recovery Root Prepare） | 在恢复安全关联上认证并保存待生效的业务根密钥。它在下一安全关联切换时生效。 |
 | 根密钥与工作密钥 | 根密钥由星地保管。工作密钥由根密钥与关联参数派生，用于实际的帧保护运算。 |
@@ -29,8 +29,8 @@
 
 | 功能 | 密码模块职责 | 星务/BSP 职责 |
 | --- | --- | --- |
-| 当前安全关联遥控 | SM4-HCTR 解密，持久化重放状态后交付明文 | 校验业务明文，通过后执行指令 |
-| 下一安全关联遥控 | 解密后按编译链接的任务规则校验；通过后原子切换并交付明文 | 识别切换结果，执行业务联锁 |
+| 当前安全关联遥控 | SM4-GCM 认证解密，先持久预留验证额度，再持久化重放状态，成功后交付明文 | 校验业务明文，通过后执行指令 |
+| 下一安全关联遥控 | 认证解密后按编译链接的任务规则校验；通过后原子切换并交付明文 | 识别切换结果，执行业务联锁 |
 | 恢复通道遥控 | SM4-GCM 认证解密，解析换根准备事务 | 原子持久化待生效根和重放状态 |
 | 状态恢复 | 从已绑定的存储恢复并校验安全配置 | 板级集成负责提供实际存储操作 |
 | 运行诊断 | 提供不含密钥的状态和耗时统计 | 将状态字段装入任务遥测 |
@@ -69,7 +69,7 @@ tcsec_status_t tcsec_reset(tcsec_context_t *context);
 
 四个公开入口为 `tcsec_init`、`tcsec_reset`、`tcsec_receive`、`tcsec_get_runtime_status`。星务集成只依赖公开头文件和静态库。
 
-普通通道固定使用 SM4-HCTR，恢复通道固定使用 SM4-GCM，根密钥固定为 16 字节数组。星务无需填写算法选择和根密钥长度。帧中的协议套件字段仍由模块严格检查，非法值被拒绝。对外头文件完整内容见附录 C。
+普通通道固定使用 SM4-GCM 和 4 字节认证标签，恢复通道固定使用 SM4-GCM 和 16 字节认证标签。两种用途的工作密钥均为 16 字节，使用不同 KDF 标签隔离。根密钥固定为 16 字节数组。星务无需填写算法选择和根密钥长度。帧中的协议套件字段仍由模块严格检查，非法值被拒绝。对外头文件完整内容见附录 C。
 
 
 ### 1.1 星务回调约定
@@ -86,7 +86,7 @@ tcsec_status_t tcsec_reset(tcsec_context_t *context);
 
 自有持久化服务须能在掉电或提交结果不确定后恢复可信状态。密码模块提供逻辑状态和变化记录，星务决定存储格式、介质和读写方式。
 
-首次装星由星务的受控工序灌装并验证初始安全状态。星务保存可信的首装完成记录，再开放 TC 接收。运行期发现状态缺失、损坏或回退时保持停收，交由授权恢复流程处理。首装职责和判定流程见附录 A。
+完整持久格式须绑定接口版本 5，加载时拒绝缺失预算字段的记录。首次装星由星务的受控工序灌装并验证初始安全状态。星务保存可信的首装完成记录，再开放 TC 接收。运行期发现状态缺失、损坏或回退时保持停收，交由授权恢复流程处理。首装职责和判定流程见附录 A。
 
 ### 1.2 加载状态回调 load_state
 
@@ -156,7 +156,8 @@ static tcsec_status_t flight_load_state(void *service, tcsec_config_t *out)
 | `operational_root` | 固定 16 字节的当前业务根密钥。 |
 | `root_version`、`current_epoch` | 当前业务根版本和安全代次，均为非零。安全代次须小于 `UINT32_MAX`，递增和上限规则见第 2.2 节。 |
 | `current_spi`、`nonce_prefix` | 当前安全关联 SPI 及 6 字节 Nonce 前缀。 |
-| `replay` | 普通通道的完整重放窗口。 |
+| `replay` | 当前普通关联的完整重放窗口，最高计数不超过 16383。 |
+| `current_auth_used`、`next_auth_used` | 当前和下一工作密钥已经持久预留的 GCM 验证次数，分别为 0～2048 的偶数。首装为 0；重启或复位恢复原值，禁止清零。每次普通帧认证前增加 2。 |
 | `pending_root_present` | 有已持久化的待生效根时填 1，否则填 0。 |
 | `pending_operational_root` | 固定 16 字节的待生效业务根。 |
 | `pending_root_version`、`pending_transaction_id` | 待生效根版本和对应换根事务号。根版本须大于当前业务根版本，事务号须非零。 |
@@ -167,7 +168,7 @@ static tcsec_status_t flight_load_state(void *service, tcsec_config_t *out)
 
 | 字段 | 填写内容 |
 | --- | --- |
-| `recovery.spi` | Recovery SPI 须与 Current 和 Next SPI 区分。 |
+| `recovery.spi` | 恢复通道内部逻辑 SPI；空口使用独立的选择值 3。数值可与普通 SPI 相同，不构成歧义。 |
 | `recovery.recovery_root` | 固定 16 字节的恢复通道根密钥。 |
 | `recovery.root_version`、`recovery.nonce_prefix` | 非零的恢复根版本及 6 字节恢复通道 Nonce 前缀。 |
 | `recovery.replay` | 恢复通道独立的重放窗口。 |
@@ -177,7 +178,7 @@ static tcsec_status_t flight_load_state(void *service, tcsec_config_t *out)
 | 重放窗口字段 | 含义 |
 | --- | --- |
 | `seen` | 0 表示从未接收，1 表示已接收。 |
-| `highest_iv` | 32 位最高已接收 IV。 |
+| `highest_iv` | 最高已接收计数。字段使用 uint32_t；普通帧计数范围 0～16383，Recovery 为 0～0xFFFFFFFF。 |
 | `bitmap` | 64 位接收位图。第 0 位表示最高 IV，第 `n` 位为 1 表示比最高 IV 小 `n` 的帧已接收。 |
 
 `seen = 0` 时，`highest_iv` 和 `bitmap` 都填零。`seen = 1` 时，位图第 0 位须为 1。
@@ -210,8 +211,9 @@ typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(
 | --- | --- |
 | `kind` | 提交类型，决定应更新哪一组状态。 |
 | `spi` | 本次帧所属的安全关联。发生切换时，对应将成为 Current 的关联。 |
-| `replay` | 本次处理后的完整重放窗口，含最高 IV、位图和有效标志。 |
+| `replay` | 普通重放、提升或 Recovery 准备提交中的新完整窗口。预算预留提交中全零且不使用，不能据此清空窗口。 |
 | `current_epoch`、`root_version` | 业务安全代次和业务根版本。切换时是生效后的值。恢复通道请求中仍是当前业务值，Recovery 根版本保存在持久化快照中。 |
+| `auth_used` | 普通提交中所选工作密钥的验证额度总消耗值。预算预留提交时是持久旧值加 2；重放或提升提交时应等于已持久的所选密钥预算。Recovery 提交为 0。 |
 | `root_prepare` | 指向 `tcsec_root_prepare_t`。仅换根准备时非空。 |
 
 #### 换根准备对象 tcsec_root_prepare_t
@@ -228,9 +230,10 @@ typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(
 
 | 提交类型 | 原子写入内容 |
 | --- | --- |
-| `TCSEC_COMMIT_ORDINARY_REPLAY` | 保存普通通道新的完整重放窗口。 |
-| `TCSEC_COMMIT_EPOCH_PROMOTION` | 保存新 Current SPI、代次、根版本和重放窗口。存在待生效根时，在同一事务中启用该根并清除待生效记录。 |
-| `TCSEC_COMMIT_ROOT_PREPARE` | 将待生效根及事务信息和新的 Recovery 重放窗口一起保存。当前业务根继续生效。 |
+| `TCSEC_COMMIT_AUTH_BUDGET` | 认证前持久预留两次验证。按 SPI、代次和根版本选中 Current 或 Next，核对 auth_used 为旧值加 2 且不超过 2048，仅更新该预算。重放、根和切换状态保持原值。 |
+| `TCSEC_COMMIT_ORDINARY_REPLAY` | 核对已预留预算一致，保存当前普通关联新的完整重放窗口；保留已预留额度。 |
+| `TCSEC_COMMIT_EPOCH_PROMOTION` | 保存新 Current SPI、代次、根版本和重放窗口，同时将 next_auth_used 移为 current_auth_used，再将未来下一密钥的 next_auth_used 置 0。存在待生效根时，在同一事务中启用该根并清除待生效记录。 |
+| `TCSEC_COMMIT_ROOT_PREPARE` | 将待生效根及事务信息和新的 Recovery 重放窗口一起保存。首次安装该新根时，下一工作密钥改变，next_auth_used 置 0；同一事务使用新 Recovery 计数重试时必须保留预算。当前业务根及其预算继续生效。 |
 
 **待生效根的切换时点。** 换根准备只写入待生效记录。首个 Next SPI 普通帧通过重放检查和任务规则检查，并确认切换状态已持久化后，模块才将 Next 提升为 Current。没有待生效根时，Next 工作密钥使用当前业务根和下一关联的 SPI、代次派生。
 
@@ -238,19 +241,23 @@ typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(
 
 | 提交返回值 | 适用条件与模块处理 |
 | --- | --- |
-| `TCSEC_COMMIT_NEW` | 本次更新已原子持久化并确认。三类提交均可返回。 |
-| `TCSEC_COMMIT_ALREADY_APPLIED` | 仅用于安全关联切换或换根准备。须核实此前持久化的状态已包含本次请求的全部变化，包括重放窗口。普通重放提交成功须返回 `TCSEC_COMMIT_NEW`。 |
+| `TCSEC_COMMIT_NEW` | 本次更新已原子持久化并确认。四类提交均可返回。 |
+| `TCSEC_COMMIT_ALREADY_APPLIED` | 仅用于安全关联切换或换根准备。须核实此前持久化的状态已包含本次请求的全部变化，包括重放窗口。预算预留和普通重放提交成功须返回 `TCSEC_COMMIT_NEW`。 |
 | `TCSEC_COMMIT_REJECTED` | 请求与当前持久状态不相符。返回 `TCSEC_STATE_COMMIT_REJECTED` 并停收，重载可信状态后才能继续。 |
 | `TCSEC_COMMIT_PERSISTENCE_FAILED` | 写入未能完成。返回 `TCSEC_PERSISTENCE_FAILED`，停收且不释放明文。 |
 | `TCSEC_COMMIT_UNCERTAIN` | 无法确认提交锚是否已推进，例如写入完成但确认丢失。返回 `TCSEC_STORAGE_COMMIT_UNCERTAIN`，停收并通过重载判定最终状态。 |
 
 #### 提交回调示例
 
-本例收到普通帧 IV 9 后，模块在 `commit->replay` 中给出包含该 IV 的完整窗口。星务保存窗口，并在确认写入后返回 `TCSEC_COMMIT_NEW`。模块才交付明文。下次开机恢复该窗口，同一帧会被拒绝。
+本例收到普通帧计数 9 后，先以 AUTH_BUDGET 提交将对应预算从 0 持久增加到 2，成功后才执行最多两次 GCM 验证。认证成功后，模块在 `commit->replay` 中给出包含该 IV 的完整窗口。星务保存窗口，并在确认写入后返回 `TCSEC_COMMIT_NEW`。模块才交付明文。下次开机恢复该窗口，同一帧会被拒绝。
 
 下列存储函数由星务实现。每个函数在返回前完成对应的原子写入和结果确认，并在所有出口清除自身的临时根密钥、候选快照及封装缓冲，再返回上表中的枚举值。回调自身只做分发，不保留敏感缓存。具体事务算法见附录 B。
 
 ```c
+/* 持久增加所选工作密钥的验证额度；不能只修改 RAM。 */
+tcsec_commit_result_t flight_save_auth_budget(
+    void *service, const tcsec_commit_t *change);
+
 tcsec_commit_result_t flight_save_replay(
     void *service, const tcsec_commit_t *change);
 tcsec_commit_result_t flight_save_promotion(
@@ -262,6 +269,8 @@ static tcsec_commit_result_t flight_commit_state(
     void *service, const tcsec_commit_t *change)
 {
     switch (change->kind) {
+    case TCSEC_COMMIT_AUTH_BUDGET:
+        return flight_save_auth_budget(service, change);
     case TCSEC_COMMIT_ORDINARY_REPLAY:
         return flight_save_replay(service, change);
     case TCSEC_COMMIT_EPOCH_PROMOTION:
@@ -394,11 +403,18 @@ tcsec_status_t tcsec_receive(tcsec_context_t *context,
 | `plaintext`、`plaintext_capacity` | 普通 TC 明文数据域缓冲区及容量；最大数据域 1011 字节 |
 | `result` | 输出 SPI、IV 计数器、处理后的安全 epoch、profile 和明文长度 |
 
-主导头为 5 字节，安全域为 6 字节（SPI 2 字节、IV 计数器 4 字节），尾部帧校验序列（FECF）为 2 字节。普通遥控使用 SM4-HCTR，无认证标签。恢复通道换根准备使用 SM4-GCM，认证标签为 16 字节。SPI 范围为 `0x0000～0xFFFF`，Next SPI 为 `(Current SPI + 1) mod 65536`。
+主导头为 5 字节，安全域保持从偏移 5 开始的连续 6 字节，密文从偏移 11 开始，末尾 FECF 为 2 字节。普通 TC 使用 SM4-GCM，标签 4 字节；Recovery 使用独立的 SM4-GCM 工作密钥，标签 16 字节。完整字节合同见 [TC GCM 帧格式](TC_GCM_PROFILE.md)。
 
-当普通帧安全域的 SPI 等于 Next SPI 时，密码模块将其按 Next 帧处理。任一符合正式任务规则的普通指令都可以随 Next SPI 发送并触发切换。飞行构建须链接正式任务规则。详见[Next 明文校验设计](TC_PLAINTEXT_VALIDATION_DESIGN.md)。
+| 帧类型 | 完整帧布局 |
+| --- | --- |
+| 普通 Current 或 Next | 主导头 5 ＋ 控制字 2 ＋ Tag 4 ＋ 密文 N ＋ FECF 2。N 为 16～1011。 |
+| Recovery 换根准备 | 主导头 5 ＋ 固定控制字 0xC000 2 ＋ Recovery 计数 4 ＋ 密文 41 ＋ Tag 16 ＋ FECF 2，共 70 字节。 |
 
-普通帧先通过帧格式和重放检查，再解密。首个 Next 帧还须通过切换校验。随后模块提交状态，持久化成功后才向星务交付明文。Recovery 帧通过认证后在模块内处理。
+普通控制字高 2 位为选择值、低 14 位为计数。选择值等于安全代次 mod 3：当前值选 Current，下一代次的值选 Next，其余普通值拒绝。选择值 3 专属 Recovery，其低 14 位必须为零。内部 SPI 仍按 16 位维护，Next SPI 为 Current SPI 加 1 后回绕；模块通过持久代次推导选择值，不能仅凭空口选择值重置关联。
+
+普通帧 AAD 为最终主导头 5 字节和控制字 2 字节，共 7 字节。Recovery AAD 为最终主导头和整个 6 字节安全域，共 11 字节。两类 nonce 都是相应前缀 6 字节、内部完整 SPI 2 字节和补足为 uint32 大端编码的计数 4 字节，共 12 字节。Tag 均为完整 GCM 标签的左侧固定字节。
+
+普通帧先通过帧格式和重放检查，再持久预留两次验证预算；预留成功后执行重复 GCM 认证解密。认证失败不更新重放窗口，但保留已消耗预算。首个 Next 帧还须通过内部切换规则，飞行构建须链接正式任务规则，见 [Next 明文校验设计](TC_PLAINTEXT_VALIDATION_DESIGN.md)。之后持久提交重放或提升，成功才交付明文。Recovery 认证后在模块内部处理，不消耗普通工作密钥预算。
 
 | 接收结果 | 含义 | 星务处理 |
 | --- | --- | --- |
@@ -410,7 +426,7 @@ tcsec_status_t tcsec_receive(tcsec_context_t *context,
 
 **按上述返回码分支处理。** 三个带名称的成功事件均为非零返回值。星务只能在 `TCSEC_OK` 或 `TCSEC_EPOCH_PROMOTED` 后消费普通明文；当输出指针及容量有效时，错误返回将清零明文缓冲区，非空 `result` 的明文长度归零。仍须先检查返回码，再消费输出。调用期间，输出缓冲区不得被其他任务或 DMA 作为有效业务数据消费。输入帧、输出缓冲区、结果和上下文须相互独立，指针和容量须对应真实可访问的内存。
 
-Current 帧的 IV 在成功返回前已持久化。星务随后拒绝该指令时，不执行指令，也不回退该 IV。Next 校验拒绝发生在状态提交前，不推进该帧的重放状态，也不触发切换。
+Current 帧的 IV 在成功返回前已持久化。星务随后拒绝该指令时，不执行指令，也不回退该 IV。Next 校验拒绝不推进该帧的重放状态，也不触发切换；已经持久预留的验证额度继续保留。
 
 ### 2.1 TC 根密钥与工作密钥
 
@@ -420,11 +436,11 @@ Current 帧的 IV 在成功返回前已持久化。星务随后拒绝该指令�
 
 | 安全关联 | 星上派生所用的根 | 工作密钥及用途 |
 | --- | --- | --- |
-| Current 当前关联 | 当前业务根。 | 32 字节，用于当前普通遥控的 SM4-HCTR。 |
-| Next 下一关联 | 有已持久化的待生效业务根时使用该根，否则使用当前业务根。两种情况下都使用 Next SPI 和下一安全代次。 | 32 字节，用于下一安全关联的 SM4-HCTR。 |
+| Current 当前关联 | 当前业务根。 | 16 字节，用于当前普通遥控的 SM4-GCM 和 4 字节 Tag。 |
+| Next 下一关联 | 有已持久化的待生效业务根时使用该根，否则使用当前业务根。两种情况下都使用 Next SPI 和下一安全代次。 | 16 字节，用于下一普通关联的 SM4-GCM 和 4 字节 Tag。 |
 | Recovery 恢复关联 | 独立的恢复通道根。 | 16 字节，用于换根准备帧的 SM4-GCM 认证解密。 |
 
-普通通道的 32 字节工作密钥前 16 字节用于 SM4，后 16 字节用于 HCTR 哈希。
+Current、Next、Recovery 各有一把 16 字节 SM4 工作密钥。GCM 内部的 GHASH 子密钥由 SM4 工作密钥计算，不由星务另行灌装或持久化。
 
 #### 派生和选用工作密钥的时点
 
@@ -432,9 +448,9 @@ Current 帧的 IV 在成功返回前已持久化。星务随后拒绝该指令�
 | --- | --- | --- |
 | 初始化或复位 | `load_state` 返回根密钥、根版本、SPI、安全代次及待生效根状态。 | 在开放收帧前派生 Current、Next 和 Recovery 工作密钥。没有待生效根时，用当前业务根和 Next 的 SPI、安全代次派生 Next 工作密钥。 |
 | 收到 Recovery 换根准备帧 | 先用已有 Recovery 工作密钥认证解密，得到新业务根、新根版本、下一 SPI、下一安全代次及事务信息。 | 用新根和下一关联参数计算候选 Next 工作密钥。待生效状态持久化成功后，才用候选密钥更新内存中的 Next 工作密钥。 |
-| 收到普通 Next 帧 | 帧安全域给出 Next SPI 和本帧 IV 计数器。 | SPI 选中已派生的 Next 工作密钥，帧 IV 用于本帧解密及重放检查。帧通过校验且切换状态持久化成功后，Next 成为 Current。 |
+| 收到普通 Next 帧 | 帧安全域给出下一代次选择值和本帧计数器。 | 选择值结合持久代次选中已派生的 Next 工作密钥，帧 IV 用于本帧解密及重放检查。帧通过校验且切换状态持久化成功后，Next 成为 Current。 |
 
-例如当前业务根为 `R1`，Current SPI 为 `0x0020`、安全代次为 7。没有待生效根时，星上启动会用 `R1` 派生两把普通工作密钥，分别对应 `0x0020／7` 和 `0x0021／8`。如果随后通过 Recovery 收到并保存新业务根 `R2`，模块用 `R2` 重新派生 `0x0021／8` 的工作密钥。下一帧带 `0x0021` 到达时，模块直接选用这把工作密钥。
+例如当前业务根为 `R1`，Current SPI 为 `0x0020`、安全代次为 7。没有待生效根时，星上启动会用 `R1` 派生两把普通工作密钥，分别对应 `0x0020／7` 和 `0x0021／8`。如果随后通过 Recovery 收到并保存新业务根 `R2`，模块用 `R2` 重新派生 `0x0021／8` 的工作密钥。下一帧带代次 8 对应的选择值 2 到达时，模块直接选用这把工作密钥。
 
 #### 星地派生输入
 
@@ -444,12 +460,12 @@ Go 和 C 均使用 SM4-CMAC 计数器模式 KDF。两端使用相同的根密钥
 
 | 通道和标签 | 派生上下文 |
 | --- | --- |
-| 普通遥控 `TC-TRAFFIC` | 航天器编号（2 字节）、TC 方向码 `1`（1 字节）、套件（2 字节）、SPI（2 字节）、安全代次（4 字节）、业务根版本（4 字节）。 |
-| 恢复通道 `TC-RECOVERY-GCM` | 航天器编号（2 字节）、套件（2 字节）、Recovery SPI（2 字节）、恢复根版本（4 字节）。 |
+| 普通遥控 `TC-GCM32-V1` | 航天器编号（2 字节）、TC 方向码 `1`（1 字节）、套件（2 字节）、SPI（2 字节）、安全代次（4 字节）、业务根版本（4 字节）。 |
+| 恢复通道 `TC-GCM128-RECOVERY-V1` | 航天器编号（2 字节）、套件（2 字节）、Recovery SPI（2 字节）、恢复根版本（4 字节）。 |
 
 #### 帧 IV 计数器的用途
 
-帧内的 4 字节 IV 计数器用于构造每帧的 HCTR tweak 或 GCM nonce。普通通道的 tweak 依次拼接 6 字节前缀、2 字节 SPI、4 字节帧 IV 和 4 字节零值。恢复通道的 nonce 拼接相应前缀、SPI 和帧 IV，共 12 字节。
+普通帧计数为 14 位，Recovery 计数为 32 位。计数参与 12 字节 GCM nonce，并用于重放检查。普通工作密钥的 KDF 套件标识固定为 0x0003，Recovery 固定为 0x0002，两个标签的派生输出均为 16 字节。帧计数不触发逐帧派生工作密钥。
 
 同一个安全关联的不同帧使用该关联的工作密钥。切换成功后，模块将已用的 Next 工作密钥提升为 Current，并为再下一安全代次准备工作密钥。
 
@@ -468,9 +484,17 @@ Go 和 C 均使用 SM4-CMAC 计数器模式 KDF。两端使用相同的根密钥
 | 字段 | 变化规则 |
 | --- | --- |
 | 安全代次 `current_epoch` | 每次成功切换加 1。当前实现允许 `0xFFFFFFFE` 作为已生效代次，达到该值后拒绝再次切换。 |
-| 安全参数索引 `SPI` | 普通关联按 `(Current SPI + 1) mod 65536` 计算 Next SPI。例如 SPI `0xFFFF`、代次 7 的下一关联是 SPI `0x0000`、代次 8。首装和复位时，Recovery SPI 须与普通 Current、Next SPI 区分。 |
+| 安全参数索引 `SPI` | 普通关联按 `(Current SPI + 1) mod 65536` 计算 Next SPI。例如 SPI `0xFFFF`、代次 7 的下一关联是 SPI `0x0000`、代次 8。空口选择值由代次 mod 3 推导，Recovery 使用独立值 3。 |
 | 业务根版本 `root_version` | 新根版本须大于当前业务根版本，允许跳号。使用同一业务根完成关联切换时，根版本保持原值。 |
-| 帧 IV 计数器 `iv_counter` | 地面按发送安全关联独立分配 32 位计数器，同一关联中随发帧推进，耗尽后拒绝继续分配。帧 IV 用于本帧处理和重放判断。 |
+| 帧 IV 计数器 `iv_counter` | 普通计数空口容量为 14 位；地面当前安全策略最多分配 1024 帧，每关联从 0 到 1023，达到上限停止，切换工作密钥后才能继续。Recovery 独立分配 32 位计数，耗尽后停止。帧 IV 用于本帧处理和重放判断。 |
+
+#### 短标签验证预算
+
+普通帧的密文与 AAD 总长不超过 1024 字节，按 NIST SP 800-38D 附录 C 表 1 的 32 位标签限制，单工作密钥最多执行 2048 次认证解密。本模块每帧最多执行两次独立验证，因此每次预留 2 次，失败、故障及认证后的中断均不返还。地面每工作密钥最多生成 1024 帧，90% 时告警；链路异常或恶意输入可能使星上预算先耗尽，须同时关注星载预算遥测。
+
+额度不足返回 TCSEC_AUTH_BUDGET_EXHAUSTED，本帧不解密、不交付明文，也不全局暂停 Recovery。不能清零预算或回退代次继续用同一密钥。应在地面确认星上状态后切换到仍有额度的 Next；若 Next 也不可用，通过独立 Recovery 准备新业务根后再切换。普通帧不会因标签失败或预算耗尽而自动切换。短标签仍只有 32 位认证强度，预算限制不将它提升为 128 位认证。
+
+预算预留是独立的持久化事务。普通帧通常有两次同步 commit_state：一次预留预算、一次提交重放或切换。星务应据此评估写入时延和寿命。若平台要求批量预留，必须另行冻结确保掉电不回退的合同，不能在本版本自行改为 RAM 累计。
 
 #### 重放窗口和前跳上限
 
@@ -497,11 +521,13 @@ Current、Next 和 Recovery 分别使用 64 帧重放窗口。窗口内已接收
 | --- | --- | --- |
 | 自检、加载或密钥派生期间 | 运行内存失效，持久状态未变。 | 计算机启动时重新初始化。初始化成功前关闭 TC 入口。 |
 | 复位候选状态构建期间 | 沿提交锚重读完整状态。 | 不恢复半构建的内存对象，不增加代次。 |
-| 校验帧、检查重放或解密期间 | 本帧尚未提交，原持久状态有效。 | 未交付业务明文。可按原业务事务重试，地面 IV 不回退。 |
+| 帧格式或重放检查期间 | 尚未调用密码验证，预算和业务状态不变。 | 未交付明文；保留原计数。 |
+| 预算预留提交前或候选写入中 | 以提交锚判定预算是否已增加，尚未调用 GCM。 | 只在确认预算预留成功后认证。 |
+| 预算已提交，认证期间或业务状态提交前 | 已扣预算保留，根、代次与重放状态尚未推进。 | 可按重试流程再预留新额度；禁止返还已扣额度。 |
 | 第一个副本或第二个副本尚未写完 | 提交锚未变，旧状态有效。 | 忽略无完整标记的候选，恢复旧状态后修复副本。 |
 | 三份候选已核验，提交锚尚未推进 | 提交锚仍指向旧状态。 | 新记录保持未提交，不能只因三份一致就启用。 |
 | 提交锚原子更新期间 | 平台必须只返回完整旧锚或新锚。 | 锚不可确认则停收。不能从副本数量猜测事务结果。 |
-| 锚已推进，回调尚未返回或确认丢失 | 新状态已提交。 | 重载新状态，本帧 IV 已消费。相同密帧重传被重放检查拒绝。 |
+| 锚已推进，回调尚未返回或确认丢失 | 新状态已提交。 | 预算提交只消费验证额度；重放或提升提交才消费本帧 IV。重载时区分提交种类。相同密帧重传被重放检查拒绝。 |
 | 回调返回后，运行内存尚未发布 | 新状态已提交。 | 初始化从新状态重新派生密钥，无需恢复旧运行内存。 |
 | 明文已返回，业务校验或派发尚未完成 | 安全状态已提交，业务可能尚未执行。 | 星务通过业务事务号和执行记录核对结果。密码模块不能重放已消费帧。 |
 | 业务执行中或业务应答丢失 | 安全状态已提交，外部动作结果可能不确定。 | 星务执行业务恢复和幂等检查，地面先查询结果再决定补发。 |
@@ -513,7 +539,7 @@ Current、Next 和 Recovery 分别使用 64 帧重放窗口。窗口内已接收
 
 ### 3.3 三取二存储合同
 
-三取二用于完整安全快照，包含 Current 根、Recovery 根、Pending 根、版本、SPI、代次、Nonce 前缀、任务摘要和两个持久重放窗口。不能分别投票各个字段。存储服务由星务实现，密码模块通过已有的 `load_state` 和 `commit_state` 使用它。
+三取二用于完整安全快照，包含 Current 根、Recovery 根、Pending 根、版本、SPI、代次、Nonce 前缀、任务摘要、两个持久重放窗口及 Current/Next 验证预算。不能分别投票各个字段。存储服务由星务实现，密码模块通过已有的 `load_state` 和 `commit_state` 使用它。
 
 星务在三个可独立擦写的存储区域保存记录。每个区域支持追加候选记录，并保留当前已提交记录。记录含设备身份、格式版本、严格递增的存储代数、长度、快照和完整性保护。存储代数按每次安全状态提交增长，与安全 epoch 和根版本分开。根密钥等敏感内容应由星务受保护存储加密封装，完整性保护和防回退能力由平台提供。CRC 只用于偶发损坏检测。
 
@@ -538,7 +564,7 @@ tcsec_status_t tcsec_get_runtime_status(const tcsec_context_t *context,
                                         tcsec_runtime_status_t *status);
 ```
 
-运行状态包含最近一次进入处理尾部的收帧或复位结果 `last_status`、自检状态、密码后端、配置摘要、Current/Next/Recovery SPI、安全 epoch、根版本、Pending 根标志、停收标志 `reception_paused`，以及接收次数、最近/最大耗时、超过 120 ms 统计阈值的次数和时钟异常次数。状态不含根密钥或工作密钥；自检锁定时仍会填充诊断状态，但返回 `TCSEC_SELF_TEST_FAILED`。停收期间拒绝的帧不计入接收次数。星务负责遥测字段封装。
+运行状态包含最近一次进入处理尾部的收帧或复位结果 `last_status`、自检状态、密码后端、配置摘要、Current/Next/Recovery SPI、安全 epoch、根版本、Pending 根标志、Current/Next 验证额度消耗、停收标志 `reception_paused`，以及接收次数、最近/最大耗时、超过 120 ms 统计阈值的次数和时钟异常次数。状态不含根密钥或工作密钥；自检锁定时仍会填充诊断状态，但返回 `TCSEC_SELF_TEST_FAILED`。停收期间拒绝的帧不计入接收次数。星务负责遥测字段封装。
 
 自检在加载配置之前失败时，诊断中的 SPI、代次、根版本和摘要可能为零，不能将其当作有效关联状态。初始化或加载失败的原始状态码由星务调用任务保存。
 
@@ -554,15 +580,15 @@ tcsec_status_t tcsec_get_runtime_status(const tcsec_context_t *context,
 | `TCSEC_PROFILE_MISMATCH` | 复位加载的任务摘要与本实例绑定值不一致。 | 停收并核对任务配置，禁止静默换任务。 |
 | `TCSEC_FRAME_LENGTH_INVALID` | 实际帧长、主导头声明长度或受保护数据长度非法。 | 丢弃帧，检查地面组帧与链路截断。 |
 | `TCSEC_FECF_INVALID` | 帧校验序列不匹配。 | 丢弃帧，定位链路误码或帧拼接。 |
-| `TCSEC_ASSOCIATION_NOT_FOUND` | SPI 不属于 Current、Next 或 Recovery。 | 核对星地关联状态。 |
+| `TCSEC_ASSOCIATION_NOT_FOUND` | 选择值不是当前或下一普通代次，且不是 Recovery 专用值。 | 核对星地关联状态。 |
 | `TCSEC_REPLAY_REJECTED` | IV 已接收，或比最高 IV 落后至少 64。 | 不执行，不回退计数器，核对发送记录。 |
 | `TCSEC_IV_FORWARD_JUMP_REJECTED` | 普通 IV 首值或前跳大于 4096。 | 核对星地计数器和恢复流程。 |
-| `TCSEC_AUTHENTICATION_FAILED` | Recovery GCM 标签认证失败。 | 不保存新根，核对恢复根和帧参数。 |
+| `TCSEC_AUTH_BUDGET_EXHAUSTED` | 当前选定普通工作密钥剩余验证次数不足 2。 | 不能靠复位恢复额度。确认星上状态后换工作密钥；必要时使用 Recovery。 |
+| `TCSEC_AUTHENTICATION_FAILED` | 普通或 Recovery 的 GCM 标签认证失败，可能是帧被修改，或密钥、nonce、AAD 不一致。 | 不交付明文，不推进重放或根状态；普通帧已预留的预算保留。核对星地配置与链路。 |
 | `TCSEC_OUTPUT_TOO_SMALL` | 普通明文缓冲区容量小于数据域长度。 | 扩容后按任务发送策略处理。 |
 | `TCSEC_PLAINTEXT_REJECTED` | 首个 Next 明文未通过固定任务规则。 | 不切换，核对业务包格式和任务规则。 |
 | `TCSEC_ROOT_PREPARE_REJECTED` | 事务格式、根版本、目标关联或现有 Pending 事务不相符。 | 核对换根事务，不能覆盖不同的 Pending 根。 |
 | `TCSEC_EPOCH_EXHAUSTED` | 当前代次已到可切换边界，无法生成后续关联。 | 保留当前接收能力，进入授权维护。 |
-| `TCSEC_SPI_COLLISION` | 本次提升将使后续 Next SPI 与 Recovery SPI 相同。 | 拒绝准备或提升，Current 和 Recovery 保持有效。任务提前安排维护。 |
 | `TCSEC_KEY_DERIVATION_FAILED` | 工作密钥初始化或候选派生失败，或重复计算结果不一致。 | 保持关闭入口，检查配置与运行故障。 |
 | `TCSEC_PERSISTENCE_FAILED` | 状态写入未能完成。 | 停收，修复存储后 reset。 |
 | `TCSEC_STORAGE_COMMIT_UNCERTAIN` | 提交锚是否推进无法确认。 | 停收，重载判定旧状态或新状态。 |
@@ -653,14 +679,21 @@ sequenceDiagram
     S->>C: 传入完整密帧和输出缓冲区
     C->>C: 检查上下文，停收时直接返回
     C->>C: 检查帧长与帧校验序列
-    C->>C: 按 SPI 选择安全关联
-    Note over S,C: 以下为检查通过路径，拒绝时转清理再返回
-    alt 当前安全关联
-        C->>C: 检查重放窗口并解密普通指令
-    else 下一安全关联
-        C->>C: 检查重放窗口，解密并校验切换条件
+    C->>C: 按选择值和持久代次选择关联
+    Note over S,C: 检查拒绝时清理输出并返回
+    alt 普通当前或下一关联
+        C->>C: 检查重放窗口和剩余验证额度
+        C->>P: commit_state 预留两次验证预算
+        P->>P: 原子持久增加对应预算
+        P-->>C: 确认成功后才能进行 GCM
+        C->>C: 重复认证解密并比较结果
+        Note over C,P: 标签失败也保留预算 不提交重放或提升
+        opt 下一关联且认证成功
+            C->>C: 检查内部切换规则
+        end
     else 恢复安全关联
-        C->>C: 检查重放窗口，认证解密并检查换根事务
+        C->>C: 检查独立重放窗口和 16 字节标签
+        C->>C: 认证解密并检查换根事务
     end
     C->>P: commit_state 同步提交
     P->>P: 返回前清理候选与临时密钥
@@ -716,7 +749,7 @@ sequenceDiagram
     N-->>P: 确认提交锚及三份记录
     P->>P: 清除候选和封装临时数据
     P-->>C: 返回已确认成功
-    C->>C: 发布运行状态和普通明文
+    C->>C: 预算成功后认证 业务成功后交付
 ```
 
 ```mermaid
@@ -825,7 +858,6 @@ sequenceDiagram
 | 首装授权与信任锚 | 工装认证、目标设备身份、维护模式入口和根密钥交付方式。 | 星地工装接口和装星授权流程。 |
 | 首装记录与运行防回退 | 独立保存的首装记录、运行状态可信版本锚及写入顺序。 | BSP 能力清单和首装中断、运行状态丢失的验收用例。 |
 | 三副本存储与提交锚 | 三个独立擦写区域、原子且防回退的提交锚、加密封装、回读、寿命与修复条件。 | BSP 存储实现及物理断电验证证据。 |
-| SPI 维护边界 | 实现已在准备与提升前拒绝使后续 Next 进入 Recovery SPI 的事务，返回 `TCSEC_SPI_COLLISION`。任务需在到达边界前安排受控维护。 | 地面规划校验及维护程序。 |
 | 首个 Next 帧规则 | 允许的 VCID、APID 和指令码，指令体长度及字段约束。 | 冻结的遥控包规则及合法、非法样例，用于飞行构建和星地联试。 |
 
 ## 附录 B 星务代码开发指导
@@ -881,17 +913,18 @@ load_state(service, out)
 
 所有错误出口均清除临时明文密钥、释放锁，并保持 TC 入口关闭。发现未提交候选时，先按旧锚恢复，再清理候选。发现较新记录不能单独作为推进提交锚的理由。加载成功后模块还会校验配置并重复派生工作密钥。
 
-### B.4 构建三类提交的完整候选
+### B.4 构建四类提交的完整候选
 
 `commit_state` 的入参由模块临时提供，回调不能保存指针供异步线程继续使用。先在同一事务内读取当前可信快照，检查提交 SPI、代次、根版本及重放窗口与当前状态相符，再复制为候选。必须核对变化的前置条件，不能直接信任一份长期 RAM 缓存。
 
 | kind | 候选快照的具体更新 |
 | --- | --- |
-| `TCSEC_COMMIT_ORDINARY_REPLAY` | 核对 `spi == ordinary.current_spi`，根版本和代次与 Current 一致。将 `ordinary.replay` 替换为请求中的完整窗口。 |
-| `TCSEC_COMMIT_ROOT_PREPARE` | 核对 Recovery SPI 及事务预期的 Current 版本。保存新 Pending 根、版本和事务号，同时替换 `recovery.replay`。Current 根和代次保持原值。 |
-| `TCSEC_COMMIT_EPOCH_PROMOTION` | 核对目标 SPI 为 Current 加 1、代次为当前加 1。存在 Pending 时将其根及版本移为 Current。更新普通 SPI、代次、根版本和重放窗口，然后将所有 Pending 字段及根字节清零。没有 Pending 时沿用 Current 根。 |
+| `TCSEC_COMMIT_AUTH_BUDGET` | 按 SPI、代次、根版本准确绑定 Current 或 Next。读取已持久总额，核对请求恰为旧值加 2 且不超过 2048。仅替换对应 auth_used 字段，原子提交完整候选；重放窗口保持原值。 |
+| `TCSEC_COMMIT_ORDINARY_REPLAY` | 核对 `spi == ordinary.current_spi`，根版本和代次与 Current 一致。核对 auth_used 与持久 Current 预算相等，再将 ordinary.replay 替换为请求中的完整窗口。 |
+| `TCSEC_COMMIT_ROOT_PREPARE` | 核对 Recovery SPI 及事务预期的 Current 版本。保存新 Pending 根、版本和事务号，同时替换 `recovery.replay`。首次安装新 Pending 根时清空 Next 预算；同一事务重试保留 Next 预算。Current 根、代次及预算保持原值。 |
+| `TCSEC_COMMIT_EPOCH_PROMOTION` | 核对目标 SPI 为 Current 加 1、代次为当前加 1。存在 Pending 时将其根及版本移为 Current。更新普通 SPI、代次、根版本和重放窗口，然后将所有 Pending 字段及根字节清零。没有 Pending 时沿用 Current 根。把 Next 已耗预算转给 Current，未来 Next 预算置 0。 |
 
-同一 Root Prepare 事务可用新的 Recovery IV 重试，仍须提交新的完整 Recovery 窗口。返回 `ALREADY_APPLIED` 之前必须确认请求的全部效果已落盘，包含本次窗口。普通重放提交只允许 `NEW`。请求与持久状态不相符时返回 `REJECTED`，不能静默改写请求。
+同一 Root Prepare 事务可用新的 Recovery IV 重试，仍须提交新的完整 Recovery 窗口。返回 `ALREADY_APPLIED` 之前必须确认请求的全部效果已落盘，包含本次窗口。预算预留和普通重放提交只允许 NEW。请求与持久状态不相符时返回 `REJECTED`，不能静默改写请求。
 
 ### B.5 发布提交与清理敏感内存
 
@@ -921,9 +954,12 @@ commit_state(service, change)
 
 使用一个星务任务串行处理同一实例。任务接收完整 TC 帧，调用 receive，再依据状态码分发普通明文或管理事件。业务校验同步完成后清零星务明文缓冲。回调不能执行或排队业务指令，不能重入同一实例，也不能在尚未确认落盘时提前返回成功。
 
-对于持久化失败、提交结果不确定、提交拒绝和回调返回非法，关闭帧分发，保存原始状态码和无密钥诊断，修复存储后调用 reset。对于自检锁定或运行上下文损坏，进入星务计算机故障处置。对于帧长、FECF、重放、认证或任务规则拒绝，只丢弃对应帧，不清空安全状态。SPI 冲突和代次耗尽进入计划维护处理。
+对于持久化失败、提交结果不确定、提交拒绝和回调返回非法，关闭帧分发，保存原始状态码和无密钥诊断，修复存储后调用 reset。对于自检锁定或运行上下文损坏，进入星务计算机故障处置。对于帧长、FECF、重放、认证或任务规则拒绝，只丢弃对应帧，不清空安全状态。普通预算耗尽时协调工作密钥轮换或 Recovery，代次耗尽进入计划维护。
 
 ### B.7 必须完成的验证
+
+新增必测项包括预算预留在每个写入字节的掉电、预留成功后尚未认证时掉电、标签失败后复位、预算耗尽后的 Recovery 可用性、提升时预算迁移，以及同一换根准备事务重试不能重置 Next 预算。首装的 Current 和 Next 预算均为 0；读取已有记录时不能采用这一默认值。
+
 
 | 验证范围 | 通过条件 |
 | --- | --- |
@@ -944,7 +980,7 @@ commit_state(service, change)
 
 | 信息 | 接入约定和保留原因 |
 | --- | --- |
-| 固定算法和根密钥尺寸 | 由模块确定，星务只提供固定 16 字节根数组。算法实现、派生尺寸和协议内部常量不进入对外头文件。 |
+| 固定算法和根密钥尺寸 | 由模块确定，星务只提供固定 16 字节根数组。内部算法实现不进入对外头文件；公开头保留快照字段和星务校验所需的固定预算上限。 |
 | frame_length、plaintext_capacity、plaintext_length | 分别表示实际输入长度、可写容量和有效输出长度，用于边界检查和安全消费，不能相互替代。 |
 | SPI、代次、根版本、IV、事务号、配置摘要 | 分别标识关联、派生域、根材料版本、防重放状态、换根事务和任务绑定，须独立保存和核对。 |
 | Pending 标志及重放窗口 | 显式状态和一致性校验用于发现半写、损坏和重放，按完整逻辑快照恢复。 |
@@ -966,11 +1002,12 @@ commit_state(service, change)
 extern "C" {
 #endif
 
-#define TCSEC_INTERFACE_VERSION 4u
+#define TCSEC_INTERFACE_VERSION 5u
 #define TCSEC_MAX_FRAME_LENGTH 1024u
 #define TCSEC_ROOT_KEY_LENGTH 16u
 #define TCSEC_NONCE_PREFIX_LENGTH 6u
 #define TCSEC_PROFILE_DIGEST_LENGTH 32u
+#define TCSEC_ORDINARY_AUTH_LIMIT 2048u
 
 typedef enum {
     TCSEC_OK = 0,
@@ -1003,9 +1040,9 @@ typedef enum {
     TCSEC_STATE_COMMIT_REJECTED,
     TCSEC_CALLBACK_RESULT_INVALID,
     TCSEC_EPOCH_EXHAUSTED,
-    TCSEC_SPI_COLLISION,
     TCSEC_KEY_DERIVATION_FAILED,
-    TCSEC_PROFILE_MISMATCH
+    TCSEC_PROFILE_MISMATCH,
+    TCSEC_AUTH_BUDGET_EXHAUSTED
 } tcsec_status_t;
 
 typedef enum {
@@ -1028,8 +1065,11 @@ typedef struct {
     uint16_t current_spi;
     uint8_t nonce_prefix[TCSEC_NONCE_PREFIX_LENGTH];
     tcsec_replay_state_t replay;
-    /* Restored durable Root Prepare state. A zero pending_root_present requires
-     * every other pending_* field to be zero. */
+    /* Durable reservation totals per working key, even values in 0..2048.
+     * Reserve two before ordinary GCM; failures and resets never refund them. */
+    uint32_t current_auth_used;
+    uint32_t next_auth_used;
+    /* A zero pending_root_present requires every other pending_* field zero. */
     uint8_t pending_root_present;
     uint8_t pending_operational_root[TCSEC_ROOT_KEY_LENGTH];
     uint32_t pending_root_version;
@@ -1062,7 +1102,8 @@ typedef struct {
 typedef enum {
     TCSEC_COMMIT_ORDINARY_REPLAY = 1,
     TCSEC_COMMIT_EPOCH_PROMOTION = 2,
-    TCSEC_COMMIT_ROOT_PREPARE = 3
+    TCSEC_COMMIT_ROOT_PREPARE = 3,
+    TCSEC_COMMIT_AUTH_BUDGET = 4
 } tcsec_commit_kind_t;
 
 typedef struct {
@@ -1071,6 +1112,9 @@ typedef struct {
     tcsec_replay_state_t replay;
     uint32_t current_epoch;
     uint32_t root_version;
+    /* AUTH_BUDGET: persisted old total + 2; ordinary replay/promotion:
+     * already reserved total for the selected key; ROOT_PREPARE: zero. */
+    uint32_t auth_used;
     const tcsec_root_prepare_t *root_prepare;
 } tcsec_commit_t;
 
@@ -1086,7 +1130,10 @@ typedef enum {
  * only after verifying it. The core has no storage dependency. The callback
  * must not execute or enqueue ordinary plaintext. root_prepare is non-NULL
  * only for ROOT_PREPARE. The callback must clear its own temporary secrets
- * before returning on every success and failure path. */
+ * before returning on every success and failure path. AUTH_BUDGET updates only
+ * the selected key's durable quota, never replay/root state. Promotion moves
+ * next_auth_used to current_auth_used and clears future NEXT quota. A new
+ * Pending root resets NEXT quota; a retry of that same root never resets it. */
 typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(void *user_context,
                                                        const tcsec_commit_t *commit);
 
@@ -1133,6 +1180,8 @@ typedef struct {
     uint32_t security_epoch;
     uint32_t root_version;
     uint8_t pending_root_present;
+    uint32_t current_auth_used;
+    uint32_t next_auth_used;
     uint8_t reception_paused;
     tcsec_status_t last_status;
     uint64_t receive_count;

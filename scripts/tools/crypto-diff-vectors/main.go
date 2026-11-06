@@ -40,20 +40,20 @@ func main() {
 		prefix := randomBytes(random, ccsds.TCNoncePrefixLength)
 		iv := random.Uint32()
 		plain := randomBytes(random, 16+random.Intn(241))
-		working, err := ccsds.DeriveOrdinaryTrafficKey(root, spacecraft, suite.SM4HCTR, spi, epoch, version)
+		working, err := ccsds.DeriveOrdinaryTrafficKey(root, spacecraft, suite.SM4GCM32, spi, epoch, version)
 		if err != nil {
 			panic(err)
 		}
-		tweak := make([]byte, 16)
-		copy(tweak, prefix)
-		tweak[6], tweak[7] = byte(spi>>8), byte(spi)
-		tweak[8], tweak[9], tweak[10], tweak[11] = byte(iv>>24), byte(iv>>16), byte(iv>>8), byte(iv)
-		primitive, err := aead.New(suite.SM4HCTR, working)
+		nonce := make([]byte, 12)
+		copy(nonce, prefix)
+		nonce[6], nonce[7] = byte(spi>>8), byte(spi)
+		nonce[8], nonce[9], nonce[10], nonce[11] = byte(iv>>24), byte(iv>>16), byte(iv>>8), byte(iv)
+		primitive, err := aead.New(suite.SM4GCM32, working)
 		if err != nil {
 			panic(err)
 		}
-		ciphertext, _ := primitive.Encrypt(plain, tweak, nil)
-		fmt.Fprintf(file, "O %x %04x %04x %08x %08x %x %x %x\n", root, spacecraft, spi, epoch, version, tweak, plain, ciphertext)
+		ciphertext, tag := primitive.Encrypt(plain, nonce, []byte("TC-AAD!"))
+		fmt.Fprintf(file, "O %x %04x %04x %08x %08x %x %x %x %x\n", root, spacecraft, spi, epoch, version, nonce, plain, ciphertext, tag)
 
 		recoverySPI := uint16(random.Uint32())
 		recoveryVersion := random.Uint32()

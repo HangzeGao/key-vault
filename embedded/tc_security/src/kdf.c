@@ -79,15 +79,14 @@ static int derive(const uint8_t *root, size_t root_length, size_t output_length,
                   const uint8_t *label, size_t label_length,
                   const uint8_t *context, size_t context_length,
                   uint8_t *output, size_t output_capacity) {
-    uint8_t input[4u + 15u + 1u + 15u + 4u];
+    uint8_t input[4u + 32u + 1u + 15u + 4u];
     uint8_t tag[16];
     size_t produced = 0u;
     uint32_t counter = 1u;
-    if (root == NULL || output == NULL ||
-        (output_length != TCSEC_SM4_KEY_LENGTH &&
-         output_length != TCSEC_HCTR_WORKING_KEY_LENGTH) ||
-        root_length != TCSEC_SM4_KEY_LENGTH ||
-        output_capacity < output_length || label_length > 15u || context_length > 15u) return -1;
+    if (root == NULL || output == NULL || output_length != TCSEC_SM4_KEY_LENGTH ||
+        root_length != TCSEC_SM4_KEY_LENGTH || output_capacity < output_length ||
+        label_length > 32u || context_length > 15u)
+        return -1;
     while (produced < output_length) {
         size_t input_length = 0u;
         size_t count;
@@ -110,22 +109,22 @@ int tcsec_derive_ordinary_key(const uint8_t *root, size_t root_length,
                               uint16_t spacecraft_id, tcsec_suite_t ordinary_suite,
                               uint16_t spi, uint32_t security_epoch, uint32_t key_version,
                               uint8_t *output, size_t output_capacity) {
-    static const uint8_t label[] = "TC-TRAFFIC";
+    static const uint8_t label[] = "TC-GCM32-V1";
     uint8_t context[15];
-    if (ordinary_suite != TCSEC_SUITE_SM4_HCTR) return -1;
+    if (ordinary_suite != TCSEC_SUITE_SM4_GCM_32)
+        return -1;
     write_u16(&context[0], spacecraft_id); context[2] = 1u;
     write_u16(&context[3], (uint16_t)ordinary_suite); write_u16(&context[5], spi);
     write_u32(&context[7], security_epoch); write_u32(&context[11], key_version);
-    return derive(root, root_length, TCSEC_HCTR_WORKING_KEY_LENGTH,
-                  label, sizeof(label) - 1u,
-                  context, sizeof(context), output, output_capacity);
+    return derive(root, root_length, TCSEC_SM4_KEY_LENGTH, label, sizeof(label) - 1u, context,
+                  sizeof(context), output, output_capacity);
 }
 
 int tcsec_derive_recovery_key(const uint8_t *root, size_t root_length,
                               uint16_t spacecraft_id, tcsec_suite_t recovery_suite,
                               uint16_t spi, uint32_t recovery_key_version,
                               uint8_t *output, size_t output_capacity) {
-    static const uint8_t label[] = "TC-RECOVERY-GCM";
+    static const uint8_t label[] = "TC-GCM128-RECOVERY-V1";
     uint8_t context[10];
     if (recovery_suite != TCSEC_SUITE_SM4_GCM) return -1;
     write_u16(&context[0], spacecraft_id); write_u16(&context[2], (uint16_t)recovery_suite);

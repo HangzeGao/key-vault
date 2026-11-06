@@ -3,7 +3,7 @@
 #include "../tools/tc_security_diagnostics.h"
 #include "tc_security_kdf.h"
 #include "gcm.h"
-#include "hctr.h"
+#include "test_gcm_seal.h"
 #include "sm4.h"
 #include "next_validation.h"
 
@@ -57,6 +57,7 @@ typedef struct {
     tcsec_context_t *context_to_corrupt_on_load;
     tcsec_commit_result_t result;
     uint32_t calls;
+    uint32_t budget_calls;
     tcsec_commit_kind_t last_kind;
     uint16_t last_spi;
     uint64_t transaction_id;
@@ -99,7 +100,8 @@ static int decode_hex(const char *text, uint8_t *output, size_t capacity, size_t
 }
 
 static tcsec_suite_t parse_suite(const char *value) {
-    if (strcmp(value, "SM4_HCTR") == 0) return TCSEC_SUITE_SM4_HCTR;
+    if (strcmp(value, "SM4_GCM_32") == 0)
+        return TCSEC_SUITE_SM4_GCM_32;
     if (strcmp(value, "SM4_GCM") == 0) return TCSEC_SUITE_SM4_GCM;
     return (tcsec_suite_t)0xffffu;
 }
@@ -162,6 +164,14 @@ fail:
 
 static tcsec_commit_result_t commit_state(void *user, const tcsec_commit_t *commit) {
     callbacks_t *callbacks = (callbacks_t *)user;
+    if (commit->kind == TCSEC_COMMIT_AUTH_BUDGET) {
+        callbacks->budget_calls++;
+        if (commit->spi == callbacks->snapshot.ordinary.current_spi)
+            callbacks->snapshot.ordinary.current_auth_used = commit->auth_used;
+        else
+            callbacks->snapshot.ordinary.next_auth_used = commit->auth_used;
+        return TCSEC_COMMIT_NEW;
+    }
     callbacks->calls++;
     callbacks->last_kind = commit->kind;
     callbacks->last_spi = commit->spi;
@@ -231,31 +241,35 @@ static void set_frame_length(uint8_t header[TCSEC_PRIMARY_HEADER_LENGTH], size_t
     header[3] = (uint8_t)encoded;
 }
 
-static int build_ordinary_frame(tcsec_suite_t suite, const uint8_t *key,
-                                const uint8_t prefix[TCSEC_NONCE_PREFIX_LENGTH],
-                                uint16_t spi, uint32_t iv, const uint8_t *plaintext,
-                                size_t plaintext_length, uint8_t *frame, size_t *frame_length) {
-    uint8_t tweak[TCSEC_HCTR_TWEAK_LENGTH] = {0};
-    uint16_t crc;
-    size_t total = TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH +
-                   plaintext_length + TCSEC_FECF_LENGTH;
-    if (total > TCSEC_MAX_FRAME_LENGTH) return 0;
-    memset(frame, 0, total);
-    frame[0] = 0x20u; frame[1] = 0x01u; frame[4] = 0x07u;
-    set_frame_length(frame, total);
-    frame[5] = (uint8_t)(spi >> 8); frame[6] = (uint8_t)spi;
-    frame[7] = (uint8_t)(iv >> 24); frame[8] = (uint8_t)(iv >> 16);
-    frame[9] = (uint8_t)(iv >> 8); frame[10] = (uint8_t)iv;
-    memcpy(tweak, prefix, TCSEC_NONCE_PREFIX_LENGTH);
-    tweak[6] = (uint8_t)(spi >> 8); tweak[7] = (uint8_t)spi;
-    tweak[8] = (uint8_t)(iv >> 24); tweak[9] = (uint8_t)(iv >> 16);
-    tweak[10] = (uint8_t)(iv >> 8); tweak[11] = (uint8_t)iv;
-    if (suite != TCSEC_SUITE_SM4_HCTR || plaintext_length < 16u ||
-        tcsec_sm4_hctr_encrypt(key, tweak, plaintext, &frame[11], plaintext_length) != 0)
+static int build_ordinary_frame(tcsec_suite_t suite, const uint8_t *key, const uint8_t prefix[6],
+                                uint16_t spi, uint32_t epoch, uint32_t iv, const uint8_t *plain,
+                                size_t n, uint8_t *frame, size_t *length) {
+    uint8_t nonce[12], tag[16];
+    uint16_t crc, control = (uint16_t)((epoch % 3u) << 14) | (uint16_t)(iv & 0x3fffu);
+    size_t total = 13u + n;
+    if (suite != TCSEC_SUITE_SM4_GCM_32 || n < 16u || total > 1024u)
         return 0;
-    crc = frame_crc(frame, total - 2u);
-    frame[total - 2u] = (uint8_t)(crc >> 8); frame[total - 1u] = (uint8_t)crc;
-    *frame_length = total;
+    memset(frame, 0, total);
+    frame[0] = 0x20;
+    frame[1] = 1;
+    frame[4] = 7;
+    set_frame_length(frame, total);
+    frame[5] = (uint8_t)(control >> 8);
+    frame[6] = (uint8_t)control;
+    memcpy(nonce, prefix, 6);
+    nonce[6] = (uint8_t)(spi >> 8);
+    nonce[7] = (uint8_t)spi;
+    nonce[8] = (uint8_t)(iv >> 24);
+    nonce[9] = (uint8_t)(iv >> 16);
+    nonce[10] = (uint8_t)(iv >> 8);
+    nonce[11] = (uint8_t)iv;
+    if (!test_gcm_seal(key, nonce, frame, 7, plain, n, frame + 11, tag))
+        return 0;
+    memcpy(frame + 7, tag, 4);
+    crc = frame_crc(frame, total - 2);
+    frame[total - 2] = (uint8_t)(crc >> 8);
+    frame[total - 1] = (uint8_t)crc;
+    *length = total;
     return 1;
 }
 
@@ -317,48 +331,6 @@ static int init_recovery_restored(tcsec_context_t *context, const vector_t *vect
     return init_context(context, &config, callbacks) == TCSEC_OK;
 }
 
-static int test_sm4_hctr(void) {
-    static const uint8_t working_key[32] = {
-        0x2b,0x7e,0x15,0x16,0x28,0xae,0xd2,0xa6,0xab,0xf7,0x15,0x88,0x09,0xcf,0x4f,0x3c,
-        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f
-    };
-    static const uint8_t tweak[16] = {
-        0xf0,0xf1,0xf2,0xf3,0xf4,0xf5,0xf6,0xf7,0xf8,0xf9,0xfa,0xfb,0xfc,0xfd,0xfe,0xff
-    };
-    static const uint8_t plaintext[16] = {
-        0x6b,0xc1,0xbe,0xe2,0x2e,0x40,0x9f,0x96,0xe9,0x3d,0x7e,0x11,0x73,0x93,0x17,0x2a
-    };
-    static const uint8_t expected[16] = {
-        0xb7,0xb1,0xdd,0x75,0xf6,0x08,0x01,0x2d,0xc6,0x96,0x21,0xd4,0xea,0x72,0x0a,0x60
-    };
-    static const uint8_t partial_plaintext[60] = {
-        0x6b,0xc1,0xbe,0xe2,0x2e,0x40,0x9f,0x96,0xe9,0x3d,0x7e,0x11,0x73,0x93,0x17,0x2a,
-        0xae,0x2d,0x8a,0x57,0x1e,0x03,0xac,0x9c,0x9e,0xb7,0x6f,0xac,0x45,0xaf,0x8e,0x51,
-        0x30,0xc8,0x1c,0x46,0xa3,0x5c,0xe4,0x11,0xe5,0xfb,0xc1,0x19,0x1a,0x0a,0x52,0xef,
-        0xf6,0x9f,0x24,0x45,0xdf,0x4f,0x9b,0x17,0xad,0x2b,0x41,0x7b
-    };
-    static const uint8_t partial_expected[60] = {
-        0xf7,0x50,0x5a,0xff,0x35,0x7a,0xc1,0x31,0x07,0xcd,0xb2,0x84,0x8c,0x6b,0xb2,0xdc,
-        0xdd,0xa4,0x73,0xf7,0xa6,0xea,0x93,0x9d,0x44,0xf5,0x2c,0x98,0x6c,0x11,0xca,0x93,
-        0x41,0x04,0x2f,0x2b,0x00,0x91,0xa1,0xca,0x5c,0x8f,0x70,0x8c,0xae,0x8c,0xa6,0xa5,
-        0xc5,0x9e,0x22,0x28,0xb3,0x61,0x6c,0x44,0x55,0x62,0x77,0x22
-    };
-    uint8_t output[16];
-    uint8_t recovered[16];
-    uint8_t partial_output[60];
-    uint8_t partial_recovered[60];
-    return tcsec_sm4_hctr_encrypt(working_key, tweak, plaintext, output, sizeof(output)) == 0 &&
-           memcmp(output, expected, sizeof(output)) == 0 &&
-           tcsec_sm4_hctr_decrypt(working_key, tweak, output, recovered, sizeof(recovered)) == 0 &&
-           memcmp(recovered, plaintext, sizeof(recovered)) == 0 &&
-           tcsec_sm4_hctr_encrypt(working_key, tweak, partial_plaintext, partial_output,
-                                  sizeof(partial_output)) == 0 &&
-           memcmp(partial_output, partial_expected, sizeof(partial_output)) == 0 &&
-           tcsec_sm4_hctr_decrypt(working_key, tweak, partial_output, partial_recovered,
-                                  sizeof(partial_recovered)) == 0 &&
-           memcmp(partial_recovered, partial_plaintext, sizeof(partial_recovered)) == 0;
-}
-
 static int test_sm4_backend_contract(void) {
     static const uint8_t key[16] = {
         0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,0xfe,0xdc,0xba,0x98,0x76,0x54,0x32,0x10
@@ -382,21 +354,18 @@ static int test_sm4_backend_contract(void) {
 }
 
 static int test_shared_kdf_vectors(void) {
-    static const uint8_t ordinary_expected[32] = {
-        0xd0,0x77,0xe6,0x05,0x2e,0x64,0xfa,0x4b,0x35,0xb2,0x46,0x5d,0x32,0x50,0xdc,0xb7,
-        0x05,0x5f,0xa7,0x0d,0x4d,0x1d,0xe6,0x80,0x7b,0x5a,0x24,0x97,0xd5,0xc7,0x03,0xe6
-    };
+    static const uint8_t ordinary_expected[16] = {0xe6, 0x5e, 0x51, 0xda, 0x8d, 0x91, 0xab, 0x02,
+                                                  0x65, 0xae, 0x2e, 0xdc, 0x06, 0xdf, 0x63, 0x45};
     static const uint8_t sm4_root[16] = {
         0x01,0x23,0x45,0x67,0x89,0xab,0xcd,0xef,0xfe,0xdc,0xba,0x98,0x76,0x54,0x32,0x10
     };
-    static const uint8_t sm4_expected[16] = {
-        0x17,0x35,0x37,0xc6,0x3f,0x1e,0x50,0xad,0x36,0x29,0xcf,0xdc,0x49,0x11,0x8d,0x2b
-    };
-    uint8_t output[32];
-    if (tcsec_derive_ordinary_key(sm4_root, sizeof(sm4_root), 0x1234u,
-                                  TCSEC_SUITE_SM4_HCTR, 0x2001u, 7u, 9u,
-                                  output, sizeof(output)) != 0 ||
-        memcmp(output, ordinary_expected, sizeof(ordinary_expected)) != 0) return 0;
+    static const uint8_t sm4_expected[16] = {0xfd, 0x9d, 0xe8, 0x2c, 0x50, 0x9c, 0xc2, 0xb9,
+                                             0xb7, 0xaf, 0xd9, 0x07, 0xa6, 0x3b, 0xaa, 0x7e};
+    uint8_t output[16];
+    if (tcsec_derive_ordinary_key(sm4_root, sizeof(sm4_root), 0x1234u, TCSEC_SUITE_SM4_GCM_32,
+                                  0x2001u, 7u, 9u, output, sizeof(output)) != 0 ||
+        memcmp(output, ordinary_expected, sizeof(ordinary_expected)) != 0)
+        return 0;
     memset(output, 0, sizeof(output));
     return tcsec_derive_recovery_key(sm4_root, sizeof(sm4_root), 0x1234u,
                                      TCSEC_SUITE_SM4_GCM, 0x7002u, 3u,
@@ -417,11 +386,6 @@ static int test_low_level_rejections(void) {
         tcsec_sm4_encrypt_block(block, NULL, block) == 0 ||
         tcsec_sm4_encrypt_block(block, block, NULL) == 0) return 0;
     tcsec_sm4_key_clear(NULL);
-    if (tcsec_sm4_hctr_encrypt(NULL, block, block, output, 16u) == 0 ||
-        tcsec_sm4_hctr_encrypt(output, NULL, block, output, 16u) == 0 ||
-        tcsec_sm4_hctr_encrypt(output, block, block, output, 15u) == 0 ||
-        tcsec_sm4_hctr_decrypt(output, block, NULL, output, 16u) == 0)
-        return 0;
     if (tcsec_gcm_open((tcsec_suite_t)0xffffu, block, nonce, NULL, 0u,
                        NULL, 0u, tag, NULL) == 0 ||
         tcsec_gcm_open(TCSEC_SUITE_SM4_GCM, NULL, nonce, NULL, 0u,
@@ -437,16 +401,15 @@ static int test_low_level_rejections(void) {
                        tag, output) == 0)
         return 0;
 #endif
-    if (tcsec_derive_ordinary_key(block, 15u, 1u, TCSEC_SUITE_SM4_HCTR,
-                                  1u, 1u, 1u, output, sizeof(output)) == 0 ||
-        tcsec_derive_ordinary_key(block, 16u, 1u, TCSEC_SUITE_SM4_GCM,
-                                  1u, 1u, 1u, output, sizeof(output)) == 0 ||
-        tcsec_derive_ordinary_key(block, 16u, 1u, TCSEC_SUITE_SM4_HCTR,
-                                  1u, 1u, 1u, output, 31u) == 0 ||
-        tcsec_derive_recovery_key(block, 16u, 1u, TCSEC_SUITE_SM4_HCTR,
-                                  1u, 1u, output, sizeof(output)) == 0 ||
-        tcsec_derive_recovery_key(block, 16u, 1u, TCSEC_SUITE_SM4_GCM,
-                                  1u, 1u, output, 15u) == 0)
+    if (tcsec_derive_ordinary_key(block, 15u, 1u, TCSEC_SUITE_SM4_GCM_32, 1u, 1u, 1u, output,
+                                  sizeof(output)) == 0 ||
+        tcsec_derive_ordinary_key(block, 16u, 1u, TCSEC_SUITE_SM4_GCM, 1u, 1u, 1u, output,
+                                  sizeof(output)) == 0 ||
+        tcsec_derive_ordinary_key(block, 16u, 1u, TCSEC_SUITE_SM4_GCM_32, 1u, 1u, 1u, output,
+                                  15u) == 0 ||
+        tcsec_derive_recovery_key(block, 16u, 1u, TCSEC_SUITE_SM4_GCM_32, 1u, 1u, output,
+                                  sizeof(output)) == 0 ||
+        tcsec_derive_recovery_key(block, 16u, 1u, TCSEC_SUITE_SM4_GCM, 1u, 1u, output, 15u) == 0)
         return 0;
     for (status = TCSEC_OK; status <= TCSEC_PROFILE_MISMATCH;
          status = (tcsec_status_t)(status + 1))
@@ -484,7 +447,7 @@ static int test_strict_configuration(const char *path) {
     if (init_context(&context, &config, &callbacks) !=
         TCSEC_INVALID_CONFIGURATION) return 0;
     ordinary_config(&config, &vector);
-    config.recovery.spi = (uint16_t)(config.ordinary.current_spi + 1u);
+    config.ordinary.current_auth_used = TCSEC_ORDINARY_AUTH_LIMIT + 1u;
     if (init_context(&context, &config, &callbacks) !=
         TCSEC_INVALID_CONFIGURATION) return 0;
     return 1;
@@ -643,7 +606,7 @@ static int test_ordinary_vector(const char *path) {
     uint8_t next_frame[TCSEC_MAX_FRAME_LENGTH];
     uint8_t corrupted[TCSEC_MAX_FRAME_LENGTH];
     uint8_t far_frame[TCSEC_MAX_FRAME_LENGTH];
-    uint8_t next_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t next_key[TCSEC_SM4_KEY_LENGTH];
     size_t next_length, far_length;
     tcsec_status_t status;
     if (!load_vector(path, &vector) || !init_ordinary(&context, &vector, &callbacks)) return 0;
@@ -656,10 +619,12 @@ static int test_ordinary_vector(const char *path) {
                       plaintext, sizeof(plaintext), &result) != TCSEC_REPLAY_REJECTED) return 0;
     if (tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
                                   vector.suite, (uint16_t)(vector.spi + 1u),
-                                  vector.security_epoch + 1u, vector.root_version,
-                                  next_key, sizeof(next_key)) != 0 ||
-        !build_ordinary_frame(vector.suite, next_key, vector.prefix,
-                              (uint16_t)(vector.spi + 1u), 1u, next_test_packet, sizeof(next_test_packet), next_frame, &next_length)) return 0;
+                                  vector.security_epoch + 1u, vector.root_version, next_key,
+                                  sizeof(next_key)) != 0 ||
+        !build_ordinary_frame(vector.suite, next_key, vector.prefix, (uint16_t)(vector.spi + 1u),
+                              vector.security_epoch + 1u, 1u, next_test_packet,
+                              sizeof(next_test_packet), next_frame, &next_length))
+        return 0;
     status = tcsec_receive(&context, next_frame, next_length, plaintext, sizeof(plaintext), &result);
     if (status != TCSEC_EPOCH_PROMOTED || result.security_epoch != vector.security_epoch + 1u ||
         callbacks.last_kind != TCSEC_COMMIT_EPOCH_PROMOTION || inspect(&context).current_spi != vector.spi + 1u)
@@ -686,11 +651,12 @@ static int test_ordinary_vector(const char *path) {
                                   vector.suite, vector.spi, vector.security_epoch,
                                   vector.root_version, next_key, sizeof(next_key)) != 0 ||
         !build_ordinary_frame(vector.suite, next_key, vector.prefix, vector.spi,
-                              TCSEC_MAX_FORWARD_JUMP + 1u, vector.plaintext,
+                              vector.security_epoch, TCSEC_MAX_FORWARD_JUMP + 1u, vector.plaintext,
                               vector.plaintext_length, far_frame, &far_length) ||
         !init_ordinary(&context, &vector, &callbacks) ||
         tcsec_receive(&context, far_frame, far_length, plaintext, sizeof(plaintext), &result) !=
-            TCSEC_IV_FORWARD_JUMP_REJECTED) return 0;
+            TCSEC_IV_FORWARD_JUMP_REJECTED)
+        return 0;
     cold_restart(&context);
     return 1;
 }
@@ -703,7 +669,7 @@ static int test_receive_boundaries_and_replay_motion(const char *path) {
     tcsec_result_t result;
     uint8_t frame[TCSEC_MAX_FRAME_LENGTH];
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
-    uint8_t working_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t working_key[TCSEC_SM4_KEY_LENGTH];
     size_t frame_length;
     if (!load_vector(path, &vector)) return 0;
     ordinary_config(&config, &vector);
@@ -736,26 +702,26 @@ static int test_receive_boundaries_and_replay_motion(const char *path) {
     config.ordinary.replay.highest_iv = 100u;
     config.ordinary.replay.bitmap = 1u;
     config.ordinary.replay.seen = 1u;
+    config.ordinary.current_auth_used = 2;
     if (init_context(&context, &config, &callbacks) != TCSEC_OK ||
         tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
                                   vector.suite, vector.spi, vector.security_epoch,
-                                  vector.root_version, working_key,
-                                  sizeof(working_key)) != 0 ||
+                                  vector.root_version, working_key, sizeof(working_key)) != 0 ||
         !build_ordinary_frame(vector.suite, working_key, vector.prefix, vector.spi,
-                              200u, vector.plaintext, vector.plaintext_length,
-                              frame, &frame_length) ||
-        tcsec_receive(&context, frame, frame_length, plaintext,
-                      sizeof(plaintext), &result) != TCSEC_OK ||
+                              vector.security_epoch, 200u, vector.plaintext,
+                              vector.plaintext_length, frame, &frame_length) ||
+        tcsec_receive(&context, frame, frame_length, plaintext, sizeof(plaintext), &result) !=
+            TCSEC_OK ||
         !build_ordinary_frame(vector.suite, working_key, vector.prefix, vector.spi,
-                              199u, vector.plaintext, vector.plaintext_length,
-                              frame, &frame_length) ||
-        tcsec_receive(&context, frame, frame_length, plaintext,
-                      sizeof(plaintext), &result) != TCSEC_OK ||
+                              vector.security_epoch, 199u, vector.plaintext,
+                              vector.plaintext_length, frame, &frame_length) ||
+        tcsec_receive(&context, frame, frame_length, plaintext, sizeof(plaintext), &result) !=
+            TCSEC_OK ||
         !build_ordinary_frame(vector.suite, working_key, vector.prefix, vector.spi,
-                              120u, vector.plaintext, vector.plaintext_length,
-                              frame, &frame_length) ||
-        tcsec_receive(&context, frame, frame_length, plaintext,
-                      sizeof(plaintext), &result) != TCSEC_REPLAY_REJECTED)
+                              vector.security_epoch, 120u, vector.plaintext,
+                              vector.plaintext_length, frame, &frame_length) ||
+        tcsec_receive(&context, frame, frame_length, plaintext, sizeof(plaintext), &result) !=
+            TCSEC_REPLAY_REJECTED)
         return 0;
     cold_restart(&context);
 
@@ -763,12 +729,13 @@ static int test_receive_boundaries_and_replay_motion(const char *path) {
     config.ordinary.replay.highest_iv = 100u;
     config.ordinary.replay.bitmap = 1u;
     config.ordinary.replay.seen = 1u;
+    config.ordinary.current_auth_used = 2;
     if (init_context(&context, &config, &callbacks) != TCSEC_OK ||
         !build_ordinary_frame(vector.suite, working_key, vector.prefix, vector.spi,
-                              5000u, vector.plaintext, vector.plaintext_length,
-                              frame, &frame_length) ||
-        tcsec_receive(&context, frame, frame_length, plaintext,
-                      sizeof(plaintext), &result) != TCSEC_IV_FORWARD_JUMP_REJECTED)
+                              vector.security_epoch, 5000u, vector.plaintext,
+                              vector.plaintext_length, frame, &frame_length) ||
+        tcsec_receive(&context, frame, frame_length, plaintext, sizeof(plaintext), &result) !=
+            TCSEC_IV_FORWARD_JUMP_REJECTED)
         return 0;
     cold_restart(&context);
     return 1;
@@ -815,19 +782,17 @@ static int test_promotion_failure_paths(const char *path) {
     tcsec_result_t result;
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
     uint8_t frame[TCSEC_MAX_FRAME_LENGTH];
-    uint8_t next_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t next_key[TCSEC_SM4_KEY_LENGTH];
     size_t frame_length;
     if (!load_vector(path, &vector) ||
-        tcsec_derive_ordinary_key(vector.root, vector.root_length,
-                                  vector.spacecraft_id, vector.suite,
-                                  (uint16_t)(vector.spi + 1u),
-                                  vector.security_epoch + 1u,
-                                  vector.root_version, next_key,
+        tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
+                                  vector.suite, (uint16_t)(vector.spi + 1u),
+                                  vector.security_epoch + 1u, vector.root_version, next_key,
                                   sizeof(next_key)) != 0 ||
-        !build_ordinary_frame(vector.suite, next_key, vector.prefix,
-                              (uint16_t)(vector.spi + 1u), 1u,
-                              next_test_packet, sizeof(next_test_packet),
-                              frame, &frame_length)) return 0;
+        !build_ordinary_frame(vector.suite, next_key, vector.prefix, (uint16_t)(vector.spi + 1u),
+                              vector.security_epoch + 1u, 1u, next_test_packet,
+                              sizeof(next_test_packet), frame, &frame_length))
+        return 0;
 
     callbacks.result = TCSEC_COMMIT_PERSISTENCE_FAILED;
     if (!init_ordinary(&context, &vector, &callbacks) ||
@@ -860,17 +825,14 @@ static int test_promotion_failure_paths(const char *path) {
     ordinary_config(&config, &vector);
     config.ordinary.current_epoch = UINT32_MAX - 1u;
     if (init_context(&context, &config, &callbacks) != TCSEC_OK ||
-        tcsec_derive_ordinary_key(vector.root, vector.root_length,
-                                  vector.spacecraft_id, vector.suite,
-                                  (uint16_t)(vector.spi + 1u), UINT32_MAX,
-                                  vector.root_version, next_key,
-                                  sizeof(next_key)) != 0 ||
-        !build_ordinary_frame(vector.suite, next_key, vector.prefix,
-                              (uint16_t)(vector.spi + 1u), 1u,
-                              next_test_packet, sizeof(next_test_packet),
-                              frame, &frame_length) ||
-        tcsec_receive(&context, frame, frame_length, plaintext,
-                      sizeof(plaintext), &result) != TCSEC_EPOCH_EXHAUSTED)
+        tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
+                                  vector.suite, (uint16_t)(vector.spi + 1u), UINT32_MAX,
+                                  vector.root_version, next_key, sizeof(next_key)) != 0 ||
+        !build_ordinary_frame(vector.suite, next_key, vector.prefix, (uint16_t)(vector.spi + 1u),
+                              UINT32_MAX, 1u, next_test_packet, sizeof(next_test_packet), frame,
+                              &frame_length) ||
+        tcsec_receive(&context, frame, frame_length, plaintext, sizeof(plaintext), &result) !=
+            TCSEC_EPOCH_EXHAUSTED)
         return 0;
     cold_restart(&context);
     return 1;
@@ -882,7 +844,7 @@ static int test_spi_wrap(const char *path) {
     tcsec_context_t context = {0};
     tcsec_result_t result;
     callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
-    uint8_t next_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t next_key[TCSEC_SM4_KEY_LENGTH];
     uint8_t frame[TCSEC_MAX_FRAME_LENGTH];
     uint8_t plaintext[TCSEC_MAX_FRAME_LENGTH];
     size_t frame_length;
@@ -891,11 +853,11 @@ static int test_spi_wrap(const char *path) {
     config.ordinary.current_spi = UINT16_MAX;
     if (init_context(&context, &config, &callbacks) != TCSEC_OK ||
         tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
-                                  vector.suite, 0u, vector.security_epoch + 1u,
-                                  vector.root_version, next_key, sizeof(next_key)) != 0 ||
-        !build_ordinary_frame(vector.suite, next_key, vector.prefix, 0u, 1u,
-                              next_test_packet, sizeof(next_test_packet),
-                              frame, &frame_length)) return 0;
+                                  vector.suite, 0u, vector.security_epoch + 1u, vector.root_version,
+                                  next_key, sizeof(next_key)) != 0 ||
+        !build_ordinary_frame(vector.suite, next_key, vector.prefix, 0u, vector.security_epoch + 1u,
+                              1u, next_test_packet, sizeof(next_test_packet), frame, &frame_length))
+        return 0;
     if (tcsec_receive(&context, frame, frame_length, plaintext, sizeof(plaintext), &result) !=
             TCSEC_EPOCH_PROMOTED || inspect(&context).current_spi != 0u || result.spi != 0u ||
         memcmp(plaintext, next_test_packet, sizeof(next_test_packet)) != 0) return 0;
@@ -917,6 +879,7 @@ typedef struct {
     tcsec_config_t cache;
     tcsec_status_t load_error;
     storage_fault_t fault;
+    tcsec_commit_kind_t fault_kind;
     unsigned commits;
     uint64_t time_us;
 } storage_fixture_t;
@@ -939,18 +902,37 @@ static tcsec_status_t load_storage(void *user, tcsec_config_t *config) {
 static tcsec_commit_result_t commit_storage(void *user, const tcsec_commit_t *change) {
     storage_fixture_t *storage = user;
     storage->cache = storage->saved;
+    int fault_applies = storage->fault_kind == 0 ? change->kind != TCSEC_COMMIT_AUTH_BUDGET
+                                                 : change->kind == storage->fault_kind;
     tcsec_ordinary_config_t *ordinary = &storage->cache.ordinary;
     tcsec_commit_result_t result = TCSEC_COMMIT_REJECTED;
-    storage->commits++;
-    if (storage->fault == STORAGE_INTERRUPTED) {
+    if (change->kind != TCSEC_COMMIT_AUTH_BUDGET)
+        storage->commits++;
+    if (storage->fault == STORAGE_INTERRUPTED && fault_applies) {
         result = TCSEC_COMMIT_PERSISTENCE_FAILED;
         goto cleanup;
     }
     switch (change->kind) {
+    case TCSEC_COMMIT_AUTH_BUDGET:
+        if (change->auth_used > TCSEC_ORDINARY_AUTH_LIMIT)
+            goto cleanup;
+        if (change->spi == ordinary->current_spi) {
+            if (change->auth_used != ordinary->current_auth_used + 2u)
+                goto cleanup;
+            ordinary->current_auth_used = change->auth_used;
+        } else if (change->spi == (uint16_t)(ordinary->current_spi + 1u)) {
+            if (change->auth_used != ordinary->next_auth_used + 2u)
+                goto cleanup;
+            ordinary->next_auth_used = change->auth_used;
+        } else
+            goto cleanup;
+        break;
     case TCSEC_COMMIT_ORDINARY_REPLAY:
         ordinary->replay = change->replay;
         break;
     case TCSEC_COMMIT_ROOT_PREPARE:
+        if (!ordinary->pending_root_present)
+            ordinary->next_auth_used = 0;
         ordinary->pending_root_present = 1u;
         memcpy(ordinary->pending_operational_root, change->root_prepare->new_operational_root,
                sizeof(ordinary->pending_operational_root));
@@ -959,6 +941,8 @@ static tcsec_commit_result_t commit_storage(void *user, const tcsec_commit_t *ch
         storage->cache.recovery.replay = change->replay;
         break;
     case TCSEC_COMMIT_EPOCH_PROMOTION:
+        ordinary->current_auth_used = ordinary->next_auth_used;
+        ordinary->next_auth_used = 0;
         ordinary->current_spi = change->spi;
         ordinary->current_epoch = change->current_epoch;
         ordinary->root_version = change->root_version;
@@ -976,8 +960,8 @@ static tcsec_commit_result_t commit_storage(void *user, const tcsec_commit_t *ch
         goto cleanup;
     }
     storage->saved = storage->cache;
-    result = storage->fault == STORAGE_CONFIRMATION_LOST
-                 ? TCSEC_COMMIT_UNCERTAIN : TCSEC_COMMIT_NEW;
+    result = storage->fault == STORAGE_CONFIRMATION_LOST && fault_applies ? TCSEC_COMMIT_UNCERTAIN
+                                                                          : TCSEC_COMMIT_NEW;
 cleanup:
     clear_storage_scratch(storage);
     return result;
@@ -1124,7 +1108,7 @@ static int test_storage_rotation(const char *path) {
     };
     tcsec_result_t result;
     uint8_t output[TCSEC_MAX_FRAME_LENGTH], frame[TCSEC_MAX_FRAME_LENGTH];
-    uint8_t key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t key[TCSEC_SM4_KEY_LENGTH];
     size_t length;
     if (!load_vector(path, &vector)) return 0;
     recovery_config(&storage.saved, &vector);
@@ -1138,15 +1122,15 @@ static int test_storage_rotation(const char *path) {
     const tcsec_ordinary_config_t *ordinary = &storage.saved.ordinary;
     const uint16_t next_spi = (uint16_t)(ordinary->current_spi + 1u);
     if (tcsec_init(&context, &callbacks) != TCSEC_OK ||
-        tcsec_derive_ordinary_key(ordinary->pending_operational_root,
-                                  TCSEC_ROOT_KEY_LENGTH,
-                                  ordinary->spacecraft_id, TCSEC_SUITE_SM4_HCTR,
-                                  next_spi, ordinary->current_epoch + 1u,
-                                  ordinary->pending_root_version, key, sizeof(key)) != 0 ||
-        !build_ordinary_frame(TCSEC_SUITE_SM4_HCTR, key, ordinary->nonce_prefix,
-                              next_spi, 1u, next_test_packet, sizeof(next_test_packet),
-                              frame, &length) ||
-        tcsec_receive(&context, frame, length, output, sizeof(output), &result) != TCSEC_EPOCH_PROMOTED ||
+        tcsec_derive_ordinary_key(ordinary->pending_operational_root, TCSEC_ROOT_KEY_LENGTH,
+                                  ordinary->spacecraft_id, TCSEC_SUITE_SM4_GCM_32, next_spi,
+                                  ordinary->current_epoch + 1u, ordinary->pending_root_version, key,
+                                  sizeof(key)) != 0 ||
+        !build_ordinary_frame(TCSEC_SUITE_SM4_GCM_32, key, ordinary->nonce_prefix, next_spi,
+                              ordinary->current_epoch + 1u, 1u, next_test_packet,
+                              sizeof(next_test_packet), frame, &length) ||
+        tcsec_receive(&context, frame, length, output, sizeof(output), &result) !=
+            TCSEC_EPOCH_PROMOTED ||
         memcmp(output, next_test_packet, sizeof(next_test_packet)) != 0 ||
         ordinary->pending_root_present != 0u || ordinary->current_spi != next_spi ||
         storage.commits != 2u)
@@ -1168,7 +1152,7 @@ static int test_recovery_vector(const char *path) {
     uint8_t corrupted[TCSEC_MAX_FRAME_LENGTH];
     uint8_t header_corrupted[TCSEC_MAX_FRAME_LENGTH];
     uint8_t next_frame[TCSEC_MAX_FRAME_LENGTH];
-    uint8_t next_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t next_key[TCSEC_SM4_KEY_LENGTH];
     tcsec_context_t restored = {0};
     size_t next_length;
     uint16_t crc;
@@ -1179,15 +1163,17 @@ static int test_recovery_vector(const char *path) {
     if (status != TCSEC_ROOT_PREPARED || callbacks.last_kind != TCSEC_COMMIT_ROOT_PREPARE ||
         callbacks.transaction_id != 0x0102030405060708ULL || inspect(&context).pending_root_present == 0u)
         return 0;
-    if (tcsec_derive_ordinary_key(&vector.plaintext[TCSEC_ROOT_PREPARE_FIXED_LENGTH],
-                                  vector.plaintext_length - TCSEC_ROOT_PREPARE_FIXED_LENGTH,
-                                  vector.spacecraft_id, TCSEC_SUITE_SM4_HCTR,
-                                  (uint16_t)(vector.current_spi + 1u), vector.security_epoch + 1u,
-                                  inspect(&context).pending_root_version, next_key, sizeof(next_key)) != 0 ||
-        !build_ordinary_frame(TCSEC_SUITE_SM4_HCTR, next_key, (const uint8_t *)"ORDNRY",
-                              (uint16_t)(vector.current_spi + 1u), 1u, next_test_packet, sizeof(next_test_packet),
-                              next_frame, &next_length) ||
-        !init_recovery_restored(&restored, &vector, &context, &callbacks)) return 0;
+    if (tcsec_derive_ordinary_key(
+            &vector.plaintext[TCSEC_ROOT_PREPARE_FIXED_LENGTH],
+            vector.plaintext_length - TCSEC_ROOT_PREPARE_FIXED_LENGTH, vector.spacecraft_id,
+            TCSEC_SUITE_SM4_GCM_32, (uint16_t)(vector.current_spi + 1u), vector.security_epoch + 1u,
+            inspect(&context).pending_root_version, next_key, sizeof(next_key)) != 0 ||
+        !build_ordinary_frame(TCSEC_SUITE_SM4_GCM_32, next_key, (const uint8_t *)"ORDNRY",
+                              (uint16_t)(vector.current_spi + 1u), vector.security_epoch + 1u, 1u,
+                              next_test_packet, sizeof(next_test_packet), next_frame,
+                              &next_length) ||
+        !init_recovery_restored(&restored, &vector, &context, &callbacks))
+        return 0;
     status = tcsec_receive(&restored, next_frame, next_length, output, sizeof(output), &result);
     if (status != TCSEC_EPOCH_PROMOTED || inspect(&restored).pending_root_present != 0u ||
         inspect(&restored).current_root_version != inspect(&context).pending_root_version ||
@@ -1335,7 +1321,7 @@ static int test_next_validation(const char *path) {
     callbacks_t callbacks = {.result = TCSEC_COMMIT_NEW};
     tcsec_context_t context = {0};
     tcsec_result_t result;
-    uint8_t key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t key[TCSEC_SM4_KEY_LENGTH];
     uint8_t frame[TCSEC_MAX_FRAME_LENGTH];
     uint8_t packet[sizeof(next_test_packet)] = {0};
     uint8_t output[sizeof(next_test_packet)];
@@ -1375,7 +1361,8 @@ static int test_next_validation(const char *path) {
         if (index < sizeof(mutations) / sizeof(mutations[0]))
             packet[mutations[index].offset] ^= mutations[index].mask;
         if (!build_ordinary_frame(vector.suite, key, vector.prefix, (uint16_t)(vector.spi + 1u),
-                                  1u, packet, sizeof(packet), frame, &length))
+                                  vector.security_epoch + 1u, 1u, packet, sizeof(packet), frame,
+                                  &length))
             return 0;
         if (index == sizeof(mutations) / sizeof(mutations[0])) {
             frame[2] ^= 4u; /* VCID changes without changing the frame length. */
@@ -1385,16 +1372,19 @@ static int test_next_validation(const char *path) {
         }
         memset(output, 0xa5, sizeof(output));
         if (tcsec_receive(&context, frame, length, output, sizeof(output), &result) !=
-                TCSEC_PLAINTEXT_REJECTED ||
+                (index == sizeof(mutations) / sizeof(mutations[0]) ? TCSEC_AUTHENTICATION_FAILED
+                                                                   : TCSEC_PLAINTEXT_REJECTED) ||
             result.plaintext_length != 0u || memcmp(output, zero, sizeof(output)) != 0 ||
             callbacks.calls != 0u || inspect(&context).current_spi != vector.spi ||
-            inspect(&context).current_epoch != vector.security_epoch || inspect(&context).next_replay.seen != 0u)
+            inspect(&context).current_epoch != vector.security_epoch ||
+            inspect(&context).next_replay.seen != 0u)
             return 0;
     }
     memcpy(packet, next_test_packet, sizeof(packet));
     packet[6] = 2u; /* A second ordinary command can also trigger promotion. */
     if (!build_ordinary_frame(vector.suite, key, vector.prefix, (uint16_t)(vector.spi + 1u),
-                              1u, packet, sizeof(packet), frame, &length) ||
+                              vector.security_epoch + 1u, 1u, packet, sizeof(packet), frame,
+                              &length) ||
         tcsec_receive(&context, frame, length, output, sizeof(output), &result) !=
             TCSEC_EPOCH_PROMOTED ||
         callbacks.calls != 1u || inspect(&context).current_spi != (uint16_t)(vector.spi + 1u) ||
@@ -1406,23 +1396,21 @@ static int test_next_validation(const char *path) {
 
 static int test_review_contract(const char *path) {
     vector_t vector;
-    tcsec_config_t config;
     tcsec_context_t context = {0};
     storage_fixture_t storage = {0};
     tcsec_runtime_status_t runtime;
     tcsec_result_t result;
-    uint8_t output[TCSEC_MAX_FRAME_LENGTH], frame[TCSEC_MAX_FRAME_LENGTH], key[32];
-    size_t length;
+    uint8_t output[TCSEC_MAX_FRAME_LENGTH];
     unsigned index;
     static const tcsec_status_t errors[] = {
         TCSEC_STORAGE_UNAVAILABLE, TCSEC_STORAGE_NO_QUORUM,
         TCSEC_STORAGE_ROLLBACK_DETECTED, TCSEC_STORAGE_NOT_COMMISSIONED,
     };
     tcsec_callbacks_t platform = {
-        .load_state = load_storage, .commit_state = commit_storage,
+        .load_state = load_storage,
+        .commit_state = commit_storage,
         .user_context = &storage,
     };
-    callbacks_t basic = {.result = TCSEC_COMMIT_NEW};
     if (!load_vector(path, &vector)) return 0;
     ordinary_config(&storage.saved, &vector);
     memset(output, 0xa5, sizeof(output));
@@ -1452,20 +1440,6 @@ static int test_review_contract(const char *path) {
                      output, sizeof(output), &result) != TCSEC_REPLAY_REJECTED) return 0;
     cold_restart(&context);
 
-    ordinary_config(&config, &vector);
-    config.recovery.spi = (uint16_t)(vector.spi + 2u);
-    if (init_context(&context, &config, &basic) != TCSEC_OK ||
-        tcsec_derive_ordinary_key(vector.root, vector.root_length, vector.spacecraft_id,
-            vector.suite, (uint16_t)(vector.spi + 1u), vector.security_epoch + 1u,
-            vector.root_version, key, sizeof(key)) != 0 ||
-        !build_ordinary_frame(vector.suite, key, vector.prefix, (uint16_t)(vector.spi + 1u),
-            1, next_test_packet, sizeof(next_test_packet), frame, &length) ||
-        tcsec_receive(&context, frame, length, output, sizeof(output), &result) != TCSEC_SPI_COLLISION ||
-        basic.calls != 0 || result.plaintext_length != 0 || output[0] != 0 ||
-        tcsec_get_runtime_status(&context, &runtime) != TCSEC_OK ||
-        runtime.current_spi != vector.spi || runtime.last_status != TCSEC_SPI_COLLISION ||
-        tcsec_reset(&context) != TCSEC_OK) return 0;
-    cold_restart(&context);
     return 1;
 }
 
@@ -1485,14 +1459,7 @@ static int test_review_recovery_boundaries(const char *path) {
     const tcsec_callbacks_t callbacks = {.load_state=load_snapshot, .commit_state=commit_state,
         .monotonic_time_us=backwards_clock, .user_context=&fixture};
     if (!load_vector(path,&vector)) return 0;
-    recovery_config(&config,&vector);
-    config.ordinary.current_spi = (uint16_t)(config.recovery.spi-2u);
-    if (init_context(&context,&config,&fixture) != TCSEC_OK ||
-        tcsec_receive(&context,vector.protected_frame,vector.protected_frame_length,
-            output,sizeof(output),&result) != TCSEC_SPI_COLLISION || fixture.calls != 0 ||
-        result.plaintext_length != 0 || output[0] != 0) return 0;
-    cold_restart(&context);
-    recovery_config(&config,&vector);
+    recovery_config(&config, &vector);
     config.ordinary.current_epoch = UINT32_MAX-1u;
     if (init_context(&context,&config,&fixture) != TCSEC_OK ||
         tcsec_receive(&context,vector.protected_frame,vector.protected_frame_length,
@@ -1525,20 +1492,173 @@ static int test_review_recovery_boundaries(const char *path) {
     return 1;
 }
 
+static int test_authentication_budget(const char *path) {
+    vector_t vector;
+    tcsec_context_t context = {0};
+    storage_fixture_t storage = {0};
+    tcsec_callbacks_t callbacks = {
+        .load_state = load_storage, .commit_state = commit_storage, .user_context = &storage};
+    tcsec_result_t result;
+    uint8_t output[1024], frame[1024], key[16];
+    size_t length;
+    unsigned fault;
+    if (!load_vector(path, &vector))
+        return 0;
+    ordinary_config(&storage.saved, &vector);
+    storage.saved.ordinary.current_auth_used = 2046;
+    if (tcsec_init(&context, &callbacks) != TCSEC_OK ||
+        tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length, output,
+                      sizeof(output), &result) != TCSEC_OK ||
+        storage.saved.ordinary.current_auth_used != 2048)
+        return 0;
+    if (tcsec_derive_ordinary_key(vector.root, 16, vector.spacecraft_id, vector.suite, vector.spi,
+                                  vector.security_epoch, vector.root_version, key, 16) != 0 ||
+        !build_ordinary_frame(vector.suite, key, vector.prefix, vector.spi, vector.security_epoch,
+                              vector.iv_counter + 1, vector.plaintext, vector.plaintext_length,
+                              frame, &length) ||
+        tcsec_reset(&context) != TCSEC_OK ||
+        tcsec_receive(&context, frame, length, output, sizeof(output), &result) !=
+            TCSEC_AUTH_BUDGET_EXHAUSTED ||
+        output[0] != 0)
+        return 0;
+    /* NEXT remains independent even when CURRENT's verification allowance is spent. */
+    if (tcsec_derive_ordinary_key(vector.root, 16, vector.spacecraft_id, vector.suite,
+                                  (uint16_t)(vector.spi + 1), vector.security_epoch + 1,
+                                  vector.root_version, key, 16) != 0 ||
+        !build_ordinary_frame(vector.suite, key, vector.prefix, (uint16_t)(vector.spi + 1),
+                              vector.security_epoch + 1, 1, next_test_packet, 16, frame, &length) ||
+        tcsec_receive(&context, frame, length, output, sizeof(output), &result) !=
+            TCSEC_EPOCH_PROMOTED ||
+        storage.saved.ordinary.current_auth_used != 2 ||
+        storage.saved.ordinary.next_auth_used != 0 || tcsec_reset(&context) != TCSEC_OK)
+        return 0;
+    for (fault = STORAGE_INTERRUPTED; fault <= STORAGE_CONFIRMATION_LOST; fault++) {
+        cold_restart(&context);
+        memset(&storage, 0, sizeof(storage));
+        ordinary_config(&storage.saved, &vector);
+        storage.fault = (storage_fault_t)fault;
+        storage.fault_kind = TCSEC_COMMIT_AUTH_BUDGET;
+        if (tcsec_init(&context, &callbacks) != TCSEC_OK ||
+            tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length, output,
+                          sizeof(output), &result) != (fault == STORAGE_INTERRUPTED
+                                                           ? TCSEC_PERSISTENCE_FAILED
+                                                           : TCSEC_STORAGE_COMMIT_UNCERTAIN) ||
+            result.plaintext_length != 0 || output[0] != 0 ||
+            storage.saved.ordinary.replay.seen != 0)
+            return 0;
+        storage.fault = STORAGE_WRITABLE;
+        if (tcsec_reset(&context) != TCSEC_OK ||
+            tcsec_receive(&context, vector.protected_frame, vector.protected_frame_length, output,
+                          sizeof(output), &result) != TCSEC_OK ||
+            storage.saved.ordinary.current_auth_used != (fault == STORAGE_INTERRUPTED ? 2u : 4u))
+            return 0;
+    }
+    cold_restart(&context);
+    ordinary_config(&storage.saved, &vector);
+    storage.saved.ordinary.current_auth_used = 1;
+    if (tcsec_init(&context, &callbacks) != TCSEC_INVALID_CONFIGURATION)
+        return 0;
+    ordinary_config(&storage.saved, &vector);
+    storage.saved.ordinary.next_auth_used = 2049;
+    if (tcsec_init(&context, &callbacks) != TCSEC_INVALID_CONFIGURATION)
+        return 0;
+    ordinary_config(&storage.saved, &vector);
+    storage.saved.ordinary.replay.seen = 1;
+    storage.saved.ordinary.replay.bitmap = 1;
+    if (tcsec_init(&context, &callbacks) != TCSEC_INVALID_CONFIGURATION)
+        return 0;
+    return 1;
+}
+
+static int test_root_retry_preserves_budget(const char *path) {
+    vector_t v;
+    storage_fixture_t store = {0};
+    tcsec_context_t context = {0};
+    tcsec_result_t result;
+    tcsec_callbacks_t callbacks = {
+        .load_state = load_storage, .commit_state = commit_storage, .user_context = &store};
+    uint8_t output[1024], frame[1024], key[16], nonce[12], tag[16], packet[16];
+    size_t length;
+    uint16_t crc;
+    uint32_t iv;
+    if (!load_vector(path, &v))
+        return 0;
+    recovery_config(&store.saved, &v);
+    store.saved.ordinary.current_auth_used = 2048;
+    store.saved.ordinary.next_auth_used = 2048;
+    if (tcsec_init(&context, &callbacks) != TCSEC_OK ||
+        tcsec_receive(&context, v.protected_frame, v.protected_frame_length, output, sizeof(output),
+                      &result) != TCSEC_ROOT_PREPARED ||
+        store.saved.ordinary.current_auth_used != 2048 || store.saved.ordinary.next_auth_used != 0)
+        return 0;
+    if (tcsec_derive_ordinary_key(v.plaintext + 25, 16, v.spacecraft_id, TCSEC_SUITE_SM4_GCM_32,
+                                  (uint16_t)(v.current_spi + 1), v.security_epoch + 1, 8, key,
+                                  16) != 0)
+        return 0;
+    memcpy(packet, next_test_packet, 16);
+    packet[6] = 3;
+    if (!build_ordinary_frame(TCSEC_SUITE_SM4_GCM_32, key, (const uint8_t *)"ORDNRY",
+                              (uint16_t)(v.current_spi + 1), v.security_epoch + 1, 1, packet, 16,
+                              frame, &length) ||
+        tcsec_receive(&context, frame, length, output, sizeof(output), &result) !=
+            TCSEC_PLAINTEXT_REJECTED ||
+        store.saved.ordinary.next_auth_used != 2)
+        return 0;
+    /* Same authenticated transaction, fresh Recovery nonce: preserve spent NEXT quota. */
+    memcpy(frame, v.protected_frame, v.protected_frame_length);
+    iv = v.iv_counter + 1;
+    frame[7] = (uint8_t)(iv >> 24);
+    frame[8] = (uint8_t)(iv >> 16);
+    frame[9] = (uint8_t)(iv >> 8);
+    frame[10] = (uint8_t)iv;
+    memcpy(nonce, v.prefix, 6);
+    nonce[6] = (uint8_t)(v.spi >> 8);
+    nonce[7] = (uint8_t)v.spi;
+    memcpy(nonce + 8, frame + 7, 4);
+    if (tcsec_derive_recovery_key(v.root, 16, v.spacecraft_id, TCSEC_SUITE_SM4_GCM, v.spi,
+                                  v.root_version, key, 16) != 0 ||
+        !test_gcm_seal(key, nonce, frame, 11, v.plaintext, 41, frame + 11, tag))
+        return 0;
+    memcpy(frame + 52, tag, 16);
+    crc = frame_crc(frame, 68);
+    frame[68] = (uint8_t)(crc >> 8);
+    frame[69] = (uint8_t)crc;
+    if (tcsec_receive(&context, frame, 70, output, sizeof(output), &result) !=
+            TCSEC_ROOT_PREPARED ||
+        store.saved.ordinary.next_auth_used != 2 || inspect(&context).next_auth_used != 2 ||
+        tcsec_reset(&context) != TCSEC_OK)
+        return 0;
+    if (tcsec_derive_ordinary_key(v.plaintext + 25, 16, v.spacecraft_id, TCSEC_SUITE_SM4_GCM_32,
+                                  (uint16_t)(v.current_spi + 1), v.security_epoch + 1, 8, key,
+                                  16) != 0 ||
+        !build_ordinary_frame(TCSEC_SUITE_SM4_GCM_32, key, (const uint8_t *)"ORDNRY",
+                              (uint16_t)(v.current_spi + 1), v.security_epoch + 1, 2,
+                              next_test_packet, 16, frame, &length) ||
+        tcsec_receive(&context, frame, length, output, sizeof(output), &result) !=
+            TCSEC_EPOCH_PROMOTED ||
+        store.saved.ordinary.current_auth_used != 4 || store.saved.ordinary.next_auth_used != 0)
+        return 0;
+    return 1;
+}
+
 #include "storage_quorum_model.h"
 
 int main(int argc, char **argv) {
     int index;
     if (argc != 3) {
-        fprintf(stderr, "expected SM4-HCTR ordinary and SM4-GCM recovery vector paths\n");
+        fprintf(stderr, "expected SM4-GCM32 ordinary and SM4-GCM recovery vector paths\n");
+        return 1;
+    }
+    if (!test_root_retry_preserves_budget(argv[2])) {
+        fprintf(stderr, "Root retry budget tests failed\n");
+        return 1;
+    }
+    if (!test_authentication_budget(argv[1])) {
+        fprintf(stderr, "Authentication budget tests failed\n");
         return 1;
     }
     if (!test_next_validation(argv[1])) {
         fprintf(stderr, "Next admission and promotion tests failed\n");
-        return 1;
-    }
-    if (!test_sm4_hctr()) {
-        fprintf(stderr, "SM4-HCTR known-answer test failed\n");
         return 1;
     }
     if (!test_sm4_backend_contract()) {

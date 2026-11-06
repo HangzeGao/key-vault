@@ -41,14 +41,18 @@ var (
 )
 
 const (
-	TCPrimaryHeaderLength  = 5
-	TCSecurityHeaderLength = 6
-	TCFECFLength           = 2
-	TCMaxFrameLength       = 1024
-	TCIVCounterLength      = 4
-	TCNoncePrefixLength    = 6
-	TCRecoveryTagLength    = 16
-	TCRecoveryAADLength    = TCPrimaryHeaderLength + TCSecurityHeaderLength
+	TCPrimaryHeaderLength   = 5
+	TCSecurityHeaderLength  = 6
+	TCFECFLength            = 2
+	TCMaxFrameLength        = 1024
+	TCIVCounterLength       = 4
+	TCOrdinaryControlLength = 2
+	TCOrdinaryTagLength     = 4
+	TCOrdinaryFrameLimit    = 1024
+	TCOrdinaryAuthLimit     = 2048
+	TCNoncePrefixLength     = 6
+	TCRecoveryTagLength     = 16
+	TCRecoveryAADLength     = TCPrimaryHeaderLength + TCSecurityHeaderLength
 )
 
 // ManagedParameters are direction-specific TC mission wire parameters.
@@ -103,11 +107,11 @@ func (sa SecurityAssociation) Validate() error {
 	}
 	p := sa.Parameters
 	if sa.Direction == DirectionTCTx {
-		if suiteID != suite.SM4HCTR {
-			return fmt.Errorf("%w: TC transmit profile requires SM4_HCTR", ErrFrameInvalid)
+		if suiteID != suite.SM4GCM32 {
+			return fmt.Errorf("%w: TC transmit profile requires SM4_GCM_32", ErrFrameInvalid)
 		}
-		if p.SequenceNumberLength != 0 || p.TransmittedIVLength != TCIVCounterLength || p.TagLength != 0 || p.ReplayWindow != 0 {
-			return fmt.Errorf("%w: TC transmit parameters must be sequence=0, IV=4, tag=0, replay=0", ErrFrameInvalid)
+		if p.SequenceNumberLength != 0 || p.TransmittedIVLength != TCOrdinaryControlLength || p.TagLength != TCOrdinaryTagLength || p.ReplayWindow != 0 {
+			return fmt.Errorf("%w: TC transmit parameters must be sequence=0, control=2, tag=4, replay=0", ErrFrameInvalid)
 		}
 		if len(p.NoncePrefix) != TCNoncePrefixLength {
 			return fmt.Errorf("%w: TC nonce prefix must be 6 bytes", ErrFrameInvalid)

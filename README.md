@@ -1,12 +1,13 @@
 # Key Vault ground and flight security baseline
 
+TC 帧格式、KDF 和持久验证预算以 `docs/TC_GCM_PROFILE.md` 为准。
 This repository implements one strict pre-production contract:
 
 - complete-frame CCSDS TC protection on the ground and symmetric TC unprotection in the embedded C module;
 - direct TPM sealing of TC roots;
 - separate Data and Ops planes with exact source-IP enforcement, SHA-256 bearer-token verifiers, and fixed scopes;
 - a release gate requiring Go and flight-C tests, 95% coverage, operations CLI tests, ARMv7 checks, and ground-to-flight vectors.
-- independent open-source SM4/CMAC/GCM/HCTR/KDF vectors consumed by both ground Go and flight C, anchored by RFC 8998 SM4-GCM.
+- independent open-source SM4/CMAC/GCM/GCM32/KDF vectors consumed by both ground Go and flight C, anchored by RFC 8998 SM4-GCM.
 
 Operations are intentionally browser-free. Use the loopback-only `kvltctl`
 interface documented in [docs/OPERATIONS_CLI.md](docs/OPERATIONS_CLI.md).
@@ -41,4 +42,4 @@ Use [config.production.example.yaml](config.production.example.yaml) as the
 field reference. Install the service under a dedicated non-root account; do not
 run it through the removed Docker/Compose development path.
 
-The database accepts schema version 3 only. Because the system is not in production, obsolete databases are deliberately rejected and must be reprovisioned from the controlled Mission Security Profile.
+The database accepts schema version 4 only. Because the system is not in production, obsolete databases are deliberately rejected and must be reprovisioned from the controlled Mission Security Profile.

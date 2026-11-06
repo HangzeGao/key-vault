@@ -13,7 +13,7 @@ func TestCatalogEnforcesServiceAlgorithmMapping(t *testing.T) {
 		{SM4CMAC, ServiceAuthOnly, false, true},
 		{AES256CTR, ServiceEncryptOnly, true, false},
 		{SM4CTR, ServiceEncryptOnly, true, false},
-		{SM4HCTR, ServiceEncryptOnly, true, false},
+		{SM4GCM32, ServiceAuthEncrypt, true, false},
 		{AES256GCM, ServiceAuthEncrypt, true, false},
 		{SM4GCM, ServiceAuthEncrypt, true, false},
 	}
@@ -28,12 +28,6 @@ func TestCatalogEnforcesServiceAlgorithmMapping(t *testing.T) {
 		if got := test.id.Supports(OperationAuthenticate); got != test.canAuth {
 			t.Fatalf("%s authenticate support = %t, want %t", test.id, got, test.canAuth)
 		}
-	}
-}
-
-func TestHCTRSeparatesStoredRootAndWorkingKeyLengths(t *testing.T) {
-	if SM4HCTR.KeyBytes() != 16 || SM4HCTR.WorkingKeyBytes() != 32 {
-		t.Fatalf("SM4_HCTR lengths = root %d, working %d", SM4HCTR.KeyBytes(), SM4HCTR.WorkingKeyBytes())
 	}
 }
 

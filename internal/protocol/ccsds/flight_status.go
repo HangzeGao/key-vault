@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-const FlightSecurityStatusVersion = 1
+const FlightSecurityStatusVersion = 2
 
 type FlightSelfTestState string
 type FlightCryptoBackend string
@@ -32,6 +32,9 @@ type FlightSecurityStatus struct {
 	SecurityEpoch           uint32
 	RootVersion             uint32
 	PendingRootPresent      bool
+	CurrentAuthUsed         uint32
+	NextAuthUsed            uint32
+	ReceptionPaused         bool
 	ReceiveCount            uint64
 	LastReceiveUS           uint64
 	MaxReceiveUS            uint64
@@ -45,7 +48,7 @@ type ObservedFlightSecurityStatus struct {
 }
 
 func (status FlightSecurityStatus) Validate() error {
-	if status.FormatVersion != FlightSecurityStatusVersion || status.ProfileDigest == ([32]byte{}) ||
+	if status.CurrentAuthUsed&1 != 0 || status.NextAuthUsed&1 != 0 || status.CurrentAuthUsed > TCOrdinaryAuthLimit || status.NextAuthUsed > TCOrdinaryAuthLimit || status.FormatVersion != FlightSecurityStatusVersion || status.ProfileDigest == ([32]byte{}) ||
 		(status.SelfTest != FlightSelfTestPassed && status.SelfTest != FlightSelfTestLocked) ||
 		(status.CryptoBackend != FlightBackendSoftware && status.CryptoBackend != FlightBackendARMv7NEON) ||
 		status.NextSPI != NextSPI(status.CurrentSPI) || status.SecurityEpoch == 0 || status.RootVersion == 0 {

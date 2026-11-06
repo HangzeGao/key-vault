@@ -1,10 +1,11 @@
 # CCSDS 链路安全当前合同
 
+普通 TC、Recovery、KDF、短标签预算及当前版本以 [TC GCM 帧格式](TC_GCM_PROFILE.md) 为准。
 ## 边界
 
 当前系统只实现 TC 遥控安全链：
 
-- TC uplink：地面接收完整 TC 明帧，使用 Current/Next 的 SM4-HCTR 或 Recovery 的 SM4-GCM，返回完整密帧；星载 C 模块完成对称解密。
+- TC uplink：地面接收完整 TC 明帧，使用 Current/Next 的 SM4-GCM-32 或 Recovery 的 SM4-GCM，返回完整密帧；星载 C 模块完成对称解密。
 
 AES 软下行数据域核心使用固定 32 字节密钥处理 880 字节（55 分组），详见
 [`SOFTWARE_DOWNLINK.md`](SOFTWARE_DOWNLINK.md)。AOS 完整帧布局和 GCM
@@ -37,4 +38,4 @@ TC Root 由 TPM 直接封装；不存在额外包装密钥层。
 
 普通 TC、Recovery TC 及星载接口以 `docs/TC_GROUND_FLIGHT_ARCHITECTURE.md` 和测试向量为准。
 
-数据库只接受 schema version 3 的 TC 表集合；含有下行状态表的数据库拒绝打开。
+数据库只接受 schema version 4 的 TC 表集合；含有下行状态表的数据库拒绝打开。

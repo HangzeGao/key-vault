@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"os"
 	"testing"
 )
@@ -20,8 +19,8 @@ func TestTCFlightLinkFaults(t *testing.T) {
 		{"declared-length", "FRAME_LENGTH_INVALID", func(b []byte) []byte { b[3] ^= 1; return b }},
 		{"fecf-bit", "FECF_INVALID", func(b []byte) []byte { b[len(b)-1] ^= 1; return b }},
 		{"ciphertext-bit", "FECF_INVALID", func(b []byte) []byte { b[11] ^= 1; return b }},
-		{"unknown-spi-valid-fecf", "ASSOCIATION_NOT_FOUND", func(b []byte) []byte { binary.BigEndian.PutUint16(b[5:7], 0x3456); rewriteFECF(b); return b }},
-		{"iv-jump-valid-fecf", "IV_FORWARD_JUMP_REJECTED", func(b []byte) []byte { binary.BigEndian.PutUint32(b[7:11], 4097); rewriteFECF(b); return b }},
+		{"unknown-spi-valid-fecf", "ASSOCIATION_NOT_FOUND", func(b []byte) []byte { binary.BigEndian.PutUint16(b[5:7], 0x4000); rewriteFECF(b); return b }},
+		{"iv-jump-valid-fecf", "IV_FORWARD_JUMP_REJECTED", func(b []byte) []byte { binary.BigEndian.PutUint16(b[5:7], 0x8000|4097); rewriteFECF(b); return b }},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -157,20 +156,21 @@ func TestTCFlightStateLoss(t *testing.T) {
 	}
 }
 
-func TestTCFlightCurrentCorruptionRequiresBusinessCheck(t *testing.T) {
+func TestTCFlightOrdinaryAuthentication(t *testing.T) {
 	h := newTCFlightHarness(t)
 	frame := h.protect(flightCommand)
-	bad := bytes.Clone(frame)
-	bad[11] ^= 1
-	rewriteFECF(bad)
 	p := h.flight()
-	r := p.receive("none", bad)
-	// Current HCTR has no authentication tag. A valid CRC does not authenticate
-	// ciphertext; do not invent an expectation that every alteration is rejected.
-	if r.Status != "OK" || r.Length != len(flightCommand) || r.Plaintext == hex.EncodeToString(flightCommand) {
-		t.Fatal("expected unauthenticated Current corruption to reach business validation")
+	for _, field := range []int{4, 6, 7, 8, 9, 10, 11, len(frame) - 3} {
+		bad := bytes.Clone(frame)
+		bad[field] ^= 1
+		rewriteFECF(bad)
+		r := p.receive("none", bad)
+		r.require(t, "AUTHENTICATION_FAILED", nil)
+		if r.CurrentAuthUsed == 0 || r.CurrentSPI != 0x2001 || r.Pending {
+			t.Fatal("authentication failure changed business state or failed to burn quota")
+		}
 	}
-	p.receive("none", frame).require(t, "REPLAY_REJECTED", nil)
+	p.receive("none", frame).require(t, "OK", flightCommand)
 }
 
 func TestTCFlightRecoveryAuthentication(t *testing.T) {
@@ -231,7 +231,11 @@ func TestTCFlightNextRejection(t *testing.T) {
 			}
 			before := h.snapshot()
 			r := p.receive("none", bad)
-			r.require(t, "PLAINTEXT_REJECTED", nil)
+			expected := "PLAINTEXT_REJECTED"
+			if mode == "ciphertext" {
+				expected = "AUTHENTICATION_FAILED"
+			}
+			r.require(t, expected, nil)
 			assertFlightState(t, r, 0x2001, 8, 7, true)
 			h.unchanged(before)
 			// Rejecting a Next frame must leave Current usable and leave Pending intact.

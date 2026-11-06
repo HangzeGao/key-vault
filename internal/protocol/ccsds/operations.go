@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 )
 
-const tcCounterCapacity = uint64(1) << 32
+const tcCounterCapacity = uint64(TCOrdinaryFrameLimit)
 
 // AssociationRuntimeState is the non-secret operational projection of one
 // security association. It deliberately excludes key IDs, nonce prefixes, and
@@ -116,8 +116,14 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 	if status.TCNext == nil {
 		status.Warnings = append(status.Warnings, "TC_NEXT_MISSING")
 	} else if status.TCCurrent != nil {
-		if status.TCNext.KeyVersion <= status.TCCurrent.KeyVersion {
+		if status.TCNext.KeyVersion < status.TCCurrent.KeyVersion {
 			status.Warnings = append(status.Warnings, "TC_NEXT_ROOT_NOT_ADVANCED")
+		} else if status.TCNext.KeyVersion == status.TCCurrent.KeyVersion {
+			current, currentErr := s.store.GetAssociation(ctx, tenantID, status.TCCurrent.ID)
+			next, nextErr := s.store.GetAssociation(ctx, tenantID, status.TCNext.ID)
+			if currentErr != nil || nextErr != nil || current.KeyID != next.KeyID {
+				status.Warnings = append(status.Warnings, "TC_NEXT_ROOT_BINDING_MISMATCH")
+			}
 		} else if status.TCRotation == nil {
 			status.Warnings = append(status.Warnings, "TC_ROTATION_NOT_PREPARED")
 		} else if status.TCRotation.CurrentSPI != status.TCCurrent.SPI || status.TCRotation.NextSPI != status.TCNext.SPI ||
@@ -149,6 +155,15 @@ func (s *FrameSecurity) OperationsStatus(ctx context.Context, tenantID string) (
 		}
 		if flight.CycleLimitExceededCount != 0 {
 			status.Warnings = append(status.Warnings, "FLIGHT_CYCLE_LIMIT_EXCEEDED")
+		}
+		if flight.ReceptionPaused {
+			status.Warnings = append(status.Warnings, "FLIGHT_RECEPTION_PAUSED")
+		}
+		if flight.CurrentAuthUsed >= TCOrdinaryAuthLimit*9/10 {
+			status.Warnings = append(status.Warnings, "FLIGHT_AUTH_BUDGET_LOW")
+		}
+		if flight.NextAuthUsed >= TCOrdinaryAuthLimit*9/10 {
+			status.Warnings = append(status.Warnings, "FLIGHT_NEXT_AUTH_BUDGET_LOW")
 		}
 		if flight.ClockAnomalyCount != 0 {
 			status.Warnings = append(status.Warnings, "FLIGHT_CLOCK_ANOMALY")

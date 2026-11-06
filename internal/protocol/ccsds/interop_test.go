@@ -58,7 +58,7 @@ func (vectorCore) Unprotect(context.Context, protection.UnprotectRequest) (*prot
 
 func TestGroundOrdinaryTCMatchesFlightCVectors(t *testing.T) {
 	for _, test := range []struct{ name, path string }{
-		{name: "sm4-hctr", path: "../../../testdata/ccsds_tc_sm4_hctr.txt"},
+		{name: "sm4-gcm32", path: "../../../testdata/ccsds_tc_sm4_gcm_ordinary.txt"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			vector := loadTCVector(t, test.path)

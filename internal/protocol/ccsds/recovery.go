@@ -8,7 +8,7 @@ import (
 )
 
 const (
-	RootPrepareFormatVersion = 1
+	RootPrepareFormatVersion = 2
 	rootPrepareFixedLength   = 25
 )
 
@@ -30,8 +30,8 @@ func (command RootPrepareCommand) Validate() error {
 		command.NewRootVersion <= command.ExpectedCurrentRootVersion || command.NextSecurityEpoch == 0 {
 		return fmt.Errorf("%w: invalid recovery transaction versions or identifier", ErrFrameInvalid)
 	}
-	if command.OrdinarySuiteID != suite.SM4HCTR {
-		return fmt.Errorf("%w: recovery transaction requires SM4_HCTR", ErrFrameInvalid)
+	if command.OrdinarySuiteID != suite.SM4GCM32 {
+		return fmt.Errorf("%w: recovery transaction requires SM4_GCM_32", ErrFrameInvalid)
 	}
 	if len(command.NewOperationalRoot) != command.OrdinarySuiteID.KeyBytes() {
 		return fmt.Errorf("%w: operational root length does not match ordinary suite", ErrFrameInvalid)
@@ -57,7 +57,7 @@ func (command RootPrepareCommand) MarshalBinary() ([]byte, error) {
 
 func ParseRootPrepareCommand(raw []byte) (RootPrepareCommand, error) {
 	var command RootPrepareCommand
-	if len(raw) != rootPrepareFixedLength+suite.SM4HCTR.KeyBytes() {
+	if len(raw) != rootPrepareFixedLength+suite.SM4GCM32.KeyBytes() {
 		return command, fmt.Errorf("%w: root prepare transaction length must be 41 bytes", ErrFrameInvalid)
 	}
 	if raw[0] != RootPrepareFormatVersion {
@@ -76,7 +76,7 @@ func ParseRootPrepareCommand(raw []byte) (RootPrepareCommand, error) {
 	return command, nil
 }
 
-func tcRecoveryNonce(prefix []byte, spi uint16, counter uint32) []byte {
+func tcGCMNonce(prefix []byte, spi uint16, counter uint32) []byte {
 	nonce := make([]byte, 12)
 	copy(nonce[:TCNoncePrefixLength], prefix)
 	binary.BigEndian.PutUint16(nonce[6:8], spi)

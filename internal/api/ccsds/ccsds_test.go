@@ -31,7 +31,7 @@ func (service *fakeService) ProtectTCFrame(_ context.Context, tenantID string, f
 	service.tenant, service.input = tenantID, append([]byte(nil), frame...)
 	return &protocol.ProtectedTCFrame{Frame: []byte{0x20, 0x01, 0, 0, 7, 0x10, 0x01, 0, 0, 0, 7, 0xaa, 0, 0},
 		Metadata: protocol.OperationMetadata{SPI: 0x1001, Counter: 7, KeyVersion: 3,
-			PolicyVersion: 2, SuiteID: suite.SM4HCTR.String(), ServiceType: suite.ServiceEncryptOnly}}, nil
+			PolicyVersion: 2, SuiteID: suite.SM4GCM32.String(), ServiceType: suite.ServiceEncryptOnly}}, nil
 }
 
 func (service *fakeService) OperationsStatus(_ context.Context, tenantID string) (*protocol.OperationsStatus, error) {
@@ -42,7 +42,7 @@ func (service *fakeService) OperationsStatus(_ context.Context, tenantID string)
 		TCRotation: &protocol.TCRotationState{Phase: protocol.TCRotationPrepared, TransactionID: ^uint64(0),
 			CurrentSPI: 0x1001, NextSPI: 0x1002, CurrentRootVersion: 4, NextRootVersion: 5},
 		TCCurrent: &protocol.AssociationRuntimeState{ID: "tc-current", SPI: 0x1001, Direction: protocol.DirectionTCTx,
-			State: protocol.AssociationCurrent, SuiteID: suite.SM4HCTR.String(), SecurityEpoch: 3,
+			State: protocol.AssociationCurrent, SuiteID: suite.SM4GCM32.String(), SecurityEpoch: 3,
 			KeyVersion: 4, PolicyVersion: 2, TransmittedIVLength: 4, NextIVCounter: &counter},
 		Warnings: []string{},
 	}, nil
@@ -98,7 +98,7 @@ func TestCCSDSRoutesDoNotExposeHardwareDownlink(t *testing.T) {
 func TestFlightStatusObservationUsesDedicatedScopeAndStrictSemantic(t *testing.T) {
 	service := &fakeService{}
 	handler := authenticatedHandler(service)
-	body := []byte(`{"format_version":1,"profile_digest":"` + string(bytes.Repeat([]byte("01"), 32)) +
+	body := []byte(`{"format_version":2,"profile_digest":"` + string(bytes.Repeat([]byte("01"), 32)) +
 		`","self_test":"PASSED","crypto_backend":"ARMV7_NEON","current_spi":4097,"next_spi":4098,` +
 		`"recovery_spi":28673,"security_epoch":5,"root_version":2,"pending_root_present":false,` +
 		`"receive_count":10,"last_receive_us":20,"max_receive_us":30,"cycle_limit_exceeded_count":0,"clock_anomaly_count":0}`)

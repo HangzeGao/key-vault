@@ -95,7 +95,7 @@ func TestMemoryStoreStrictBoundaryMatrix(t *testing.T) {
 	if err := store.ObserveFlightSecurityStatus(ctx, "", FlightSecurityStatus{}); !errors.Is(err, ErrAssociationState) {
 		t.Fatalf("invalid flight status error=%v", err)
 	}
-	status := FlightSecurityStatus{FormatVersion: 1, ProfileDigest: digest, SelfTest: FlightSelfTestPassed,
+	status := FlightSecurityStatus{FormatVersion: 2, ProfileDigest: digest, SelfTest: FlightSelfTestPassed,
 		CryptoBackend: FlightBackendSoftware, CurrentSPI: 1, NextSPI: 2, SecurityEpoch: 1, RootVersion: 1}
 	if err := store.ObserveFlightSecurityStatus(ctx, "tenant", status); err != nil {
 		t.Fatal(err)

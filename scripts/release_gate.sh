@@ -58,13 +58,13 @@ source_manifest_hash="$({
     embedded/downlink_security/tests -type f -print
   printf '%s\n' Makefile embedded/tc_security/Makefile embedded/downlink_security/Makefile start.sh go.mod go.sum
 } | LC_ALL=C sort | xargs sha256sum | sha256sum | awk '{print $1}')"
-ordinary_hash="$(sha256sum testdata/ccsds_tc_sm4_hctr.txt | awk '{print $1}')"
+ordinary_hash="$(sha256sum testdata/ccsds_tc_sm4_gcm_ordinary.txt | awk '{print $1}')"
 recovery_hash="$(sha256sum testdata/ccsds_tc_sm4_gcm_recovery.txt | awk '{print $1}')"
 external_vector_hash="$(sha256sum testdata/crypto/cryptography-sm4-v1.tsv | awk '{print $1}')"
 external_generator_hash="$(sha256sum scripts/oracle/cryptography_vector_generator.py | awk '{print $1}')"
 cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
 {
-  "format_version": 11,
+  "format_version": 12,
   "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "git_commit": "$commit",
   "dirty_worktree": $dirty,
@@ -73,6 +73,12 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "flight_interface_manual_md_sha256": "$(sha256sum docs/FLIGHT_INTERFACE_MANUAL.md | awk '{print $1}')",
   "flight_interface_manual_docx_sha256": "$(sha256sum docs/星务端密码模块接口手册.docx | awk '{print $1}')",
   "flight_manual_header_reference": "passed",
+  "ground_interface_manual_md_sha256": "$(sha256sum docs/GROUND_TC_INTERFACE_MANUAL.md | awk '{print $1}')",
+  "ground_interface_manual_docx_sha256": "$(sha256sum docs/地面遥控密码模块接口手册.docx | awk '{print $1}')",
+  "tc_profile": "SM4-GCM32/SM4-GCM128-recovery-v2",
+  "ordinary_tag_bytes": 4,
+  "ordinary_authentication_limit": 2048,
+  "ground_frames_per_ordinary_key": 1024,
   "go_toolchain": "$("$go_bin" env GOVERSION)",
   "c_compiler": "$("${CC:-cc}" --version | head -1)",
   "go_race": "passed",
@@ -87,12 +93,12 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "ground_access_go_statement_coverage": $access_coverage,
   "ordinary_vector_sha256": "$ordinary_hash",
   "recovery_vector_sha256": "$recovery_hash",
-  "external_vector_generator": "pyca/cryptography 49.0.0 (OpenSSL 4.0.1) + RFC 8998 Appendix A.1",
+  "external_vector_generator": "pyca/cryptography 50.0.2 (OpenSSL 4.0.3) + RFC 8998 Appendix A.1",
   "external_vector_generator_sha256": "$external_generator_hash",
   "external_vector_sha256": "$external_vector_hash",
   "external_vector_records": 28,
   "rfc8998_sm4_gcm": "passed",
-  "external_sm4_block_cmac_gcm_hctr_kdf": "passed",
+  "external_sm4_block_cmac_gcm_gcm32_kdf": "passed",
   "api_to_flight_vector": "passed",
   "current_tc_http_sqlite_c_process_recovery": "passed",
   "tc_process_scenario_count": $tc_process_count,

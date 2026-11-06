@@ -56,36 +56,38 @@ func TestCTRSuitesRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSM4HCTRCanonicalVectors(t *testing.T) {
-	tests := []struct {
-		plaintext  string
-		ciphertext string
-	}{
-		{
-			plaintext:  "6bc1bee22e409f96e93d7e117393172a",
-			ciphertext: "b7b1dd75f608012dc69621d4ea720a60",
-		},
-		{
-			plaintext:  "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417b",
-			ciphertext: "f7505aff357ac13107cdb2848c6bb2dcdda473f7a6ea939d44f52c986c11ca9341042f2b0091a1ca5c8f708cae8ca6a5c59e2228b3616c4455627722",
-		},
+func TestSM4GCM32TamperAndBounds(t *testing.T) {
+	c, _ := New(suite.SM4GCM32, make([]byte, 16))
+	if c.TagSize() != 4 || c.NonceSize() != 12 {
+		t.Fatal("ordinary GCM sizes violate the fixed profile")
 	}
-	workingKey := decodeHex(t, "2B7E151628AED2A6ABF7158809CF4F3C000102030405060708090A0B0C0D0E0F")
-	tweak := decodeHex(t, "F0F1F2F3F4F5F6F7F8F9FAFBFCFDFEFF")
-	primitive, err := New(suite.SM4HCTR, workingKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, test := range tests {
-		plaintext := decodeHex(t, test.plaintext)
-		want := decodeHex(t, test.ciphertext)
-		ciphertext, tag := primitive.Encrypt(plaintext, tweak, nil)
-		if len(tag) != 0 || !bytes.Equal(ciphertext, want) {
-			t.Fatalf("Encrypt() = %x/%x, want %x/empty", ciphertext, tag, want)
+	nonce := make([]byte, 12)
+	aad := make([]byte, 7)
+	for _, n := range []int{0, 1, 15, 16, 17, 31, 32, 1017} {
+		plain := bytes.Repeat([]byte{0x32}, n)
+		encrypted, tag := c.Encrypt(plain, nonce, aad)
+		got, err := c.Decrypt(encrypted, tag, nonce, aad)
+		if err != nil || !bytes.Equal(got, plain) {
+			t.Fatal(n, err)
 		}
-		got, err := primitive.Decrypt(ciphertext, nil, tweak, nil)
-		if err != nil || !bytes.Equal(got, plaintext) {
-			t.Fatalf("Decrypt() = %x/%v, want %x", got, err, plaintext)
+		for _, input := range [][]byte{encrypted, tag, nonce, aad} {
+			for i := range input {
+				for bit := uint(0); bit < 8; bit++ {
+					input[i] ^= 1 << bit
+					got, err = c.Decrypt(encrypted, tag, nonce, aad)
+					if err == nil || got != nil {
+						t.Fatalf("tamper accepted n=%d", n)
+					}
+					input[i] ^= 1 << bit
+				}
+			}
+		}
+	}
+	expectPanic(t, func() { c.Encrypt(make([]byte, 1018), nonce, aad) })
+	expectPanic(t, func() { c.Encrypt(nil, nonce[:11], nil) })
+	for _, packet := range []struct{ data, tag, nonce, aad []byte }{{nil, nil, nonce, nil}, {nil, make([]byte, 16), nonce, nil}, {nil, make([]byte, 4), nonce[:11], nil}, {make([]byte, 1018), make([]byte, 4), nonce, aad}} {
+		if p, err := c.Decrypt(packet.data, packet.tag, packet.nonce, packet.aad); err == nil || p != nil {
+			t.Fatal("invalid profile accepted")
 		}
 	}
 }
@@ -142,9 +144,9 @@ func TestGCMSuitesRoundTripAndRejectInvalidTags(t *testing.T) {
 func TestCipherConstructionAndInputRejections(t *testing.T) {
 	for _, id := range []suite.ID{
 		suite.AES256GCM, suite.SM4GCM, suite.AES256CTR,
-		suite.SM4CTR, suite.SM4HCTR, suite.AES256CMAC, suite.SM4CMAC,
+		suite.SM4CTR, suite.SM4GCM32, suite.AES256CMAC, suite.SM4CMAC,
 	} {
-		if _, err := New(id, make([]byte, id.WorkingKeyBytes()-1)); err == nil {
+		if _, err := New(id, make([]byte, id.KeyBytes()-1)); err == nil {
 			t.Fatalf("%s accepted invalid key length", id)
 		}
 	}
@@ -152,7 +154,7 @@ func TestCipherConstructionAndInputRejections(t *testing.T) {
 		t.Fatal("unknown suite was accepted")
 	}
 
-	ctr, err := New(suite.SM4CTR, make([]byte, suite.SM4CTR.WorkingKeyBytes()))
+	ctr, err := New(suite.SM4CTR, make([]byte, suite.SM4CTR.KeyBytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,38 +170,16 @@ func TestCipherConstructionAndInputRejections(t *testing.T) {
 		t.Fatal("CTR accepted short counter")
 	}
 
-	hctr, err := New(suite.SM4HCTR, make([]byte, suite.SM4HCTR.WorkingKeyBytes()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hctr.NonceSize() != 16 || hctr.TagSize() != 0 {
-		t.Fatalf("HCTR sizes = %d/%d", hctr.NonceSize(), hctr.TagSize())
-	}
-	expectPanic(t, func() { hctr.Encrypt(make([]byte, 16), make([]byte, 16), []byte("aad")) })
-	expectPanic(t, func() { hctr.Encrypt(make([]byte, 15), make([]byte, 16), nil) })
-	expectPanic(t, func() { hctr.Encrypt(make([]byte, 16), make([]byte, 15), nil) })
-	if _, err := hctr.Decrypt(make([]byte, 16), nil, make([]byte, 16), []byte("aad")); err == nil {
-		t.Fatal("HCTR accepted AAD")
-	}
-	if _, err := hctr.Decrypt(make([]byte, 16), []byte{1}, make([]byte, 16), nil); err == nil {
-		t.Fatal("HCTR accepted tag")
-	}
-	if _, err := hctr.Decrypt(make([]byte, 15), nil, make([]byte, 16), nil); err == nil {
-		t.Fatal("HCTR accepted short input")
-	}
-	if _, err := hctr.Decrypt(make([]byte, 16), nil, make([]byte, 15), nil); err == nil {
-		t.Fatal("HCTR accepted short tweak")
-	}
 }
 
 func TestCipherConstructorsCoverEverySupportedEncryptionSuite(t *testing.T) {
-	for _, id := range []suite.ID{suite.AES256GCM, suite.SM4GCM, suite.AES256CTR, suite.SM4CTR, suite.SM4HCTR} {
-		primitive, err := New(id, make([]byte, id.WorkingKeyBytes()))
+	for _, id := range []suite.ID{suite.AES256GCM, suite.SM4GCM, suite.AES256CTR, suite.SM4CTR, suite.SM4GCM32} {
+		primitive, err := New(id, make([]byte, id.KeyBytes()))
 		if err != nil || primitive.NonceSize() == 0 {
 			t.Fatalf("suite=%s primitive=%v err=%v", id, primitive, err)
 		}
 	}
-	if _, err := New(suite.SM4CMAC, make([]byte, suite.SM4CMAC.WorkingKeyBytes())); err == nil {
+	if _, err := New(suite.SM4CMAC, make([]byte, suite.SM4CMAC.KeyBytes())); err == nil {
 		t.Fatal("SM4 CMAC constructed as cipher")
 	}
 }

@@ -96,8 +96,8 @@ func run(ctx context.Context, options provisionOptions) error {
 
 	ids := provisionIDs(profile.TenantID, profile.TC.CurrentRootVersion, profile.TC.NextRootVersion)
 	keySpecs := []keySpec{
-		{id: ids.CurrentKey, name: "CCSDS TC current operational root", suite: "SM4_HCTR", version: profile.TC.CurrentRootVersion, material: secrets.CurrentRoot},
-		{id: ids.NextKey, name: "CCSDS TC next operational root", suite: "SM4_HCTR", version: profile.TC.NextRootVersion, material: secrets.NextRoot},
+		{id: ids.CurrentKey, name: "CCSDS TC current operational root", suite: "SM4_GCM_32", version: profile.TC.CurrentRootVersion, material: secrets.CurrentRoot},
+		{id: ids.NextKey, name: "CCSDS TC next operational root", suite: "SM4_GCM_32", version: profile.TC.NextRootVersion, material: secrets.NextRoot},
 		{id: ids.RecoveryKey, name: "CCSDS TC Recovery root", suite: "SM4_GCM", version: profile.TC.RecoveryRootVersion, material: secrets.RecoveryRoot},
 	}
 	for _, spec := range keySpecs {

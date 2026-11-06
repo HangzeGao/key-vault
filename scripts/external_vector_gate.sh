@@ -29,7 +29,6 @@ mkdir -p -- "$BUILD_DIR"
   -DTCSEC_TEST_CRYPTO_PRIMITIVES=1 -std=c11 -O2 \
   -Wall -Wextra -Wpedantic -Werror \
   "$ROOT_DIR/embedded/tc_security/src/sm4.c" \
-  "$ROOT_DIR/embedded/tc_security/src/hctr.c" \
   "$ROOT_DIR/embedded/tc_security/src/gcm.c" \
   "$ROOT_DIR/embedded/tc_security/src/kdf.c" \
   "$ROOT_DIR/embedded/tc_security/tests/test_external_vectors.c" \

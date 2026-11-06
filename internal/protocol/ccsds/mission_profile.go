@@ -12,7 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const MissionProfileVersion = 1
+const MissionProfileVersion = 2
 
 // MissionSecurityProfile is the single controlled source used to provision
 // the ground security state and authenticated Recovery frame. Its root fields
@@ -91,10 +91,6 @@ func (profile MissionSecurityProfile) Validate() error {
 		tc.RecoveryTransactionID == 0 {
 		return errors.New("ccsds: invalid TC epoch, root version, or recovery transaction")
 	}
-	nextSPI := NextSPI(tc.CurrentSPI)
-	if tc.RecoverySPI == tc.CurrentSPI || tc.RecoverySPI == nextSPI {
-		return errors.New("ccsds: Current, Next, and Recovery SPIs must be distinct")
-	}
 	for name, value := range map[string]struct {
 		value  string
 		length int
@@ -161,12 +157,12 @@ func (profile MissionSecurityProfile) Associations(ids MissionAssociationIDs, po
 	recoveryPrefix, _ := decodeProfileHex(profile.TC.RecoveryNoncePrefixHex, TCNoncePrefixLength)
 	current := SecurityAssociation{ID: ids.CurrentSA, TenantID: profile.TenantID, SPI: profile.TC.CurrentSPI,
 		Direction: DirectionTCTx, KeyID: ids.CurrentKey, KeyVersion: profile.TC.CurrentRootVersion,
-		SecurityEpoch: profile.TC.SecurityEpoch, PolicyVersion: policyVersion, SuiteID: suite.SM4HCTR.String(),
-		State: AssociationCurrent, Parameters: ManagedParameters{TransmittedIVLength: TCIVCounterLength, NoncePrefix: prefix}}
+		SecurityEpoch: profile.TC.SecurityEpoch, PolicyVersion: policyVersion, SuiteID: suite.SM4GCM32.String(),
+		State: AssociationCurrent, Parameters: ManagedParameters{TransmittedIVLength: TCOrdinaryControlLength, TagLength: TCOrdinaryTagLength, NoncePrefix: prefix}}
 	next := SecurityAssociation{ID: ids.NextSA, TenantID: profile.TenantID, SPI: NextSPI(profile.TC.CurrentSPI),
 		Direction: DirectionTCTx, KeyID: ids.NextKey, KeyVersion: profile.TC.NextRootVersion,
-		SecurityEpoch: profile.TC.SecurityEpoch + 1, PolicyVersion: policyVersion, SuiteID: suite.SM4HCTR.String(),
-		State: AssociationNext, Parameters: ManagedParameters{TransmittedIVLength: TCIVCounterLength, NoncePrefix: append([]byte(nil), prefix...)}}
+		SecurityEpoch: profile.TC.SecurityEpoch + 1, PolicyVersion: policyVersion, SuiteID: suite.SM4GCM32.String(),
+		State: AssociationNext, Parameters: ManagedParameters{TransmittedIVLength: TCOrdinaryControlLength, TagLength: TCOrdinaryTagLength, NoncePrefix: append([]byte(nil), prefix...)}}
 	recovery := SecurityAssociation{ID: ids.RecoverySA, TenantID: profile.TenantID, SPI: profile.TC.RecoverySPI,
 		Direction: DirectionTCRecoveryTx, KeyID: ids.RecoveryKey, KeyVersion: profile.TC.RecoveryRootVersion,
 		PolicyVersion: policyVersion, SuiteID: suite.SM4GCM.String(), State: AssociationActive,
@@ -189,7 +185,7 @@ func (profile MissionSecurityProfile) RootPrepareCommand() (RootPrepareCommand, 
 	return RootPrepareCommand{TransactionID: profile.TC.RecoveryTransactionID,
 		ExpectedCurrentRootVersion: profile.TC.CurrentRootVersion, NewRootVersion: profile.TC.NextRootVersion,
 		NextSecurityEpoch: profile.TC.SecurityEpoch + 1, NextSPI: NextSPI(profile.TC.CurrentSPI),
-		OrdinarySuiteID: suite.SM4HCTR, NewOperationalRoot: secrets.NextRoot}, header, nil
+		OrdinarySuiteID: suite.SM4GCM32, NewOperationalRoot: secrets.NextRoot}, header, nil
 }
 
 func decodeProfileHex(value string, length int) ([]byte, error) {

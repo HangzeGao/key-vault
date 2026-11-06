@@ -8,8 +8,8 @@ typedef struct {
     uint16_t spacecraft_id;
     uint8_t current_root[TCSEC_ROOT_KEY_LENGTH];
     uint8_t pending_root[TCSEC_ROOT_KEY_LENGTH];
-    uint8_t current_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
-    uint8_t next_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t current_key[TCSEC_SM4_KEY_LENGTH];
+    uint8_t next_key[TCSEC_SM4_KEY_LENGTH];
     uint8_t recovery_key[TCSEC_SM4_KEY_LENGTH];
     uint32_t current_root_version;
     uint32_t pending_root_version;
@@ -19,6 +19,8 @@ typedef struct {
     uint8_t ordinary_nonce_prefix[TCSEC_NONCE_PREFIX_LENGTH];
     tcsec_replay_state_t current_replay;
     tcsec_replay_state_t next_replay;
+    uint32_t current_auth_used;
+    uint32_t next_auth_used;
     uint8_t pending_root_present;
     uint16_t recovery_spi;
     uint8_t recovery_nonce_prefix[TCSEC_NONCE_PREFIX_LENGTH];

@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 var (
 	ErrNotFound = errors.New("securitystate: not found")
@@ -127,9 +127,9 @@ func (s *Store) migrate(ctx context.Context) error {
 var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS schema_meta (
 		singleton INTEGER PRIMARY KEY CHECK (singleton=1),
-		version INTEGER NOT NULL CHECK (version=3)
+		version INTEGER NOT NULL CHECK (version=4)
 	) STRICT`,
-	`INSERT INTO schema_meta(singleton, version) VALUES(1, 3) ON CONFLICT(singleton) DO NOTHING`,
+	`INSERT INTO schema_meta(singleton, version) VALUES(1, 4) ON CONFLICT(singleton) DO NOTHING`,
 	`CREATE TABLE IF NOT EXISTS tenants (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -158,7 +158,7 @@ var schemaStatements = []string{
 	) STRICT`,
 	`CREATE TABLE IF NOT EXISTS flight_security_status (
 		tenant_id TEXT PRIMARY KEY REFERENCES mission_profiles(tenant_id) ON DELETE CASCADE,
-		format_version INTEGER NOT NULL CHECK (format_version=1),
+		format_version INTEGER NOT NULL CHECK (format_version=2),
 		profile_digest BLOB NOT NULL CHECK (length(profile_digest)=32),
 		self_test TEXT NOT NULL CHECK (self_test IN ('PASSED','LOCKED')),
 		crypto_backend TEXT NOT NULL CHECK (crypto_backend IN ('SOFTWARE','ARMV7_NEON')),
@@ -173,6 +173,9 @@ var schemaStatements = []string{
 		max_receive_us TEXT NOT NULL,
 		cycle_limit_exceeded_count TEXT NOT NULL,
 		clock_anomaly_count TEXT NOT NULL,
+ current_auth_used INTEGER NOT NULL CHECK(current_auth_used BETWEEN 0 AND 2048),
+ next_auth_used INTEGER NOT NULL CHECK(next_auth_used BETWEEN 0 AND 2048),
+ reception_paused INTEGER NOT NULL CHECK(reception_paused IN (0,1)),
 		observed_at TEXT NOT NULL
 	) STRICT`,
 	`CREATE TABLE IF NOT EXISTS protocol_key_versions (
@@ -222,7 +225,7 @@ var schemaStatements = []string{
 		current_spi INTEGER NOT NULL CHECK (current_spi BETWEEN 0 AND 65535),
 		next_spi INTEGER NOT NULL CHECK (next_spi BETWEEN 0 AND 65535),
 		current_root_version INTEGER NOT NULL CHECK (current_root_version>0),
-		next_root_version INTEGER NOT NULL CHECK (next_root_version>current_root_version),
+		next_root_version INTEGER NOT NULL CHECK (next_root_version>=current_root_version),
 		updated_at TEXT NOT NULL
 	) STRICT`,
 	`CREATE TABLE IF NOT EXISTS audit_chain_heads (

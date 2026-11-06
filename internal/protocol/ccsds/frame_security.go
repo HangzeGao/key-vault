@@ -68,8 +68,12 @@ func (s *FrameSecurity) ProtectTCFrame(ctx context.Context, tenantID string, fra
 		return nil, err
 	}
 	suiteID, _ := suite.Parse(sa.SuiteID)
-	securityHeader := encodeTCSecurityHeader(sa.SPI, counter)
-	tweak := tcHCTRTweak(sa.Parameters.NoncePrefix, sa.SPI, counter)
+	control := encodeOrdinaryControl(sa.SecurityEpoch, counter)
+	finalHeader, err := prepareTCPrimaryHeader(primaryHeader, TCSecurityHeaderLength+len(data), s.options.MaxFrameLength)
+	if err != nil {
+		return nil, err
+	}
+	nonce := tcGCMNonce(sa.Parameters.NoncePrefix, sa.SPI, counter)
 	result, err := s.core.ProtectDerived(ctx, protection.ProtectRequest{
 		TenantID:      tenantID,
 		KeyID:         sa.KeyID,
@@ -77,19 +81,20 @@ func (s *FrameSecurity) ProtectTCFrame(ctx context.Context, tenantID string, fra
 		KeyVersion:    sa.KeyVersion,
 		PolicyVersion: sa.PolicyVersion,
 		Data:          data,
-		Nonce:         tweak,
+		Nonce:         nonce,
+		AAD:           join(finalHeader, control),
 		NodeID:        s.options.NodeID,
 	}, protection.Derivation{Label: ordinaryKDFLabel,
 		Context: ordinaryKDFContext(s.options.TCSpacecraftID, suiteID, sa.SPI, sa.SecurityEpoch, sa.KeyVersion)})
 	if err != nil {
 		return nil, err
 	}
-	if result == nil || result.SuiteID != suiteID || result.ServiceType != suite.ServiceEncryptOnly ||
+	if result == nil || result.SuiteID != suiteID || result.ServiceType != suite.ServiceAuthEncrypt ||
 		result.KeyVersion != sa.KeyVersion || result.PolicyVersion != sa.PolicyVersion ||
-		len(result.Data) != len(data) || len(result.Tag) != 0 || !equalBytes(result.Nonce, tweak) {
+		len(result.Data) != len(data) || len(result.Tag) != TCOrdinaryTagLength || !equalBytes(result.Nonce, nonce) {
 		return nil, fmt.Errorf("%w: protection result does not match association binding", ErrFrameInvalid)
 	}
-	protectedFrame, err := assembleTCFrame(primaryHeader, join(securityHeader, result.Data), s.options.MaxFrameLength)
+	protectedFrame, err := assembleTCFrame(primaryHeader, join(control, result.Tag, result.Data), s.options.MaxFrameLength)
 	if err != nil {
 		return nil, err
 	}
@@ -147,8 +152,8 @@ func (s *FrameSecurity) ProtectRootPrepareFrame(ctx context.Context, tenantID st
 	if err != nil {
 		return nil, err
 	}
-	securityHeader := encodeTCSecurityHeader(sa.SPI, counter)
-	nonce := tcRecoveryNonce(sa.Parameters.NoncePrefix, sa.SPI, counter)
+	securityHeader := encodeRecoverySecurityHeader(counter)
+	nonce := tcGCMNonce(sa.Parameters.NoncePrefix, sa.SPI, counter)
 	aad := join(finalPrimaryHeader, securityHeader)
 	suiteID, _ := suite.Parse(sa.SuiteID)
 	result, err := s.core.ProtectDerived(ctx, protection.ProtectRequest{

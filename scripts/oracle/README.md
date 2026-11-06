@@ -1,15 +1,16 @@
 # External cryptographic vector generator
 
+TC 帧格式、KDF 和持久验证预算以 `docs/TC_GCM_PROFILE.md` 为准。
 `cryptography_vector_generator.py` is an offline test oracle. It invokes the
-SM4 and CMAC primitives from pinned `pyca/cryptography 49.0.0`, backed by its
-bundled OpenSSL 4.0.1. The generator contains no SM4 implementation and shares
+SM4 and CMAC primitives from pinned `pyca/cryptography 50.0.2`, backed by its
+bundled OpenSSL 4.0.3. The generator contains no SM4 implementation and shares
 no cryptographic source with the Go or flight C products.
 
-SM4-GCM uses the normative RFC 8998 Appendix A.1 vector. SM4-HCTR is a fixed
-GB/T 17964 project profile rather
-than an OpenSSL mode. Its short, auditable composition is implemented in the
-generator while all block-cipher operations come from OpenSSL; these records
-are therefore classified `INDEPENDENT`, not `NORMATIVE`.
+SM4-GCM uses the normative RFC 8998 Appendix A.1 vector. Ordinary TC's
+fixed 32-bit tag is the leftmost four bytes of the full OpenSSL GCM tag;
+these truncated-profile records are classified INDEPENDENT. Both KDF domains
+produce 16 bytes with the versioned labels in the TC profile. The generator
+contains no product encryption or GHASH implementation.
 
 The committed TSV is the normal offline test input. Its header binds the exact
 generator source SHA-256, and the Go gate verifies that binding. Regeneration

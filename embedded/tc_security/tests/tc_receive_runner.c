@@ -15,6 +15,7 @@ typedef struct {
     const char *path;
     const char *fault;
     unsigned commit_calls;
+    unsigned budget_calls;
 } disk_store_t;
 
 static tcsec_status_t disk_load(void *user, tcsec_config_t *out) {
@@ -39,10 +40,21 @@ static tcsec_commit_result_t disk_commit(void *user, const tcsec_commit_t *chang
     char temporary[4096], directory[4096], *slash;
     FILE *file;
     int written, directory_fd, partial;
-    ++store->commit_calls;
+    const char *fault = store->fault;
+    int quota = change->kind == TCSEC_COMMIT_AUTH_BUDGET;
+    if (quota)
+        ++store->budget_calls;
+    else
+        ++store->commit_calls;
+    if (strncmp(fault, "budget-", 7) == 0)
+        fault = quota ? fault + 7 : "none";
+    else if (quota)
+        fault = "none";
     /* These exits model an abruptly lost flight process, not a returned error. */
-    if (strcmp(store->fault, "crash-before") == 0) _exit(86);
-    if (strcmp(store->fault, "before") == 0) goto cleanup;
+    if (strcmp(fault, "crash-before") == 0)
+        _exit(86);
+    if (strcmp(fault, "before") == 0)
+        goto cleanup;
     if (disk_load(store, &candidate.saved) != TCSEC_OK ||
         commit_storage(&candidate, change) != TCSEC_COMMIT_NEW) {
         result = TCSEC_COMMIT_REJECTED;
@@ -57,11 +69,12 @@ static tcsec_commit_result_t disk_commit(void *user, const tcsec_commit_t *chang
     }
     file = fopen(temporary, "wb");
     if (file == NULL) goto cleanup;
-    partial = strcmp(store->fault, "partial") == 0 || strcmp(store->fault, "crash-partial") == 0;
+    partial = strcmp(fault, "partial") == 0 || strcmp(fault, "crash-partial") == 0;
     written = fwrite(&record, partial ? sizeof(record) / 2u : sizeof(record), 1, file) == 1;
     if (fflush(file) != 0 || fsync(fileno(file)) != 0) written = 0;
     if (fclose(file) != 0) written = 0;
-    if (strcmp(store->fault, "crash-partial") == 0 && written) _exit(87);
+    if (strcmp(fault, "crash-partial") == 0 && written)
+        _exit(87);
     if (partial || !written || rename(temporary, store->path) != 0) goto cleanup;
     result = TCSEC_COMMIT_UNCERTAIN;
     slash = strrchr(directory, '/');
@@ -71,8 +84,10 @@ static tcsec_commit_result_t disk_commit(void *user, const tcsec_commit_t *chang
     if (directory_fd < 0) goto cleanup;
     written = fsync(directory_fd) == 0;
     close(directory_fd);
-    if (strcmp(store->fault, "crash-after") == 0 && written) _exit(88);
-    if (written && strcmp(store->fault, "after") != 0) result = TCSEC_COMMIT_NEW;
+    if (strcmp(fault, "crash-after") == 0 && written)
+        _exit(88);
+    if (written && strcmp(fault, "after") != 0)
+        result = TCSEC_COMMIT_NEW;
 cleanup:
     memset(&record, 0, sizeof(record));
     memset(&candidate, 0, sizeof(candidate));
@@ -103,7 +118,8 @@ static void reply(tcsec_status_t status, const tcsec_context_t *context,
            runtime.pending_root_present ? "true" : "false", runtime.reception_paused ? "true" : "false",
            runtime.receive_count);
     print_hex(runtime.profile_digest, sizeof(runtime.profile_digest));
-    printf("\"}\n");
+    printf("\",\"current_auth_used\":%u,\"next_auth_used\":%u,\"budget_calls\":%u}\n",
+           runtime.current_auth_used, runtime.next_auth_used, store->budget_calls);
     fflush(stdout);
 }
 
@@ -133,8 +149,22 @@ int main(int argc, char **argv) {
         memset(&record, 0, sizeof(record));
         return written ? 0 : 4;
     }
+    if (strcmp(argv[3], "inspect") == 0) {
+        disk_record_t record = {0};
+        disk_store_t inspection = {.path = argv[2]};
+        if (disk_load(&inspection, &record.config) != TCSEC_OK)
+            return 10;
+        /* Compare root/replay/business state independently from burned authentication quota. */
+        record.config.ordinary.current_auth_used = 0;
+        record.config.ordinary.next_auth_used = 0;
+        record.checksum = model_checksum(&record.config);
+        return fwrite(&record, sizeof(record), 1, stdout) == 1 ? 0 : 11;
+    }
     if (strcmp(argv[3], "session") != 0) return 5;
-    store.path = argv[2]; store.fault = "none"; store.commit_calls = 0;
+    store.path = argv[2];
+    store.fault = "none";
+    store.commit_calls = 0;
+    store.budget_calls = 0;
     callbacks.load_state = disk_load; callbacks.commit_state = disk_commit;
     callbacks.user_context = &store;
     status = tcsec_init(&context, &callbacks);
@@ -144,8 +174,19 @@ int main(int argc, char **argv) {
             status = tcsec_reset(&context);
             reply(status, &context, &store, NULL, NULL, 0);
         } else {
-            static const char *faults[] = {"none", "before", "partial", "after",
-                                         "crash-before", "crash-partial", "crash-after"};
+            static const char *faults[] = {"none",
+                                           "before",
+                                           "partial",
+                                           "after",
+                                           "crash-before",
+                                           "crash-partial",
+                                           "crash-after",
+                                           "budget-before",
+                                           "budget-partial",
+                                           "budget-after",
+                                           "budget-crash-before",
+                                           "budget-crash-partial",
+                                           "budget-crash-after"};
             size_t index;
             int known = 0;
             if (sscanf(line, "receive %31s %4095s", fault, encoded) != 2) return 6;

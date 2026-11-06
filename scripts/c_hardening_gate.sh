@@ -13,7 +13,7 @@ readonly SOURCES=(
   src/next_validation.c
   src/selftest.c
   src/sm4.c
-  src/hctr.c
+
   src/gcm.c
   src/kdf.c
   tests/test_next_policy.c
@@ -34,24 +34,24 @@ for source in "${SOURCES[@]}"; do source_paths+=("$C_DIR/$source"); done
 "${CC:-cc}" "${common_flags[@]}" "${source_paths[@]}" \
   "$C_DIR/tests/test_tc_security.c" -o "$BUILD_DIR/test_tc_security"
 "$BUILD_DIR/test_tc_security" \
-  "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" \
+  "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_ordinary.txt" \
   "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"
 
 fault_links=(
   -Wl,--wrap=tcsec_crypto_self_test -Wl,--wrap=tcsec_derive_ordinary_key
-  -Wl,--wrap=tcsec_derive_recovery_key -Wl,--wrap=tcsec_sm4_hctr_decrypt
+  -Wl,--wrap=tcsec_derive_recovery_key -Wl,--wrap=tcsec_gcm_open_short
   -Wl,--wrap=tcsec_gcm_open
 )
 "${CC:-cc}" "${common_flags[@]}" "${source_paths[@]}" \
   "$C_DIR/tests/test_fault_injection.c" "${fault_links[@]}" -o "$BUILD_DIR/test_fault_injection"
 "$BUILD_DIR/test_fault_injection" \
-  "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" \
+  "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_ordinary.txt" \
   "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"
 
 "${CC:-cc}" "${common_flags[@]}" "${source_paths[@]}" \
   "$C_DIR/tests/test_fuzz_smoke.c" -o "$BUILD_DIR/test_fuzz_smoke"
 "$BUILD_DIR/test_fuzz_smoke" \
-  "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" "$FUZZ_SEED" "$FUZZ_ITERATIONS"
+  "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_ordinary.txt" "$FUZZ_SEED" "$FUZZ_ITERATIONS"
 
 printf 'C hardening gate passed: ASan/UBSan, seed=%s, iterations=%s, crashes=0\n' \
   "$FUZZ_SEED" "$FUZZ_ITERATIONS"

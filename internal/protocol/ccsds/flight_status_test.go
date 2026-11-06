@@ -32,7 +32,7 @@ func TestFlightSecurityStatusStrictValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases := []FlightSecurityStatus{valid, valid, valid, valid, valid, valid, valid}
-	cases[0].FormatVersion = 2
+	cases[0].FormatVersion = 1
 	cases[1].ProfileDigest = [32]byte{}
 	cases[2].SelfTest = "UNKNOWN"
 	cases[3].CryptoBackend = "UNKNOWN"

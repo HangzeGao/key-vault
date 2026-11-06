@@ -55,13 +55,13 @@ func (f *fakeCore) protect(req protection.ProtectRequest) (*protection.ProtectRe
 			ServiceType: suite.ServiceAuthEncrypt,
 		}, nil
 	}
-	if len(req.Nonce) != 16 || len(req.AAD) != 0 || len(req.AuthenticationInput) != 0 {
+	if len(req.Nonce) != 12 || len(req.AAD) != 7 || len(req.AuthenticationInput) != 0 {
 		return nil, errors.New("invalid TC protection context")
 	}
 	return &protection.ProtectResult{
-		Data: data, Nonce: append([]byte(nil), req.Nonce...),
-		KeyVersion: req.KeyVersion, PolicyVersion: req.PolicyVersion, SuiteID: suite.SM4HCTR,
-		ServiceType: suite.ServiceEncryptOnly,
+		Data: data, Nonce: append([]byte(nil), req.Nonce...), Tag: bytes.Repeat([]byte{0xa5}, 4),
+		KeyVersion: req.KeyVersion, PolicyVersion: req.PolicyVersion, SuiteID: suite.SM4GCM32,
+		ServiceType: suite.ServiceAuthEncrypt,
 	}, nil
 }
 
@@ -100,9 +100,8 @@ func tcAssociation() SecurityAssociation {
 	return SecurityAssociation{
 		ID: "tx-current", TenantID: "tenant-1", SPI: 0x1001, Direction: DirectionTCTx,
 		KeyID: "operational-root", KeyVersion: 7, SecurityEpoch: 9, PolicyVersion: 1,
-		SuiteID: suite.SM4HCTR.String(), State: AssociationCurrent,
-		Parameters: ManagedParameters{TransmittedIVLength: TCIVCounterLength,
-			NoncePrefix: []byte{0x10, 0x20, 0x30, 0x40, 0x50, 0x60}},
+		SuiteID: suite.SM4GCM32.String(), State: AssociationCurrent,
+		Parameters: ManagedParameters{TransmittedIVLength: 2, TagLength: 4, NoncePrefix: []byte{0x10, 0x20, 0x30, 0x40, 0x50, 0x60}},
 	}
 }
 
@@ -177,7 +176,7 @@ func TestProtectTCFrameOwnsFramingAndSelectsCurrent(t *testing.T) {
 	}
 	if validateTCFrame(protected.Frame) != nil ||
 		!bytes.Equal(protected.Frame[TCPrimaryHeaderLength:TCPrimaryHeaderLength+TCSecurityHeaderLength],
-			[]byte{0x10, 0x01, 0, 0, 0, 0}) {
+			[]byte{0, 0, 0xa5, 0xa5, 0xa5, 0xa5}) {
 		t.Fatalf("protected frame = %x", protected.Frame)
 	}
 	if bytes.Equal(protected.Frame[TCPrimaryHeaderLength+TCSecurityHeaderLength:len(protected.Frame)-TCFECFLength], plain) {
@@ -267,7 +266,7 @@ func TestProtectRootPrepareFrameOwnsFramingAndAuthenticatesBothHeaders(t *testin
 	security, _ := newTestSecurity(t, core, recoveryAssociation(), current, next)
 	command := RootPrepareCommand{
 		TransactionID: 9, ExpectedCurrentRootVersion: 7, NewRootVersion: 8,
-		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4HCTR,
+		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4GCM32,
 		NewOperationalRoot: bytes.Repeat([]byte{0x44}, 16),
 	}
 	protected, err := security.ProtectRootPrepareFrame(context.Background(), "tenant-1",
@@ -282,7 +281,7 @@ func TestProtectRootPrepareFrameOwnsFramingAndAuthenticatesBothHeaders(t *testin
 	}
 	securityStart := TCPrimaryHeaderLength
 	tagEnd := len(protected.Frame) - TCFECFLength
-	if !bytes.Equal(protected.Frame[securityStart:securityStart+TCSecurityHeaderLength], []byte{0x70, 0x01, 0, 0, 0, 0}) ||
+	if !bytes.Equal(protected.Frame[securityStart:securityStart+TCSecurityHeaderLength], []byte{0xc0, 0, 0, 0, 0, 0}) ||
 		!bytes.Equal(protected.Frame[tagEnd-TCRecoveryTagLength:tagEnd], bytes.Repeat([]byte{0xa5}, 16)) ||
 		!bytes.Equal(core.lastAAD, protected.Frame[:TCRecoveryAADLength]) {
 		t.Fatalf("invalid recovery security fields: %x", protected.Frame)
@@ -298,7 +297,7 @@ func TestRootPrepareMustMatchProvisionedCurrentAndNext(t *testing.T) {
 	next.KeyVersion = 8
 	security, _ := newTestSecurity(t, &fakeCore{}, recoveryAssociation(), current, next)
 	command := RootPrepareCommand{TransactionID: 1, ExpectedCurrentRootVersion: 7, NewRootVersion: 8,
-		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4HCTR,
+		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4GCM32,
 		NewOperationalRoot: bytes.Repeat([]byte{1}, 16)}
 	command.NextSecurityEpoch++
 	if _, err := security.ProtectRootPrepareFrame(context.Background(), "tenant-1", make([]byte, 5), command); !errors.Is(err, ErrAssociationState) {
@@ -308,7 +307,7 @@ func TestRootPrepareMustMatchProvisionedCurrentAndNext(t *testing.T) {
 
 func TestRootPrepareFailsClosedOnMissingStateAndExhaustedRecoveryCounter(t *testing.T) {
 	command := RootPrepareCommand{TransactionID: 1, ExpectedCurrentRootVersion: 7, NewRootVersion: 8,
-		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4HCTR,
+		NextSecurityEpoch: 10, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4GCM32,
 		NewOperationalRoot: bytes.Repeat([]byte{1}, 16)}
 	header := []byte{0x20, 1, 0, 0, 1}
 	missingCurrent, _ := newTestSecurity(t, &fakeCore{}, recoveryAssociation(), nextTCAssociation())
@@ -334,7 +333,7 @@ func TestRootPrepareFailsClosedOnMissingStateAndExhaustedRecoveryCounter(t *test
 
 func TestRootPrepareTransactionIsStrict(t *testing.T) {
 	command := RootPrepareCommand{TransactionID: 1, ExpectedCurrentRootVersion: 1, NewRootVersion: 2,
-		NextSecurityEpoch: 3, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4HCTR,
+		NextSecurityEpoch: 3, NextSPI: 0x1002, OrdinarySuiteID: suite.SM4GCM32,
 		NewOperationalRoot: bytes.Repeat([]byte{7}, 16)}
 	raw, err := command.MarshalBinary()
 	if err != nil {
@@ -357,7 +356,7 @@ func TestRootPrepareTransactionIsStrict(t *testing.T) {
 func TestTCProfilesAndStatesAreStrict(t *testing.T) {
 	sa := tcAssociation()
 	if err := sa.Validate(); err != nil {
-		t.Fatalf("TC profile rejected %s: %v", suite.SM4HCTR, err)
+		t.Fatalf("TC profile rejected %s: %v", suite.SM4GCM32, err)
 	}
 	for _, suiteID := range []suite.ID{suite.AES256CTR, suite.SM4CTR, suite.AES256GCM, suite.SM4GCM, suite.AES256CMAC, suite.SM4CMAC} {
 		sa := tcAssociation()
@@ -378,7 +377,7 @@ func TestRecoveryAssociationAllowsOnlyGCM(t *testing.T) {
 	if err := sa.Validate(); err != nil {
 		t.Fatalf("recovery profile rejected %s: %v", suite.SM4GCM, err)
 	}
-	for _, suiteID := range []suite.ID{suite.AES256GCM, suite.AES256CTR, suite.SM4HCTR} {
+	for _, suiteID := range []suite.ID{suite.AES256GCM, suite.AES256CTR, suite.SM4GCM32} {
 		sa := recoveryAssociation()
 		sa.SuiteID = suiteID.String()
 		if err := sa.Validate(); err == nil {
@@ -424,7 +423,7 @@ func TestFrameSecurityPropagatesCoreAndBindingFailures(t *testing.T) {
 		t.Fatalf("nil TC result error = %v", err)
 	}
 	for name, mutate := range map[string]func(*protection.ProtectResult){
-		"wrong service": func(result *protection.ProtectResult) { result.ServiceType = suite.ServiceAuthEncrypt },
+		"wrong service": func(result *protection.ProtectResult) { result.ServiceType = suite.ServiceEncryptOnly },
 		"wrong length":  func(result *protection.ProtectResult) { result.Data = result.Data[:len(result.Data)-1] },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -444,7 +443,7 @@ func TestFrameSecurityPropagatesCoreAndBindingFailures(t *testing.T) {
 	next.KeyVersion = 8
 	command := RootPrepareCommand{
 		TransactionID: 1, ExpectedCurrentRootVersion: 7, NewRootVersion: 8,
-		NextSecurityEpoch: 10, NextSPI: next.SPI, OrdinarySuiteID: suite.SM4HCTR,
+		NextSecurityEpoch: 10, NextSPI: next.SPI, OrdinarySuiteID: suite.SM4GCM32,
 		NewOperationalRoot: bytes.Repeat([]byte{1}, 16),
 	}
 	security, _ = newTestSecurity(t, &fakeCore{}, current, next, recoveryAssociation())
@@ -539,7 +538,7 @@ func TestAssociationAndOptionsValidationMatrix(t *testing.T) {
 func TestRootPrepareAndKDFRejections(t *testing.T) {
 	base := RootPrepareCommand{
 		TransactionID: 1, ExpectedCurrentRootVersion: 1, NewRootVersion: 2,
-		NextSecurityEpoch: 2, NextSPI: 2, OrdinarySuiteID: suite.SM4HCTR,
+		NextSecurityEpoch: 2, NextSPI: 2, OrdinarySuiteID: suite.SM4GCM32,
 		NewOperationalRoot: bytes.Repeat([]byte{1}, 16),
 	}
 	for _, mutate := range []func(*RootPrepareCommand){
@@ -560,17 +559,17 @@ func TestRootPrepareAndKDFRejections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw[0] = 2
+	raw[0] = 1
 	if _, err := ParseRootPrepareCommand(raw); !errors.Is(err, ErrFrameInvalid) {
 		t.Fatalf("invalid format version = %v", err)
 	}
 	if _, err := DeriveOrdinaryTrafficKey(make([]byte, 16), 1, suite.SM4GCM, 1, 1, 1); err == nil {
 		t.Fatal("ordinary KDF accepted wrong suite")
 	}
-	if _, err := DeriveOrdinaryTrafficKey(make([]byte, 15), 1, suite.SM4HCTR, 1, 1, 1); err == nil {
+	if _, err := DeriveOrdinaryTrafficKey(make([]byte, 15), 1, suite.SM4GCM32, 1, 1, 1); err == nil {
 		t.Fatal("ordinary KDF accepted short root")
 	}
-	if _, err := DeriveRecoveryGCMKey(make([]byte, 16), 1, suite.SM4HCTR, 1, 1); err == nil {
+	if _, err := DeriveRecoveryGCMKey(make([]byte, 16), 1, suite.SM4GCM32, 1, 1); err == nil {
 		t.Fatal("recovery KDF accepted wrong suite")
 	}
 	if _, err := DeriveRecoveryGCMKey(make([]byte, 15), 1, suite.SM4GCM, 1, 1); err == nil {

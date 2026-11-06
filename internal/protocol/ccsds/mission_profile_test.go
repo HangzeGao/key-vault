@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-const validMissionProfile = `format_version: 1
+const validMissionProfile = `format_version: 2
 mission_id: demo-sat
 tenant_id: tenant-1
 spacecraft_id: 291
@@ -85,7 +85,7 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 	for name, input := range map[string]string{
 		"unknown":                      strings.Replace(validMissionProfile, "mission_id: demo-sat", "unknown: x\nmission_id: demo-sat", 1),
 		"duplicate":                    strings.Replace(validMissionProfile, "mission_id: demo-sat", "mission_id: one\nmission_id: two", 1),
-		"multiple":                     validMissionProfile + "---\nformat_version: 1\n",
+		"multiple":                     validMissionProfile + "---\nformat_version: 2\n",
 		"trailer syntax":               validMissionProfile + "broken: [unterminated\n",
 		"bad hex":                      strings.Replace(validMissionProfile, "00112233445566778899aabbccddeeff", "00", 1),
 		"unsupported hardware profile": validMissionProfile + "downlink:\n  active_kek_slot: 0\n",
@@ -98,14 +98,13 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 	}
 	base := *loadMissionProfile(t)
 	mutations := []func(*MissionSecurityProfile){
-		func(p *MissionSecurityProfile) { p.FormatVersion = 2 },
+		func(p *MissionSecurityProfile) { p.FormatVersion = 1 },
 		func(p *MissionSecurityProfile) { p.MissionID = "" },
 		func(p *MissionSecurityProfile) { p.SpacecraftID = 0x400 },
 		func(p *MissionSecurityProfile) { p.TC.SecurityEpoch = 0 },
 		func(p *MissionSecurityProfile) { p.TC.SecurityEpoch = ^uint32(0) },
 		func(p *MissionSecurityProfile) { p.TC.NextRootVersion = p.TC.CurrentRootVersion },
 		func(p *MissionSecurityProfile) { p.TC.RecoveryTransactionID = 0 },
-		func(p *MissionSecurityProfile) { p.TC.RecoverySPI = p.TC.CurrentSPI },
 	}
 	for index, mutate := range mutations {
 		candidate := base

@@ -25,7 +25,7 @@ mkdir -p -- "$BUILD_DIR"
 cd "$ROOT_DIR"
 "$go_bin" run ./scripts/tools/crypto-diff-vectors -output "$VECTORS" -cases 128
 
-readonly COMMON=(src/sm4.c src/hctr.c src/kdf.c tests/test_differential.c)
+readonly COMMON=(src/sm4.c src/gcm.c src/kdf.c tests/test_differential.c)
 (
   cd "$C_DIR"
   "${CC:-cc}" -Iinclude -Isrc -std=c11 -O2 -Wall -Wextra -Wpedantic -Werror \
@@ -45,7 +45,7 @@ readonly COMMON=(src/sm4.c src/hctr.c src/kdf.c tests/test_differential.c)
   make CC="$cc_arm" AR="$("$cc_arm" -print-prog-name=ar)" ARMV7_NEON=1 \
     CFLAGS="$arm_cflags" test-binary
   "$qemu_arm" -L "$sysroot" build/test_tc_security \
-    "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"
+    "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_ordinary.txt" "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"
   "$cc_arm" "${sysroot_flag[@]}" -Iinclude -Isrc -DTCSEC_HAVE_ARMV7_NEON_ASM=1 -std=c11 -O2 \
     -Wall -Wextra -Wpedantic -Werror -march=armv7-a -mfpu=neon -mfloat-abi=hard \
     "${COMMON[@]}" src/sm4_armv7_neon.S -o "$BUILD_DIR/diff-armv7"

@@ -116,12 +116,12 @@ func TestProtectDerivedUsesAnEpochBoundWorkingKey(t *testing.T) {
 	request := ProtectRequest{TenantID: "tenant-1", KeyID: "root", UsageScope: models.KeyUsageProtocol,
 		KeyVersion: 1, PolicyVersion: 1, Data: []byte("command"), Nonce: bytes.Repeat([]byte{0x11}, 16), NodeID: "node-1"}
 	first, err := core.ProtectDerived(context.Background(), request,
-		Derivation{Label: []byte("TC-TRAFFIC"), Context: []byte("epoch-1")})
+		Derivation{Label: []byte("TC-GCM32-V1"), Context: []byte("epoch-1")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	second, err := core.ProtectDerived(context.Background(), request,
-		Derivation{Label: []byte("TC-TRAFFIC"), Context: []byte("epoch-2")})
+		Derivation{Label: []byte("TC-GCM32-V1"), Context: []byte("epoch-2")})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -18,7 +18,7 @@ func TestDefaultPolicyIncludesAllProtectionServices(t *testing.T) {
 		"SM4_GCM":      {ModeGCM, "AUTH_ENCRYPT"},
 		"AES_256_CTR":  {ModeCTR, "ENCRYPT_ONLY"},
 		"SM4_CTR":      {ModeCTR, "ENCRYPT_ONLY"},
-		"SM4_HCTR":     {ModeHCTR, "ENCRYPT_ONLY"},
+		"SM4_GCM_32":   {ModeGCM, "AUTH_ENCRYPT"},
 		"AES_256_CMAC": {ModeCMAC, "AUTH_ONLY"},
 		"SM4_CMAC":     {ModeCMAC, "AUTH_ONLY"},
 	}

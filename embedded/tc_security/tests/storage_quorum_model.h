@@ -95,7 +95,7 @@ static int test_quorum_powercuts(const char *ordinary_path, const char *recovery
     if (!load_vector(ordinary_path, &ordinary_vector) ||
         !load_vector(recovery_path, &recovery_vector)) return 0;
     for (scenario = 0; scenario < 3; ++scenario) {
-        tcsec_config_t initial, expected, recovered;
+        tcsec_config_t initial, reserved, expected, recovered;
         tcsec_context_t context = {0};
         tcsec_result_t result;
         quorum_model_t store;
@@ -122,13 +122,18 @@ static int test_quorum_powercuts(const char *ordinary_path, const char *recovery
                     tcsec_receive(&context, frame, frame_length, output, sizeof(output), &result) !=
                         TCSEC_ROOT_PREPARED || model_load(&store, &initial) != TCSEC_OK) return 0;
                 cold_restart(&context);
-                if (tcsec_derive_ordinary_key(initial.ordinary.pending_operational_root, 16,
-                        initial.ordinary.spacecraft_id, TCSEC_SUITE_SM4_HCTR,
-                        (uint16_t)(initial.ordinary.current_spi + 1u), initial.ordinary.current_epoch + 1u,
-                        initial.ordinary.pending_root_version, key, sizeof(key)) != 0 ||
-                    !build_ordinary_frame(TCSEC_SUITE_SM4_HCTR, key,
-                        initial.ordinary.nonce_prefix, (uint16_t)(initial.ordinary.current_spi + 1u),
-                        1, next_test_packet, sizeof(next_test_packet), frame, &frame_length)) return 0;
+                if (tcsec_derive_ordinary_key(
+                        initial.ordinary.pending_operational_root, 16,
+                        initial.ordinary.spacecraft_id, TCSEC_SUITE_SM4_GCM_32,
+                        (uint16_t)(initial.ordinary.current_spi + 1u),
+                        initial.ordinary.current_epoch + 1u, initial.ordinary.pending_root_version,
+                        key, sizeof(key)) != 0 ||
+                    !build_ordinary_frame(TCSEC_SUITE_SM4_GCM_32, key,
+                                          initial.ordinary.nonce_prefix,
+                                          (uint16_t)(initial.ordinary.current_spi + 1u),
+                                          initial.ordinary.current_epoch + 1u, 1, next_test_packet,
+                                          sizeof(next_test_packet), frame, &frame_length))
+                    return 0;
                 event = TCSEC_EPOCH_PROMOTED;
             }
         }
@@ -137,6 +142,16 @@ static int test_quorum_powercuts(const char *ordinary_path, const char *recovery
             tcsec_receive(&context, frame, frame_length, output, sizeof(output), &result) != event ||
             model_load(&store, &expected) != TCSEC_OK) return 0;
         operations = store.operations;
+        reserved = initial;
+        if (scenario == 0)
+            reserved.ordinary.current_auth_used = 2;
+        if (scenario == 2)
+            reserved.ordinary.next_auth_used = 2;
+        reserved = initial;
+        if (scenario == 0)
+            reserved.ordinary.current_auth_used = 2;
+        if (scenario == 2)
+            reserved.ordinary.next_auth_used = 2;
         /* Cut before each payload byte, checksum, validity marker, anchor and
          * callback confirmation. Reset RAM exactly as a computer restart does. */
         for (cut = 0; cut <= operations; ++cut) {
@@ -151,11 +166,16 @@ static int test_quorum_powercuts(const char *ordinary_path, const char *recovery
             if (received != event && (result.plaintext_length != 0 || output[0] != 0)) return 0;
             cold_restart(&context);
             if (model_load(&store, &recovered) != TCSEC_OK ||
-                memcmp(&recovered, store.anchor ? &expected : &initial, sizeof(recovered)) != 0 ||
-                tcsec_init(&context, &callbacks) != TCSEC_OK) return 0;
-            if (store.anchor != 0 &&
+                (memcmp(&recovered, &initial, sizeof(recovered)) != 0 &&
+                 memcmp(&recovered, &reserved, sizeof(recovered)) != 0 &&
+                 memcmp(&recovered, &expected, sizeof(recovered)) != 0) ||
+                tcsec_init(&context, &callbacks) != TCSEC_OK)
+                return 0;
+            store.cut_after = UINT32_MAX;
+            if (memcmp(&recovered, &expected, sizeof(recovered)) == 0 &&
                 tcsec_receive(&context, frame, frame_length, output, sizeof(output), &result) !=
-                    TCSEC_REPLAY_REJECTED) return 0;
+                    TCSEC_REPLAY_REJECTED)
+                return 0;
             /* Any one unreadable/corrupt lane still leaves an exact quorum. */
             for (lane = 0; lane < 3; ++lane) {
                 store.lane[lane][store.anchor].checksum ^= 1;

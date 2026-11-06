@@ -51,7 +51,7 @@
       ]
     },
     {
-      "test": "TestTCFlightCurrentCorruptionRequiresBusinessCheck",
+      "test": "TestTCFlightOrdinaryAuthentication",
       "scenarios": [
         ""
       ]
@@ -106,6 +106,29 @@
         "unknown-field",
         "short-frame",
         "bad-fecf"
+      ]
+    },
+    {
+      "test": "TestTCFlightAuthenticationBudgetPersists",
+      "scenarios": [
+        ""
+      ]
+    },
+    {
+      "test": "TestTCFlightBudgetCommitRecovery",
+      "scenarios": [
+        "before",
+        "partial",
+        "after",
+        "crash-before",
+        "crash-partial",
+        "crash-after"
+      ]
+    },
+    {
+      "test": "TestTCFlightRepeatedWorkingKeyRotation",
+      "scenarios": [
+        ""
       ]
     }
   ]

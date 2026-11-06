@@ -1,12 +1,13 @@
 # TC 地面—星载架构与流程
 
+普通 TC、Recovery、KDF、短标签预算及当前版本以 [TC GCM 帧格式](TC_GCM_PROFILE.md) 为准。
 ## 架构
 
 ```mermaid
 flowchart LR
   C["测控系统\n提交完整 TC 明帧"] --> API["TC protect API"]
   API --> G["地面 TC 帧安全模块"]
-  G --> DB[("SQLite\nSA / IV / rotation")]
+  G --> DB[("SQLite\nSA / Counter / rotation")]
   G --> TPM["TPM 直接解封 Root"]
   G --> L["测控链路\n完整 TC 密帧"]
   L --> F["星载 C 模块\ntcsec_receive"]
@@ -27,7 +28,7 @@ flowchart LR
 
 首装在受控的装星工序中完成。星务的首装工具确认装星授权和目标设备身份，验证配置来源与完整性，并通过受保护的通道交付每星根密钥。配置绑定任务、设备及版本。编译产物可携带公开的格式版本、公开验证材料和任务参数。生产根密钥由受控工序灌装。
 
-首装事务写入完整的初始状态并读回验证，其中包含 Current 和 Recovery 根密钥、SPI、初始安全代次、空重放窗口及任务配置摘要。Next 根通过已认证的换根准备事务交付。星务需要在可信持久状态中记录首装是否完成。首装过程中断时，由受控工序根据已提交记录完成或回收事务。已服役设备的状态缺失、损坏或回退时停止收帧，进入授权恢复流程。
+首装事务写入完整的初始状态并读回验证，其中包含 Current 和 Recovery 根密钥、SPI、初始安全代次、空重放窗口、零值 Current/Next 验证预算及任务配置摘要。Next 根通过已认证的换根准备事务交付。星务需要在可信持久状态中记录首装是否完成。首装过程中断时，由受控工序根据已提交记录完成或回收事务。已服役设备的状态缺失、损坏或回退时停止收帧，进入授权恢复流程。
 
 ```mermaid
 flowchart LR
@@ -43,7 +44,7 @@ flowchart LR
 
 首装载体、信任锚和工装由星务接口设计确定。验收覆盖错误设备、签名或配置损坏、首装重复执行、灌装中断，以及服役后状态回退。装星记录只保留设备标识、配置摘要和结果。
 
-地面轮换状态为 `PREPARED → SWITCHING → ACTIVE`。星上收到首个合法 Next SPI 密文后自动提交 Pending Root，不新增测控链路管理指令。普通接收槽只有 Current/Next/Recovery，不存在 Previous 或 Grace。
+地面轮换状态为 `PREPARED → SWITCHING → ACTIVE`。星上收到首个合法 Next 帧后原子提升普通关联及可选 Pending 根，不新增测控链路管理指令。普通接收槽只有 Current/Next/Recovery，不存在 Previous 或 Grace。
 
 ## 普通 TC 加解密
 
@@ -55,13 +56,13 @@ sequenceDiagram
   participant F as 星载密码模块
   participant S as 星务
   C->>G: 完整 TC 明帧（含 FECF）
-  G->>G: 验帧，选择 Current，分配 IV，SM4-HCTR
-  G->>G: 插入 SPI/IV，更新帧长与 FECF
+  G->>G: 验帧，选择 Current，分配 IV，SM4-GCM-32
+  G->>G: 插入控制字与 4 字节标签，更新帧长与 FECF
   G-->>C: 完整 TC 密帧
   C->>L: 原样发送
   L->>F: 完整 TC 密帧
-  F->>F: 长度/FECF/SPI/replay/最大前跳检查
-  F->>F: 派生工作密钥并 HCTR 解密
+  F->>F: 长度/FECF/选择值/replay/最大前跳检查
+  F->>F: 持久预留两次验证 再重复 GCM 认证解密
   opt 首个 Next SPI 帧
     F->>F: 校验包结构和任务规则
   end

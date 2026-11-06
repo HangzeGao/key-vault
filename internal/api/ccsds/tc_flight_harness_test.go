@@ -28,21 +28,24 @@ import (
 var flightCommand = []byte{0x10, 0x42, 0xc0, 1, 0, 9, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0}
 
 type flightReply struct {
-	Status        string `json:"status"`
-	Length        int    `json:"length"`
-	Plaintext     string `json:"plaintext"`
-	Cleared       bool   `json:"cleared"`
-	CommitCalls   int    `json:"commit_calls"`
-	Diagnostic    string `json:"diagnostic"`
-	CurrentSPI    uint16 `json:"current_spi"`
-	NextSPI       uint16 `json:"next_spi"`
-	RecoverySPI   uint16 `json:"recovery_spi"`
-	Epoch         uint32 `json:"epoch"`
-	RootVersion   uint32 `json:"root_version"`
-	Pending       bool   `json:"pending"`
-	Paused        bool   `json:"paused"`
-	ReceiveCount  uint64 `json:"receive_count"`
-	ProfileDigest string `json:"profile_digest"`
+	Status          string `json:"status"`
+	Length          int    `json:"length"`
+	Plaintext       string `json:"plaintext"`
+	Cleared         bool   `json:"cleared"`
+	CurrentAuthUsed uint32 `json:"current_auth_used"`
+	NextAuthUsed    uint32 `json:"next_auth_used"`
+	BudgetCalls     int    `json:"budget_calls"`
+	CommitCalls     int    `json:"commit_calls"`
+	Diagnostic      string `json:"diagnostic"`
+	CurrentSPI      uint16 `json:"current_spi"`
+	NextSPI         uint16 `json:"next_spi"`
+	RecoverySPI     uint16 `json:"recovery_spi"`
+	Epoch           uint32 `json:"epoch"`
+	RootVersion     uint32 `json:"root_version"`
+	Pending         bool   `json:"pending"`
+	Paused          bool   `json:"paused"`
+	ReceiveCount    uint64 `json:"receive_count"`
+	ProfileDigest   string `json:"profile_digest"`
 }
 
 func successPlaintext(status string, plain []byte) []byte {
@@ -191,8 +194,8 @@ func newTCFlightHarness(t *testing.T) *tcFlightHarness {
 	}
 	dir := t.TempDir()
 	h := &tcFlightHarness{t: t, runner: runner, vector: vector, state: filepath.Join(dir, "flight.test-state"), ground: filepath.Join(dir, "ground.db"), keys: map[string]e2eKey{
-		"current":  {root: decode("ordinary_root"), suite: suite.SM4HCTR, version: 7},
-		"next":     {root: bytes.Repeat([]byte{0x77}, 16), suite: suite.SM4HCTR, version: 8},
+		"current":  {root: decode("ordinary_root"), suite: suite.SM4GCM32, version: 7},
+		"next":     {root: bytes.Repeat([]byte{0x77}, 16), suite: suite.SM4GCM32, version: 8},
 		"recovery": {root: decode("root"), suite: suite.SM4GCM, version: 3},
 	}}
 	h.openGround()
@@ -214,7 +217,7 @@ func newTCFlightHarness(t *testing.T) *tcFlightHarness {
 		if err = h.store.CreateProtocolKey(ctx, key, version); err != nil {
 			t.Fatal(err)
 		}
-		sa := protocol.SecurityAssociation{ID: id, TenantID: "tenant-1", SPI: 0x2001, Direction: protocol.DirectionTCTx, KeyID: id, KeyVersion: k.version, SecurityEpoch: 8, PolicyVersion: 1, SuiteID: k.suite.String(), State: protocol.AssociationCurrent, Parameters: protocol.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: []byte("ORDNRY")}}
+		sa := protocol.SecurityAssociation{ID: id, TenantID: "tenant-1", SPI: 0x2001, Direction: protocol.DirectionTCTx, KeyID: id, KeyVersion: k.version, SecurityEpoch: 8, PolicyVersion: 1, SuiteID: k.suite.String(), State: protocol.AssociationCurrent, Parameters: protocol.ManagedParameters{TransmittedIVLength: 2, TagLength: 4, NoncePrefix: []byte("ORDNRY")}}
 		if id == "next" {
 			sa.SPI++
 			sa.SecurityEpoch++
@@ -226,6 +229,7 @@ func newTCFlightHarness(t *testing.T) *tcFlightHarness {
 			sa.SecurityEpoch = 0
 			sa.State = protocol.AssociationActive
 			sa.Parameters.TagLength = 16
+			sa.Parameters.TransmittedIVLength = 4
 			sa.Parameters.NoncePrefix = decode("nonce_prefix")
 		}
 		if err = h.store.CreateAssociation(ctx, sa); err != nil {
@@ -309,7 +313,7 @@ func (h *tcFlightHarness) protect(plain []byte) []byte {
 }
 func (h *tcFlightHarness) prepare() []byte {
 	h.t.Helper()
-	cmd := protocol.RootPrepareCommand{TransactionID: 9, ExpectedCurrentRootVersion: 7, NewRootVersion: 8, NextSecurityEpoch: 9, NextSPI: 0x2002, OrdinarySuiteID: suite.SM4HCTR, NewOperationalRoot: append([]byte(nil), h.keys["next"].root...)}
+	cmd := protocol.RootPrepareCommand{TransactionID: 9, ExpectedCurrentRootVersion: 7, NewRootVersion: 8, NextSecurityEpoch: 9, NextSPI: 0x2002, OrdinarySuiteID: suite.SM4GCM32, NewOperationalRoot: append([]byte(nil), h.keys["next"].root...)}
 	frame, err := h.service.ProtectRootPrepareFrame(context.Background(), "tenant-1", []byte{0x20, 1, 0, 0, 7}, cmd)
 	if err != nil {
 		h.t.Fatal(err)
@@ -331,7 +335,7 @@ func (h *tcFlightHarness) flight() *flightProcess {
 }
 func (h *tcFlightHarness) snapshot() [32]byte {
 	h.t.Helper()
-	raw, err := os.ReadFile(h.state)
+	raw, err := exec.Command(h.runner, h.vector, h.state, "inspect").Output()
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -345,14 +349,19 @@ func (h *tcFlightHarness) unchanged(before [32]byte) {
 }
 func (h *tcFlightHarness) observe(r flightReply) {
 	h.t.Helper()
-	h.post("/api/v1/flight-status:observe", testDataToken(), map[string]any{"format_version": 1, "profile_digest": r.ProfileDigest, "self_test": "PASSED", "crypto_backend": "SOFTWARE", "current_spi": r.CurrentSPI, "next_spi": r.NextSPI, "recovery_spi": r.RecoverySPI, "security_epoch": r.Epoch, "root_version": r.RootVersion, "pending_root_present": r.Pending, "receive_count": r.ReceiveCount}, http.StatusNoContent)
+	h.post("/api/v1/flight-status:observe", testDataToken(), map[string]any{"format_version": 2, "profile_digest": r.ProfileDigest, "self_test": "PASSED", "crypto_backend": "SOFTWARE", "current_spi": r.CurrentSPI, "next_spi": r.NextSPI, "recovery_spi": r.RecoverySPI, "security_epoch": r.Epoch, "root_version": r.RootVersion, "pending_root_present": r.Pending, "receive_count": r.ReceiveCount, "current_auth_used": r.CurrentAuthUsed, "next_auth_used": r.NextAuthUsed, "reception_paused": r.Paused}, http.StatusNoContent)
 	h.restartGround()
 	saved, err := h.store.ReadFlightSecurityStatus(context.Background(), "tenant-1")
 	if err != nil || saved.CurrentSPI != r.CurrentSPI || saved.SecurityEpoch != r.Epoch || saved.RootVersion != r.RootVersion || saved.PendingRootPresent != r.Pending {
 		h.t.Fatalf("ground observation did not preserve flight state: %v", err)
 	}
 }
-func wireIV(frame []byte) uint32 { return binary.BigEndian.Uint32(frame[7:11]) }
+func wireIV(frame []byte) uint32 {
+	if frame[5]>>6 == 3 {
+		return binary.BigEndian.Uint32(frame[7:11])
+	}
+	return uint32(binary.BigEndian.Uint16(frame[5:7]) & 0x3fff)
+}
 func rewriteFECF(frame []byte) {
 	binary.BigEndian.PutUint16(frame[len(frame)-2:], tcCRC(frame[:len(frame)-2]))
 }

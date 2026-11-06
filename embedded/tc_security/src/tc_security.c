@@ -1,7 +1,6 @@
 #include "context_private.h"
 
 #include "gcm.h"
-#include "hctr.h"
 #include "next_validation.h"
 #include "sm4.h"
 #include "selftest.h"
@@ -142,19 +141,6 @@ static int replay_next_hardened(const tcsec_replay_state_t *state,
     return 0;
 }
 
-static void build_hctr_tweak(const uint8_t prefix[TCSEC_NONCE_PREFIX_LENGTH],
-                             uint16_t spi, uint32_t iv_counter,
-                             uint8_t tweak[TCSEC_HCTR_TWEAK_LENGTH]) {
-    memcpy(tweak, prefix, TCSEC_NONCE_PREFIX_LENGTH);
-    tweak[6] = (uint8_t)(spi >> 8);
-    tweak[7] = (uint8_t)spi;
-    tweak[8] = (uint8_t)(iv_counter >> 24);
-    tweak[9] = (uint8_t)(iv_counter >> 16);
-    tweak[10] = (uint8_t)(iv_counter >> 8);
-    tweak[11] = (uint8_t)iv_counter;
-    memset(&tweak[12], 0, 4u);
-}
-
 static void build_gcm_nonce(const uint8_t prefix[TCSEC_NONCE_PREFIX_LENGTH],
                             uint16_t spi, uint32_t iv_counter,
                             uint8_t nonce[TCSEC_GCM_NONCE_LENGTH]) {
@@ -180,7 +166,8 @@ static int parse_root_prepare(const uint8_t *plaintext, size_t length,
     if (transaction->transaction_id == 0u || transaction->expected_current_root_version == 0u ||
         transaction->new_root_version <= transaction->expected_current_root_version ||
         transaction->next_security_epoch == 0u ||
-        read_u16_be(&plaintext[23]) != TCSEC_SUITE_SM4_HCTR) return 0;
+        read_u16_be(&plaintext[23]) != TCSEC_SUITE_SM4_GCM_32)
+        return 0;
     memcpy(transaction->new_operational_root, &plaintext[TCSEC_ROOT_PREPARE_FIXED_LENGTH], TCSEC_ROOT_KEY_LENGTH);
     return 1;
 }
@@ -220,24 +207,27 @@ static int config_valid(const tcsec_config_t *config) {
         digest |= config->profile_digest[index];
     ordinary = &config->ordinary;
     recovery = &config->recovery;
-    return digest != 0u && ordinary->spacecraft_id <= 0x03ffu &&
-           ordinary->root_version != 0u && ordinary->current_epoch != 0u &&
-           ordinary->current_epoch != UINT32_MAX && recovery->root_version != 0u &&
-           next_spi(ordinary->current_spi) != recovery->spi &&
-           ordinary->current_spi != recovery->spi && replay_state_valid(&ordinary->replay) &&
-           replay_state_valid(&recovery->replay) && pending_config_valid(ordinary);
+    return digest != 0u && ordinary->spacecraft_id <= 0x03ffu && ordinary->root_version != 0u &&
+           ordinary->current_epoch != 0u && ordinary->current_epoch != UINT32_MAX &&
+           recovery->root_version != 0u &&
+           ordinary->current_auth_used <= TCSEC_ORDINARY_AUTH_LIMIT &&
+           ordinary->next_auth_used <= TCSEC_ORDINARY_AUTH_LIMIT &&
+           (ordinary->current_auth_used & 1u) == 0u && (ordinary->next_auth_used & 1u) == 0u &&
+           (ordinary->replay.seen == 0u || ordinary->current_auth_used >= 2u) &&
+           (ordinary->replay.seen == 0u ||
+            ordinary->replay.highest_iv <= TCSEC_ORDINARY_COUNTER_MAX) &&
+           replay_state_valid(&ordinary->replay) && replay_state_valid(&recovery->replay) &&
+           pending_config_valid(ordinary);
 }
 
-static int derive_ordinary_hardened(const uint8_t *root, size_t root_length,
-                                    uint16_t spacecraft_id,
-                                    tcsec_suite_t suite, uint16_t spi,
-                                    uint32_t security_epoch, uint32_t root_version,
-                                    uint8_t output[TCSEC_HCTR_WORKING_KEY_LENGTH]) {
-    int result = tcsec_derive_ordinary_key(root, root_length, spacecraft_id, suite, spi,
-                                           security_epoch, root_version, output,
-                                           TCSEC_HCTR_WORKING_KEY_LENGTH);
+static int derive_ordinary_hardened(const uint8_t *root, size_t root_length, uint16_t spacecraft_id,
+                                    tcsec_suite_t suite, uint16_t spi, uint32_t security_epoch,
+                                    uint32_t root_version, uint8_t output[TCSEC_SM4_KEY_LENGTH]) {
+    int result =
+        tcsec_derive_ordinary_key(root, root_length, spacecraft_id, suite, spi, security_epoch,
+                                  root_version, output, TCSEC_SM4_KEY_LENGTH);
     if (result == 0) {
-        uint8_t repeated[TCSEC_HCTR_WORKING_KEY_LENGTH];
+        uint8_t repeated[TCSEC_SM4_KEY_LENGTH];
         int repeated_result = tcsec_derive_ordinary_key(
             root, root_length, spacecraft_id, suite, spi, security_epoch, root_version,
             repeated, sizeof(repeated));
@@ -245,7 +235,8 @@ static int derive_ordinary_hardened(const uint8_t *root, size_t root_length,
             result = -1;
         zeroize(repeated, sizeof(repeated));
     }
-    if (result != 0) zeroize(output, TCSEC_HCTR_WORKING_KEY_LENGTH);
+    if (result != 0)
+        zeroize(output, TCSEC_SM4_KEY_LENGTH);
     return result;
 }
 
@@ -284,6 +275,8 @@ static tcsec_status_t configure(tcsec_private_context_t *context, const tcsec_co
     context->current_spi = ordinary->current_spi;
     memcpy(context->ordinary_nonce_prefix, ordinary->nonce_prefix, TCSEC_NONCE_PREFIX_LENGTH);
     context->current_replay = ordinary->replay;
+    context->current_auth_used = ordinary->current_auth_used;
+    context->next_auth_used = ordinary->next_auth_used;
     if (ordinary->pending_root_present != 0u) {
         memcpy(context->pending_root, ordinary->pending_operational_root,
                TCSEC_ROOT_KEY_LENGTH);
@@ -296,22 +289,20 @@ static tcsec_status_t configure(tcsec_private_context_t *context, const tcsec_co
     context->recovery_replay = recovery->replay;
     context->callbacks = *callbacks;
     context->self_test_state = TCSEC_SELF_TEST_PASSED;
-    if (derive_ordinary_hardened(
-            context->current_root, TCSEC_ROOT_KEY_LENGTH,
-            context->spacecraft_id, TCSEC_SUITE_SM4_HCTR, context->current_spi,
-            context->current_epoch, context->current_root_version, context->current_key) != 0 ||
+    if (derive_ordinary_hardened(context->current_root, TCSEC_ROOT_KEY_LENGTH,
+                                 context->spacecraft_id, TCSEC_SUITE_SM4_GCM_32,
+                                 context->current_spi, context->current_epoch,
+                                 context->current_root_version, context->current_key) != 0 ||
         derive_ordinary_hardened(
             context->pending_root_present != 0u ? context->pending_root : context->current_root,
-            TCSEC_ROOT_KEY_LENGTH,
-            context->spacecraft_id, TCSEC_SUITE_SM4_HCTR, next_spi(context->current_spi),
-            context->current_epoch + 1u,
-            context->pending_root_present != 0u
-                ? context->pending_root_version : context->current_root_version,
+            TCSEC_ROOT_KEY_LENGTH, context->spacecraft_id, TCSEC_SUITE_SM4_GCM_32,
+            next_spi(context->current_spi), context->current_epoch + 1u,
+            context->pending_root_present != 0u ? context->pending_root_version
+                                                : context->current_root_version,
             context->next_key) != 0 ||
-        derive_recovery_hardened(
-            recovery->recovery_root, TCSEC_ROOT_KEY_LENGTH, context->spacecraft_id,
-            TCSEC_SUITE_SM4_GCM, context->recovery_spi, recovery->root_version,
-            context->recovery_key) != 0)
+        derive_recovery_hardened(recovery->recovery_root, TCSEC_ROOT_KEY_LENGTH,
+                                 context->spacecraft_id, TCSEC_SUITE_SM4_GCM, context->recovery_spi,
+                                 recovery->root_version, context->recovery_key) != 0)
         return TCSEC_KEY_DERIVATION_FAILED;
     context->initialized = 1u;
     context_seal(context);
@@ -408,12 +399,15 @@ static tcsec_status_t receive_ordinary(tcsec_private_context_t *context, const u
                                        uint8_t candidate_next, uint8_t *plaintext,
                                        size_t plaintext_capacity, tcsec_result_t *result) {
     const uint8_t *key = candidate_next != 0u ? context->next_key : context->current_key;
-    const tcsec_suite_t suite = TCSEC_SUITE_SM4_HCTR;
+    const tcsec_suite_t suite = TCSEC_SUITE_SM4_GCM_32;
     tcsec_replay_state_t *state = candidate_next != 0u ? &context->next_replay : &context->current_replay;
     tcsec_replay_state_t next_replay;
     tcsec_commit_t commit;
     tcsec_commit_result_t commit_result;
-    uint8_t tweak[TCSEC_HCTR_TWEAK_LENGTH];
+    uint8_t nonce[TCSEC_GCM_NONCE_LENGTH];
+    uint8_t repeated[TCSEC_MAX_FRAME_LENGTH];
+    uint32_t *auth_used =
+        candidate_next != 0u ? &context->next_auth_used : &context->current_auth_used;
     size_t protected_length = frame_length - TCSEC_PRIMARY_HEADER_LENGTH -
                               TCSEC_SECURITY_HEADER_LENGTH - TCSEC_FECF_LENGTH;
     int replay_result = replay_check_hardened(state, iv_counter, TCSEC_MAX_FORWARD_JUMP);
@@ -421,18 +415,43 @@ static tcsec_status_t receive_ordinary(tcsec_private_context_t *context, const u
     if (replay_result == -1) return TCSEC_REPLAY_REJECTED;
     if (replay_result == -2) return TCSEC_IV_FORWARD_JUMP_REJECTED;
     if (replay_result == -3) return TCSEC_STATE_INTEGRITY_FAILED;
-    if (plaintext == NULL || protected_length < TCSEC_HCTR_TWEAK_LENGTH)
+    if (plaintext == NULL || protected_length < 16u)
         return TCSEC_FRAME_LENGTH_INVALID;
     if (protected_length > plaintext_capacity) return TCSEC_OUTPUT_TOO_SMALL;
-    build_hctr_tweak(context->ordinary_nonce_prefix, spi, iv_counter, tweak);
-    if (tcsec_sm4_hctr_decrypt(key, tweak,
-                              &frame[TCSEC_PRIMARY_HEADER_LENGTH + TCSEC_SECURITY_HEADER_LENGTH],
-                              plaintext, protected_length) != 0) {
-        zeroize(tweak, sizeof(tweak));
-        zeroize(plaintext, protected_length);
-        return TCSEC_INVALID_CONFIGURATION;
+    if (*auth_used > TCSEC_ORDINARY_AUTH_LIMIT - TCSEC_ORDINARY_VERIFY_COST)
+        return TCSEC_AUTH_BUDGET_EXHAUSTED;
+    memset(&commit, 0, sizeof(commit));
+    commit.kind = TCSEC_COMMIT_AUTH_BUDGET;
+    commit.spi = spi;
+    commit.current_epoch = context->current_epoch + (candidate_next != 0u ? 1u : 0u);
+    commit.root_version = candidate_next != 0u && context->pending_root_present != 0u
+                              ? context->pending_root_version
+                              : context->current_root_version;
+    commit.auth_used = *auth_used + TCSEC_ORDINARY_VERIFY_COST;
+    const uint32_t reserved_auth_used = commit.auth_used;
+    const uint32_t reservation_integrity = crc32c(&commit, sizeof(commit));
+    commit_result = context->callbacks.commit_state(context->callbacks.user_context, &commit);
+    if (!context_valid(context) || crc32c(&commit, sizeof(commit)) != reservation_integrity)
+        return TCSEC_STATE_INTEGRITY_FAILED;
+    if (commit_result != TCSEC_COMMIT_NEW)
+        return commit_status(commit_result);
+    *auth_used = reserved_auth_used;
+    context_seal(context);
+    build_gcm_nonce(context->ordinary_nonce_prefix, spi, iv_counter, nonce);
+    if (tcsec_gcm_open_short(key, nonce, frame, 7u, &frame[11], protected_length, &frame[7],
+                             plaintext) != 0) {
+        zeroize(nonce, sizeof(nonce));
+        return TCSEC_AUTHENTICATION_FAILED;
     }
-    zeroize(tweak, sizeof(tweak));
+    if (tcsec_gcm_open_short(key, nonce, frame, 7u, &frame[11], protected_length, &frame[7],
+                             repeated) != 0 ||
+        memcmp(plaintext, repeated, protected_length) != 0) {
+        zeroize(nonce, sizeof(nonce));
+        zeroize(repeated, sizeof(repeated));
+        return TCSEC_STATE_INTEGRITY_FAILED;
+    }
+    zeroize(nonce, sizeof(nonce));
+    zeroize(repeated, sizeof(repeated));
     plaintext_integrity = crc32c(plaintext, protected_length);
     if (candidate_next != 0u) {
         int plaintext_valid = tcsec_next_plaintext_allowed(
@@ -457,18 +476,15 @@ static tcsec_status_t receive_ordinary(tcsec_private_context_t *context, const u
     commit.current_epoch = context->current_epoch + (candidate_next != 0u ? 1u : 0u);
     commit.root_version = candidate_next != 0u && context->pending_root_present != 0u
                               ? context->pending_root_version : context->current_root_version;
+    commit.auth_used = *auth_used;
     if (candidate_next != 0u) {
         const uint8_t *future_root = context->pending_root_present != 0u
                                          ? context->pending_root : context->current_root;
         uint32_t future_root_version = commit.root_version;
-        uint8_t future_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+        uint8_t future_key[TCSEC_SM4_KEY_LENGTH];
         if (context->current_epoch >= UINT32_MAX - 1u) {
             zeroize(plaintext, protected_length);
             return TCSEC_EPOCH_EXHAUSTED;
-        }
-        if (next_spi(next_spi(context->current_spi)) == context->recovery_spi) {
-            zeroize(plaintext, protected_length);
-            return TCSEC_SPI_COLLISION;
         }
         if (derive_ordinary_hardened(
                 future_root, TCSEC_ROOT_KEY_LENGTH, context->spacecraft_id, suite,
@@ -506,6 +522,8 @@ static tcsec_status_t receive_ordinary(tcsec_private_context_t *context, const u
         context->current_epoch++;
         context->current_spi = next_spi(context->current_spi);
         context->current_replay = next_replay;
+        context->current_auth_used = context->next_auth_used;
+        context->next_auth_used = 0u;
         memset(&context->next_replay, 0, sizeof(context->next_replay));
         zeroize(context->pending_root, sizeof(context->pending_root));
         context->pending_root_version = 0u;
@@ -550,7 +568,7 @@ static tcsec_status_t receive_root_prepare(tcsec_private_context_t *context, con
     uint8_t plaintext[TCSEC_ROOT_PREPARE_SM4_LENGTH];
     uint8_t repeated_plaintext[TCSEC_ROOT_PREPARE_SM4_LENGTH];
     uint8_t nonce[TCSEC_GCM_NONCE_LENGTH];
-    uint8_t candidate_key[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t candidate_key[TCSEC_SM4_KEY_LENGTH];
     tcsec_root_prepare_t transaction;
     tcsec_replay_state_t next_replay;
     tcsec_commit_t commit;
@@ -583,12 +601,10 @@ static tcsec_status_t receive_root_prepare(tcsec_private_context_t *context, con
     }
     zeroize(repeated_plaintext, sizeof(repeated_plaintext));
     zeroize(nonce, sizeof(nonce));
-    if (context->current_epoch >= UINT32_MAX - 1u ||
-        next_spi(next_spi(context->current_spi)) == context->recovery_spi) {
+    if (context->current_epoch >= UINT32_MAX - 1u) {
         zeroize(plaintext, sizeof(plaintext));
         zeroize(&transaction, sizeof(transaction));
-        return context->current_epoch >= UINT32_MAX - 1u
-                   ? TCSEC_EPOCH_EXHAUSTED : TCSEC_SPI_COLLISION;
+        return TCSEC_EPOCH_EXHAUSTED;
     }
     if (!parse_root_prepare(plaintext, ciphertext_length, &transaction) ||
         transaction.expected_current_root_version != context->current_root_version ||
@@ -607,12 +623,10 @@ static tcsec_status_t receive_root_prepare(tcsec_private_context_t *context, con
         zeroize(&transaction, sizeof(transaction));
         return TCSEC_ROOT_PREPARE_REJECTED;
     }
-    if (derive_ordinary_hardened(
-            transaction.new_operational_root, TCSEC_ROOT_KEY_LENGTH,
-            context->spacecraft_id,
-            TCSEC_SUITE_SM4_HCTR, transaction.next_spi,
-            transaction.next_security_epoch, transaction.new_root_version,
-            candidate_key) != 0) {
+    if (derive_ordinary_hardened(transaction.new_operational_root, TCSEC_ROOT_KEY_LENGTH,
+                                 context->spacecraft_id, TCSEC_SUITE_SM4_GCM_32,
+                                 transaction.next_spi, transaction.next_security_epoch,
+                                 transaction.new_root_version, candidate_key) != 0) {
         zeroize(plaintext, sizeof(plaintext));
         zeroize(&transaction, sizeof(transaction));
         return TCSEC_KEY_DERIVATION_FAILED;
@@ -645,6 +659,8 @@ static tcsec_status_t receive_root_prepare(tcsec_private_context_t *context, con
         zeroize(&transaction, sizeof(transaction));
         return commit_status(commit_result);
     }
+    if (context->pending_root_present == 0u)
+        context->next_auth_used = 0u;
     memcpy(context->pending_root, transaction.new_operational_root,
            TCSEC_ROOT_KEY_LENGTH);
     context->pending_root_version = transaction.new_root_version;
@@ -665,8 +681,8 @@ static tcsec_status_t receive_root_prepare(tcsec_private_context_t *context, con
 static tcsec_status_t core_receive(tcsec_private_context_t *context, const uint8_t *frame,
                              size_t frame_length, uint8_t *plaintext,
                              size_t plaintext_capacity, tcsec_result_t *result) {
-    uint16_t spi;
-    uint32_t iv_counter;
+    uint16_t spi = 0u;
+    uint32_t iv_counter = 0u;
     tcsec_status_t status;
     uint64_t start_time = 0u;
     if (context_locked(context)) return TCSEC_SELF_TEST_FAILED;
@@ -692,18 +708,30 @@ static tcsec_status_t core_receive(tcsec_private_context_t *context, const uint8
         status = TCSEC_FECF_INVALID;
         goto finish;
     }
-    spi = read_u16_be(&frame[TCSEC_PRIMARY_HEADER_LENGTH]);
-    iv_counter = read_u32_be(&frame[TCSEC_PRIMARY_HEADER_LENGTH + 2u]);
-    if (spi == context->current_spi) {
-        status = receive_ordinary(context, frame, frame_length, spi, iv_counter, 0u,
-                                  plaintext, plaintext_capacity, result);
-    } else if (spi == next_spi(context->current_spi)) {
-        status = receive_ordinary(context, frame, frame_length, spi, iv_counter, 1u,
-                                  plaintext, plaintext_capacity, result);
-    } else if (spi == context->recovery_spi) {
-        status = receive_root_prepare(context, frame, frame_length, iv_counter, result);
-    } else {
-        status = TCSEC_ASSOCIATION_NOT_FOUND;
+    {
+        uint16_t control = read_u16_be(&frame[5]);
+        uint8_t selector = (uint8_t)(control >> 14);
+        if (selector == 3u) {
+            if (control != TCSEC_RECOVERY_CONTROL)
+                status = TCSEC_FRAME_LENGTH_INVALID;
+            else {
+                spi = context->recovery_spi;
+                iv_counter = read_u32_be(&frame[7]);
+                status = receive_root_prepare(context, frame, frame_length, iv_counter, result);
+            }
+        } else {
+            iv_counter = control & TCSEC_ORDINARY_COUNTER_MAX;
+            if (selector == context->current_epoch % 3u) {
+                spi = context->current_spi;
+                status = receive_ordinary(context, frame, frame_length, spi, iv_counter, 0u,
+                                          plaintext, plaintext_capacity, result);
+            } else if (selector == (context->current_epoch + 1u) % 3u) {
+                spi = next_spi(context->current_spi);
+                status = receive_ordinary(context, frame, frame_length, spi, iv_counter, 1u,
+                                          plaintext, plaintext_capacity, result);
+            } else
+                status = TCSEC_ASSOCIATION_NOT_FOUND;
+        }
     }
     if (status == TCSEC_OK || status == TCSEC_EPOCH_PROMOTED ||
         status == TCSEC_ROOT_PREPARED || status == TCSEC_ROOT_ALREADY_PREPARED) {
@@ -751,6 +779,8 @@ static tcsec_status_t core_get_runtime_status(const tcsec_private_context_t *con
     status->security_epoch = context->current_epoch;
     status->root_version = context->current_root_version;
     status->pending_root_present = context->pending_root_present;
+    status->current_auth_used = context->current_auth_used;
+    status->next_auth_used = context->next_auth_used;
     status->reception_paused = context->reception_paused;
     status->last_status = context->last_status;
     status->receive_count = context->receive_count;

@@ -1,5 +1,6 @@
 # 星载密码运行闭环
 
+普通 TC、Recovery、KDF、短标签预算及当前版本以 [TC GCM 帧格式](TC_GCM_PROFILE.md) 为准。
 本文定义当前版本已经实现的最小运行闭环。AOS 完整帧格式仍未冻结；本文只固定状态语义和内部 API，不规定状态在 AOS 数据域中的封装位置。
 
 ```mermaid
@@ -8,7 +9,7 @@ flowchart LR
     P --> N["星务受控首装"]
     N --> F["星务持久化服务"]
     F --> I["tcsec_init\n自检并通过回调加载状态"]
-    I -->|pass| R["TC receive\nHCTR / Recovery GCM"]
+    I -->|pass| R["TC receive\nGCM32 / Recovery GCM"]
     I -->|自检失败| L["SELF_TEST_LOCKED\n拒绝收帧和复位"]
     I -->|加载失败| E["保持停收\n由星务处置"]
     R --> S["tcsec_get_runtime_status\n脱敏状态"]
@@ -28,7 +29,7 @@ flowchart LR
 ## 密码模块内部完成
 
 - 首个 Next 帧解密后的帧头、包头和任务规则判定，成功后才原子提交切换；
-- 实际选中 SM4 后端的 SM4、CMAC-KDF、HCTR、GCM 启动 KAT；
+- 实际选中 SM4 后端的 SM4、CMAC-KDF、GCM32、GCM 启动 KAT；
 - KAT 失败锁定，`receive/reset` 均不可绕过；
 - Current/Next 自动一致化、Recovery GCM Root Prepare、replay 与最大前跳；
 - Mission Profile 摘要运行绑定；`reset` 不允许静默切换摘要；
@@ -42,7 +43,7 @@ flowchart LR
 - self-test 与后端；
 - Current SPI、Next SPI、Recovery SPI；
 - security epoch、root version；
-- 周期超限与时钟异常。
+- Current/Next 已耗验证额度、停收状态、周期超限与时钟异常。
 
 任何不一致进入 `MISMATCH/DEGRADED` 并在英文运维面展示。状态接口不包含 Root、working key、nonce prefix 或 replay bitmap。
 
@@ -54,56 +55,15 @@ flowchart LR
 2. 星载 C 行覆盖率不低于 95%，地面 TC Go 语句覆盖率不低于 95%；
 3. ARMv7 hard-float/NEON 交叉编译；
 4. QEMU 执行完整星载 TC/Recovery 测试；
-5. 128 组 HCTR 加解密与 128 组 KDF 的 Go → x86 C → ARMv7 NEON 三路差分；
+5. 128 组 GCM32 认证解密与 128 组 KDF 的 Go → x86 C → ARMv7 NEON 三路差分；
 6. 输出 `build/release/release-evidence.json`。
 
 真实板卡 WCET、物理 NVM 掉电、EDAC/MPU/watchdog 和侧信道测试仍属于发布验收，不由 QEMU 证据替代。
 
-## 2026 年 11 月 5 日接口可靠性回归
+## 当前版本验证记录
 
-已通过远程完整 make release-gate，并核对门禁源码与本地源码 SHA-256 一致。
-C 行覆盖率 97.53%，地面 TC Go 95.00%，权限 Go 96.20%，AES 下行 C 与 Go 均为 100%。
-包括 Go race 与漏洞检查、ASan/UBSan、4096 次 C smoke fuzz、三副本逐字节中断模型、
-链接故障注入、实际 HTTP/SQLite 到独立 C 进程的持久化恢复、ARMv7/QEMU
-及仅公开头文件加静态库的链接检查。
+远程完整 make release-gate 已通过。星载 C 行覆盖率 96.30%，地面 TC Go 语句覆盖率 95.20%，权限 Go 96.20%，下行 C 与 Go 均为 100%。59 个登记 TC 进程场景在优化和 ASan/UBSan 构建中共执行 118 次，无失败和跳过；ARMv7/QEMU 通过 256 条 Go/C 差分记录。完整证据位于 build/release/release-evidence.json。
 
-正式 Next 任务规则及样例、最终板卡 ABI、可信提交锚与真实三副本 BSP、
-物理掉电及寿命验收仍是飞行交付条件。主机测试使用公开测试根与测试策略，
-不能作为这些任务验收项目已经完成的证据。
+覆盖预算持久预留、失败后复位、预留与业务提交的中断恢复、同一换根准备重试保留预算、普通预算耗尽后的 Recovery，以及连续同根工作密钥轮换。源码、公开头及两份接口手册的哈希与发布证据绑定。
 
-### 同步回调清理责任回归
-
-该次接口版本为 3，注册两个必需存储回调与一个可选计时回调。存储回调在
-返回前清理自有临时数据，直接调用测试覆盖成功、失败、拒绝和确认丢失，
-同时核对加载输出和持久状态。远程完整 release gate 通过，当前 C 覆盖率
-97.51%，地面 TC Go 95.00%，权限 Go 96.20%，AES 下行 C 与 Go 均为 100%。
-
-### 对外字段精简与头文件引用回归
-
-接口版本为 4，移除普通、恢复和待生效根配置、换根准备、提交记录及接收结果中
-共 10 个固定套件或固定根长度字段。固定算法由模块确定，换根帧中的套件字段仍
-严格检查。对外头文件全文写入 Markdown 和 Word 附录 C，完整门禁先逐字核对
-两份引用；引用缺失、重复或过期时拒绝通过。
-
-远程完整 `make release-gate` 通过，C 行覆盖率 97.41%，地面 TC Go 95.00%，
-权限 Go 96.20%，AES 下行 C 与 Go 均为 100%。已核对源码清单、公开头文件、
-Markdown 与 Word 的 SHA-256 均与本地一致。认证后套件字段故障注入、三副本
-逐字节中断、HTTP/SQLite 到 C 进程恢复、ARMv7/QEMU 和公开头文件/静态库
-交付检查通过。手册 12 段 C 示例通过当前公开头文件的严格编译检查。
-
-### 遥控星地进程异常场景回归
-
-TC 进程门禁扩充为 51 个登记场景，优化版与 ASan/UBSan 版各通过 51 个，
-共 102 次场景执行，零失败、零跳过。覆盖畸形帧、重放及乱序、地面重开、
-连续存储失败、状态丢失、Recovery 认证拒绝、Next 校验拒绝，以及普通重放、
-换根准备、提升三个阶段的提交前、半写、提交后进程终止和重启重试。
-换根使用不同的新测试根，并核对 Pending 恢复、旧 SPI 退役、后续普通帧
-和诊断经 HTTP 回传、数据库重开后的星地状态。
-
-完整远程 `make release-gate` 通过：星载 C 97.41%，地面 TC Go 95.00%，
-权限 Go 96.20%。场景清单、优化/加固报告与源码通过 SHA-256 绑定。
-本次仅调整测试、测试工具和发布证据，星务公开接口、回调及持久化合同不变，
-接口手册两种格式无需改动；公开头文件引用一致性检查通过。
-
-该证据使用公开测试根来源、测试 Next 规则及文件存储。物理 TPM、真实 NVM
-断电、正式任务规则与星务业务执行去重仍须在目标环境验收。
+正式任务规则及样例、目标板 ABI、可信提交锚和三副本 BSP、物理掉电、写入寿命与 WCET 仍需对应环境验收。

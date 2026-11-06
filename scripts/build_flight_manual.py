@@ -18,6 +18,7 @@ from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.shared import Inches, Pt, RGBColor
 
 source, output = map(Path, sys.argv[1:])
+manual_kind = {"FLIGHT_INTERFACE_MANUAL.md": "flight", "GROUND_TC_INTERFACE_MANUAL.md": "ground"}[source.name]
 doc = Document()
 section = doc.sections[0]
 section.page_width = Inches(8.5)
@@ -71,8 +72,8 @@ footer = section.footer.paragraphs[0]
 footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 field = xml('fldSimple', instr='PAGE')
 footer._p.append(field)
-doc.core_properties.title = '星务端密码模块接口手册'
-doc.core_properties.subject = '星载 C 密码模块接入与调用约定'
+doc.core_properties.title = '星务端密码模块接口手册' if manual_kind == 'flight' else '地面遥控密码模块接口手册'
+doc.core_properties.subject = '星载 C 密码模块接入与调用约定' if manual_kind == 'flight' else '地面遥控 HTTP 接口与受控运维调用约定'
 doc.core_properties.author = ''
 
 token = re.compile(r'(\*\*.+?\*\*|`[^`]+`|\[[^\]]+\]\([^)]+\))')
@@ -114,6 +115,8 @@ def table(data):
     if n == 3:
         if rows[0][0] == '功能':
             fractions = (.17, .395, .435)
+        elif rows[0][0] == '回调':
+            fractions = (.26, .12, .62)
         elif rows[0][0] == 'TC 错误码':
             fractions = (.40, .33, .27)
         elif rows[0][0] == '`commit->kind`':
@@ -162,7 +165,7 @@ def table(data):
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 
-work = Path(__file__).resolve().parents[1] / ".cache" / "flight-manual-assets"
+work = Path(__file__).resolve().parents[1] / ".cache" / (manual_kind + "-manual-assets")
 work.mkdir(parents=True, exist_ok=True)
 font_dir = Path("C:/Windows/Fonts")
 
@@ -215,7 +218,17 @@ def sequence_image(lines, number):
         elif line.startswith(("opt ", "alt ", "else ")):
             mode, message = line.split(" ",1)
             if mode != "else":
-                end = body.index("end", i+1)
+                depth = 1
+                end = None
+                for j in range(i + 1, len(body)):
+                    if body[j].startswith(("opt ", "alt ")):
+                        depth += 1
+                    elif body[j] == "end":
+                        depth -= 1
+                        if depth == 0:
+                            end = j
+                            break
+                assert end is not None, "unclosed sequence branch"
                 draw.rectangle((12,y-30,width-12,first_y+end*pitch-26), outline="black", width=2)
             else:
                 dashed(12,width-12,y-30)
@@ -304,7 +317,7 @@ while i < len(lines):
         if i+2 < len(lines) and not lines[i+1] and lines[i+2].startswith(chr(96)*3):
             paragraph.paragraph_format.keep_with_next = True
     i += 1
-assert count == 11
+assert count == (11 if manual_kind == "flight" else 4)
 assert len(doc.tables) == len(re.findall(r"(?m)^\| ---","\n".join(lines)))
 doc.save(output)
 

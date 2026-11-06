@@ -8,11 +8,12 @@
 extern "C" {
 #endif
 
-#define TCSEC_INTERFACE_VERSION 4u
+#define TCSEC_INTERFACE_VERSION 5u
 #define TCSEC_MAX_FRAME_LENGTH 1024u
 #define TCSEC_ROOT_KEY_LENGTH 16u
 #define TCSEC_NONCE_PREFIX_LENGTH 6u
 #define TCSEC_PROFILE_DIGEST_LENGTH 32u
+#define TCSEC_ORDINARY_AUTH_LIMIT 2048u
 
 typedef enum {
     TCSEC_OK = 0,
@@ -45,9 +46,9 @@ typedef enum {
     TCSEC_STATE_COMMIT_REJECTED,
     TCSEC_CALLBACK_RESULT_INVALID,
     TCSEC_EPOCH_EXHAUSTED,
-    TCSEC_SPI_COLLISION,
     TCSEC_KEY_DERIVATION_FAILED,
-    TCSEC_PROFILE_MISMATCH
+    TCSEC_PROFILE_MISMATCH,
+    TCSEC_AUTH_BUDGET_EXHAUSTED
 } tcsec_status_t;
 
 typedef enum {
@@ -70,8 +71,11 @@ typedef struct {
     uint16_t current_spi;
     uint8_t nonce_prefix[TCSEC_NONCE_PREFIX_LENGTH];
     tcsec_replay_state_t replay;
-    /* Restored durable Root Prepare state. A zero pending_root_present requires
-     * every other pending_* field to be zero. */
+    /* Durable reservation totals per working key, even values in 0..2048.
+     * Reserve two before ordinary GCM; failures and resets never refund them. */
+    uint32_t current_auth_used;
+    uint32_t next_auth_used;
+    /* A zero pending_root_present requires every other pending_* field zero. */
     uint8_t pending_root_present;
     uint8_t pending_operational_root[TCSEC_ROOT_KEY_LENGTH];
     uint32_t pending_root_version;
@@ -104,7 +108,8 @@ typedef struct {
 typedef enum {
     TCSEC_COMMIT_ORDINARY_REPLAY = 1,
     TCSEC_COMMIT_EPOCH_PROMOTION = 2,
-    TCSEC_COMMIT_ROOT_PREPARE = 3
+    TCSEC_COMMIT_ROOT_PREPARE = 3,
+    TCSEC_COMMIT_AUTH_BUDGET = 4
 } tcsec_commit_kind_t;
 
 typedef struct {
@@ -113,6 +118,9 @@ typedef struct {
     tcsec_replay_state_t replay;
     uint32_t current_epoch;
     uint32_t root_version;
+    /* AUTH_BUDGET: persisted old total + 2; ordinary replay/promotion:
+     * already reserved total for the selected key; ROOT_PREPARE: zero. */
+    uint32_t auth_used;
     const tcsec_root_prepare_t *root_prepare;
 } tcsec_commit_t;
 
@@ -128,7 +136,10 @@ typedef enum {
  * only after verifying it. The core has no storage dependency. The callback
  * must not execute or enqueue ordinary plaintext. root_prepare is non-NULL
  * only for ROOT_PREPARE. The callback must clear its own temporary secrets
- * before returning on every success and failure path. */
+ * before returning on every success and failure path. AUTH_BUDGET updates only
+ * the selected key's durable quota, never replay/root state. Promotion moves
+ * next_auth_used to current_auth_used and clears future NEXT quota. A new
+ * Pending root resets NEXT quota; a retry of that same root never resets it. */
 typedef tcsec_commit_result_t (*tcsec_state_commit_fn)(void *user_context,
                                                        const tcsec_commit_t *commit);
 
@@ -175,6 +186,8 @@ typedef struct {
     uint32_t security_epoch;
     uint32_t root_version;
     uint8_t pending_root_present;
+    uint32_t current_auth_used;
+    uint32_t next_auth_used;
     uint8_t reception_paused;
     tcsec_status_t last_status;
     uint64_t receive_count;

@@ -51,6 +51,9 @@ type observeFlightStatusRequest struct {
 	MaxReceiveUS            uint64                       `json:"max_receive_us"`
 	CycleLimitExceededCount uint64                       `json:"cycle_limit_exceeded_count"`
 	ClockAnomalyCount       uint64                       `json:"clock_anomaly_count"`
+	CurrentAuthUsed         uint32                       `json:"current_auth_used"`
+	NextAuthUsed            uint32                       `json:"next_auth_used"`
+	ReceptionPaused         bool                         `json:"reception_paused"`
 }
 
 func (h *Handler) observeFlightStatus(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +76,7 @@ func (h *Handler) observeFlightStatus(w http.ResponseWriter, r *http.Request) {
 		RecoverySPI: request.RecoverySPI, SecurityEpoch: request.SecurityEpoch, RootVersion: request.RootVersion,
 		PendingRootPresent: request.PendingRootPresent, ReceiveCount: request.ReceiveCount,
 		LastReceiveUS: request.LastReceiveUS, MaxReceiveUS: request.MaxReceiveUS,
-		CycleLimitExceededCount: request.CycleLimitExceededCount, ClockAnomalyCount: request.ClockAnomalyCount}
+		CycleLimitExceededCount: request.CycleLimitExceededCount, ClockAnomalyCount: request.ClockAnomalyCount, CurrentAuthUsed: request.CurrentAuthUsed, NextAuthUsed: request.NextAuthUsed, ReceptionPaused: request.ReceptionPaused}
 	copy(status.ProfileDigest[:], digest)
 	if err := h.service.ObserveFlightSecurityStatus(r.Context(), tenantID, status); err != nil {
 		writeProtocolError(w, err)

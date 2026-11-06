@@ -26,11 +26,11 @@
 
 | 用途 | 固定合同 | 安全属性 |
 | --- | --- | --- |
-| 普通 TC | SM4-HCTR，16 字节 tweak，无 Tag | 保密性、宽块扩散；不声明密码学认证 |
+| 普通 TC | SM4-GCM，12 字节 nonce，4 字节 Tag；每工作密钥最多 2048 次认证解密，认证前持久预留 | 保密、认证和持久重放保护，认证保障受 32 位标签限制 |
 | 软下行数据域 | AES-256-ECB，32 字节 key，880 字节/55 分组，无填充、IV、Tag | 保密性；不提供认证或抗重放 |
 | Recovery Root Prepare | SM4-GCM，12 字节 nonce，16 字节 Tag | 加密和认证 |
 | 工作密钥派生 | SP 800-108 Counter KDF，PRF=SM4-CMAC | 从随机 SM4 Root 做确定性域隔离派生 |
-| 普通 TC 工作材料 | 16 字节 SM4 key + 16 字节 HCTR hash key | 总安全强度不超过 128 位 Root |
+| 普通 TC 工作材料 | 单把 16 字节 SM4 key，Current/Next/Recovery 各一把，KDF 标签隔离 | 根为随机 128 位密钥 |
 | 星载状态保护 | live-context CRC32C/inverse、重复派生与比较、原子持久化回调 | 故障检测；CRC 不提供对主动攻击者的认证 |
 
 不允许通过测试参数临时启用旧 CTR/AES TC profile、空校验器、跳过 replay 或宽松帧解析。
@@ -104,10 +104,10 @@ expected_status, generator, generator_version, sha256
 - 空明文、空 AAD、非空 AAD、非分组整数倍明文；
 - Key、Nonce、AAD、Ciphertext、Tag 各自逐 bit 单点篡改均认证失败；
 - 错误 Tag 长度和 nonce 长度拒绝；
-- 认证失败输出长度为 0，输出缓冲区清零，replay/NVM 状态不推进；
+- 认证失败输出长度为 0，输出缓冲区清零，replay/根/代次不推进；普通验证预算已预留并保留；
 - 相同 key 下 nonce 不得重复；并发、重启和计数器边界测试必须证明该约束。
 
-固定独立 Oracle 为 `pyca/cryptography 49.0.0`（其捆绑 OpenSSL 4.0.1 后端）。门禁使用已提交的离线向量，不在测试时联网；重新生成时必须先验证固定版本确实支持 SM4、CMAC 与 SM4-GCM，能力或版本不符直接失败，不得静默跳过。RFC 8998 Appendix A.1 仍是 SM4-GCM 的规范锚点，独立库向量不能替代该规范向量。
+固定独立 Oracle 为 `pyca/cryptography 50.0.2`（其捆绑 OpenSSL 4.0.3 后端）。门禁使用已提交的离线向量，不在测试时联网；重新生成时必须先验证固定版本确实支持 SM4、CMAC 与 SM4-GCM，能力或版本不符直接失败，不得静默跳过。RFC 8998 Appendix A.1 仍是 SM4-GCM 的规范锚点，独立库向量不能替代该规范向量。
 
 ### 5.3 SM4-CMAC
 
@@ -134,38 +134,31 @@ K(i) = SM4-CMAC(
 
 必须验证：
 
-- 16 字节与 32 字节输出；32 字节输出必须执行两个 counter block；
+- 普通与恢复域各验证 16 字节输出，并严格编码 OutputLengthBits=128；
 - counter 从 1 开始，长度以 bit 和大端 32 位编码；
 - label/context 为空、过长或格式非法时失败关闭；
 - spacecraft、direction、suite、SPI、epoch、root version 任一字段变化都改变输出；
-- `TC-TRAFFIC` 与 `TC-RECOVERY-GCM` 域完全隔离；
+- `TC-GCM32-V1` 与 `TC-GCM128-RECOVERY-V1` 域完全隔离；
 - 地面 Go 与星载 C 逐字节一致；
 - 一个独立的 SP 800-108/CMAC 参考实现给出第三方结果；
 - 派生中间缓冲、CMAC Tag 和工作密钥在成功及错误路径均清零。
 
 当前输入是均匀随机 Root，因此不增加 HKDF Extract。若以后改为 DH/SM2 协商秘密，必须重新设计并测试 Extract/Expand，不能继续把原始共享秘密直接作为 CMAC key。
 
-### 5.5 SM4-HCTR
+### 5.5 普通 SM4-GCM 短标签与预算
 
-SM4-HCTR 是本项目定制组合，不属于 NIST ACVP 标准项目，也不能用 HCTR2、XTS 或 EME2 向量代替。测试必须固定并审查以下语义：
+执行 [TC GCM 帧格式](TC_GCM_PROFILE.md) 的固定 4 字节 Tag 合同，必须验证：
 
-- 分组密码是 SM4；
-- 工作材料前 16 字节为 SM4 key，后 16 字节为 universal-hash key；
-- tweak 恰为 16 字节；
-- 数据最小长度 16 字节；
-- polynomial/hash 字节序、约简多项式、长度编码、CTR 起点和 partial-block 处理不可配置。
+- 独立 OpenSSL 生成的完整 GCM 标签左侧 4 字节逐字节相符，普通与 Recovery 标签长度不可互换。
+- 明文长度 16、17、31、32、33、64、1011，最大密文加 AAD 不超过 1024 字节。
+- Key、nonce、主导头、控制字、密文、Tag 位翻转认证失败，输出清零。
+- 预算先持久预留 2 次才可调用认证解密；失败及中断均不返还，额度耗尽不调用 GCM。
+- Current 与 Next 预算独立，提升迁移预算，新根首次安装清空 Next 预算，同事务重试不清零。
+- 预算预留与业务提交各写入位置的半写、确认丢失、进程终止、复位重载和三副本恢复。
+- 地面 1024 帧上限及 90% 告警，Recovery 独立；并发与重启不重复分配 nonce。
+- 选择值每三代循环、内部 SPI 回绕、旧帧同选择值重现均不能冒充新工作密钥。
+- 真实进程验证失败预算累计、普通预算耗尽后的 Recovery、连续工作密钥轮换和确认前禁止继续推进。
 
-必须测试：
-
-- 16、17、31、32、33、典型长度和最大 TC 数据域；
-- 全零、全 `FF`、重复分组、递增字节；
-- key、hash key、tweak 和 plaintext 分别单 bit 变化；
-- 加解密回环、长度保持、原地/重叠缓冲区合同；
-- Go 与 C 对大量确定性随机样本逐字节一致；
-- 与产品源码无共享实现的简洁参考模型做差分测试；
-- 所有固定向量携带规范版本和生成器哈希。
-
-HCTR 测试只能证明实现一致，不能补足其缺少 Tag 的认证能力。首个 Next 帧在切换前必须通过内部明文校验与正式任务规则。Current 帧交付后由星务执行明文校验。相关场景见 TC 端到端测试设计。
 
 ## 6. TC 协议、状态机和端到端测试
 
@@ -179,15 +172,15 @@ HCTR 测试只能证明实现一致，不能补足其缺少 Tag 的认证能力�
 - Root Prepare、重启恢复 Pending Root、第一帧 Next SPI 原子提升；
 - NVM 提交失败时不释放明文、不推进状态；
 - 并发 IV 分配、服务重启和允许跳号但禁止重号；
-- Next 内部校验使用正式任务规则拒绝所测试的 HCTR 篡改结果；
+- Next 内部校验使用正式任务规则拒绝所测试的 GCM32 篡改结果；
 - Current 明文交付后，即使星务拒绝指令也保留已提交的 IV；
 - HTTP scope、租户隔离、未知字段和旧数据域 API 拒绝。
 
 共享固定向量属于 L1/L2；只有真实 HTTP 服务、持久化存储、编译后的 C harness 和 NVM adapter 都实际参与，才可标记 L3 通过。
 
-当前 TC 进程门禁按 `testdata/tc-process-scenarios.json` 强制执行 51 个已登记
+当前 TC 进程门禁按 `testdata/tc-process-scenarios.json` 强制执行 59 个已登记
 场景，优化构建与 ASan/UBSan 构建各运行一次。包括链路异常、重放窗口、地面
-重开、连续提交失败、状态损坏、Next/Recovery 换根，以及三类提交的中断重试。
+重开、连续提交失败、状态损坏、Next/Recovery 换根，以及四类提交的中断重试。
 计数和断言范围见专项设计第 1.1 节。测试密钥来源替代 TPM，Next 使用明确的
 测试任务规则，文件提交不替代物理 NVM 验收。漏跑、跳过、未登记场景或测试包
 未完整结束均使报告检查失败；清单和报告哈希写入 release evidence。
@@ -201,7 +194,7 @@ status == expected_error
 released_plaintext_length == 0
 output_buffer contains no prior/current plaintext
 replay and rotation state unchanged
-NVM generation unchanged unless the intended atomic commit succeeded
+NVM generation advances only for a confirmed atomic reservation or business-state commit
 logs/artifacts contain no Root, working key, token or sensitive plaintext
 ```
 
@@ -211,7 +204,7 @@ logs/artifacts contain no Root, working key, token or sensitive plaintext
 | --- | --- |
 | 输入帧 | 截断、超长、错误声明长度、未知 SPI、FECF bit flip |
 | GCM | Key/Nonce/AAD/Ciphertext/Tag 单点篡改，重新计算 FECF 后仍失败 |
-| HCTR | tweak/SPI/IV/ciphertext 篡改，正式明文规则必须关闭式拒绝 |
+| GCM32 | 选择值、计数、头、标签、密文篡改，认证拒绝；合法认证的非法 Next 明文由任务规则拒绝 |
 | Replay | 重复、过旧、窗口边界、最大前跳±1、counter 耗尽 |
 | Context | 每个关键字段 bit flip，context CRC/inverse 损坏 |
 | KDF | 双计算结果不一致、输入域字段损坏、输出缓冲不足 |
@@ -264,7 +257,7 @@ logs/artifacts contain no Root, working key, token or sensitive plaintext
 ```text
 SM4 block KAT
   -> SM4-CMAC / KDF KAT
-  -> HCTR encrypt/decrypt KAT
+  -> GCM32 authenticated-decrypt KAT
   -> GCM valid-tag KAT + bad-tag rejection
   -> READY
 ```
@@ -307,7 +300,7 @@ SM4 block KAT
 | --- | --- | --- |
 | 文档、注释且不改变合同 | 链接/格式/一致性检查 | 无 |
 | 运维 CLI/只读 Ops API | `kvltctl`、路由矩阵和响应脱敏测试 | 完整 release gate |
-| SM4/CMAC/GCM/HCTR/KDF | L0、L1、相关 L2、ASan/UBSan、smoke fuzz、95% | 长时 fuzz、独立 Oracle 全量差分、L5 |
+| SM4/CMAC/GCM/GCM32/KDF | L0、L1、相关 L2、ASan/UBSan、smoke fuzz、95% | 长时 fuzz、独立 Oracle 全量差分、L5 |
 | TC 帧格式/API | L1、L2、L3、拒绝矩阵、95% | 目标链路/HIL |
 | Replay/轮换/NVM/数据库 | L2、L3、故障注入、并发/重启、95% | 掉电/磁盘满/物理 NVM |
 | Root/TPM/权限/审计 | 单元、集成、越权、泄漏扫描、L3 | 物理 TPM、恢复演练 |
@@ -353,15 +346,15 @@ AES 的 383 条向量和生成器哈希、覆盖率及加固结果写入发布�
 
 | 项目 | 状态 |
 | --- | --- |
-| Go/C 共享普通 HCTR 与 Recovery GCM 互操作向量 | 已有 |
+| Go/C 共享普通 GCM32 与 Recovery GCM 互操作向量 | 已有 |
 | HTTP API 生成完整密帧并与星载向量比较 | 已有 |
 | Replay、Next promotion、Recovery、持久化回调故障测试 | 已有 |
 | Go/C 95% 覆盖率门禁、运维 CLI/API 测试、发布哈希证据 | 已有 |
 | GB/T/GM/T SM4 单分组权威 KAT | 已有；启动自检和单元测试共同覆盖 |
 | RFC 8998 SM4-GCM 权威 KAT | 已有；Go/C 共用固定向量并逐字节验证 ciphertext/tag |
-| SM4/CMAC/GCM 独立开源 Oracle 差分 | 已有；`pyca/cryptography 49.0.0` / OpenSSL 4.0.1 生成固定边界向量 |
-| 与产品无共享实现的 HCTR 参考模型和批量差分 | 已有；独立 Python 组合模型仅调用外部 SM4 分组原语，覆盖 16/17/31/32/33/64/1011 字节 |
-| SP 800-108/SM4-CMAC 独立参考向量 | 已有；16/32 字节输出由外部 CMAC 原语生成并由 Go/C 共同验证 |
+| SM4/CMAC/GCM 独立开源 Oracle 差分 | 已有；`pyca/cryptography 50.0.2` / OpenSSL 4.0.3 生成固定边界向量 |
+| 与产品无共享实现的 GCM32 参考模型和批量差分 | 已有；独立 Python 组合模型仅调用外部 SM4 分组原语，覆盖 16/17/31/32/33/64/1011 字节 |
+| SP 800-108/SM4-CMAC 独立参考向量 | 已有；普通与恢复域 16 字节输出由外部 CMAC 原语生成并由 Go/C 共同验证 |
 | ASan/UBSan 自动门禁和有界 fuzz runner | 已纳入 `make release-gate`；固定 seed、4096 次有界变异覆盖 `tcsec_receive` 和 `tcsec_reset` 的状态加载 |
 | 星载启动 KAT 与失败锁定 | 已有；实际选中后端执行，失败锁定 receive/reset |
 | 自动 context/NVM/状态 bit-flip campaign | **待补 P1** |
@@ -371,7 +364,7 @@ AES 的 383 条向量和生成器哈希、覆盖率及加固结果写入发布�
 
 因此当前证据可支持“星地功能互操作与已有代码覆盖率达标”，尚不能表述为“密码算法已完成权威验证”“星载实现已完成侧信道评估”或“产品已通过 GM/T 检测认证”。
 
-其中“密码算法已完成权威验证”仍不可作为总体结论：当前已经补齐 SM4、SM4-GCM 的规范锚点以及 SM4/CMAC/GCM/HCTR/KDF 的独立软件交叉验证，但 ASan/UBSan、fuzz、目标板侧信道和外部检测认证仍是独立门禁。
+其中“密码算法已完成权威验证”仍不可作为总体结论：当前已经补齐 SM4、SM4-GCM 的规范锚点以及 SM4/CMAC/GCM/GCM32/KDF 的独立软件交叉验证，但 ASan/UBSan、fuzz、目标板侧信道和外部检测认证仍是独立门禁。
 
 ## 14. 完成定义
 
@@ -389,17 +382,17 @@ AES 的 383 条向量和生成器哈希、覆盖率及加固结果写入发布�
 
 ### ARMv7 SM4 加速门禁
 
-星载构建在 ARMv7 目标上默认编译 `ARMv7/NEON + software` 两个 SM4 后端。运行时在 Linux 使用 `AT_HWCAP/HWCAP_NEON`，在裸机或 RTOS 使用编译器提供的 NEON 目标能力，自动选择后端；能力不存在时必须选择 software。调用方不得选择后端，HCTR、GCM 与 KDF 共用 SM4 模块的内部调度。
+星载构建在 ARMv7 目标上默认编译 `ARMv7/NEON + software` 两个 SM4 后端。运行时在 Linux 使用 `AT_HWCAP/HWCAP_NEON`，在裸机或 RTOS 使用编译器提供的 NEON 目标能力，自动选择后端；能力不存在时必须选择 software。调用方不得选择后端，GCM32、GCM 与 KDF 共用 SM4 模块的内部调度。
 
 每个 ARMv7 飞行候选必须增加以下目标板证据：
 
-- 强制 software 与自动选择路径分别执行 SM4、HCTR、GCM、KDF KAT，输出逐字节一致；
+- 强制 software 与自动选择路径分别执行 SM4、GCM32、GCM、KDF KAT，输出逐字节一致；
 - NEON 可用时断言诊断后端为 `armv7-neon`，不可用时断言为 `software`；
 - 非 NEON ARMv7 板不得产生非法指令；
 - 测量普通 TC 解密端到端 WCET、单分组 SM4 和长帧吞吐，报告相对 software 的提升；
 - 对汇编后端单独执行寄存器清理审查、已知/随机差分测试和侧信道测试。
 
-`scripts/armv7_gate.sh` 是当前强制门禁：Go 固定种子生成 128 组 HCTR 和
+`scripts/armv7_gate.sh` 是当前强制门禁：Go 固定种子生成 128 组 GCM32 和
 128 组 KDF 参考记录，x86 C software 与 QEMU ARMv7/NEON 逐条比较，同时
 QEMU 运行完整 TC Current/Next/Recovery 套件。缺少交叉编译器、sysroot 或
 QEMU 直接失败，不再允许以 x86 结果替代汇编后端证据。真实目标板 WCET、
@@ -408,7 +401,7 @@ QEMU 直接失败，不再允许以 x86 结果替代汇编后端证据。真实�
 `scripts/external_vector_gate.sh` 是独立开源实现门禁：先校验
 `testdata/crypto/cryptography-sm4-v1.tsv` 的文件 SHA-256，再由地面 Go 和
 星载 C 分别消费 28 条固定记录。记录包含 GB/T 32907 SM4 KAT、RFC 8998
-SM4-GCM A.1、外部 SM4-CMAC/GCM 边界向量、独立 HCTR 组合向量和
+SM4-GCM A.1、外部 SM4-CMAC/GCM 边界向量、独立 GCM32 组合向量和
 SP 800-108/SM4-CMAC 派生向量。向量文件同时固定生成器源码 SHA-256；任一
 算法类别数量不足、文件/记录/生成器哈希错误、来源或固定版本漂移、Go/C 输出
 不一致都直接失败。

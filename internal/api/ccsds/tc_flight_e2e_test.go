@@ -64,7 +64,7 @@ func (e2eCore) Unprotect(context.Context, protection.UnprotectRequest) (*protect
 }
 
 func TestTCDataPlaneAPIProducesFlightAcceptedVector(t *testing.T) {
-	values := readVector(t, "../../../testdata/ccsds_tc_sm4_hctr.txt")
+	values := readVector(t, "../../../testdata/ccsds_tc_sm4_gcm_ordinary.txt")
 	decode := func(name string) []byte {
 		value, err := hex.DecodeString(values[name])
 		if err != nil {
@@ -86,7 +86,7 @@ func TestTCDataPlaneAPIProducesFlightAcceptedVector(t *testing.T) {
 	sa := protocol.SecurityAssociation{ID: "e2e-current", TenantID: "tenant-1", SPI: uint16(parse("spi", 16, 16)),
 		Direction: protocol.DirectionTCTx, KeyID: "e2e-root", KeyVersion: uint32(parse("root_version", 10, 32)),
 		SecurityEpoch: uint32(parse("security_epoch", 10, 32)), PolicyVersion: 1, SuiteID: suiteID.String(),
-		State: protocol.AssociationCurrent, Parameters: protocol.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: decode("nonce_prefix")}}
+		State: protocol.AssociationCurrent, Parameters: protocol.ManagedParameters{TransmittedIVLength: 2, TagLength: 4, NoncePrefix: decode("nonce_prefix")}}
 	groundPath := filepath.Join(t.TempDir(), "ground.db")
 	store, err := securitystate.Open(context.Background(), groundPath)
 	if err != nil {
@@ -167,7 +167,7 @@ func TestTCDataPlaneAPIProducesFlightAcceptedVector(t *testing.T) {
 
 func testFlightProcessRecovery(t *testing.T, runner string, frame []byte) {
 	t.Helper()
-	vector, err := filepath.Abs("../../../testdata/ccsds_tc_sm4_hctr.txt")
+	vector, err := filepath.Abs("../../../testdata/ccsds_tc_sm4_gcm_ordinary.txt")
 	if err != nil {
 		t.Fatal(err)
 	}

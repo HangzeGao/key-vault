@@ -109,6 +109,9 @@ type Flight struct {
 	MaxReceiveUS            uint64                       `json:"max_receive_us"`
 	CycleLimitExceededCount uint64                       `json:"cycle_limit_exceeded_count"`
 	ClockAnomalyCount       uint64                       `json:"clock_anomaly_count"`
+	CurrentAuthUsed         uint32                       `json:"current_auth_used"`
+	NextAuthUsed            uint32                       `json:"next_auth_used"`
+	ReceptionPaused         bool                         `json:"reception_paused"`
 }
 
 type Snapshot struct {
@@ -134,7 +137,7 @@ type Snapshot struct {
 func (s *Service) Snapshot(ctx context.Context, tenantID string) (*Snapshot, error) {
 	result := &Snapshot{ObservedAt: time.Now().UTC(), Status: "READY", Ready: true,
 		UptimeSeconds: int64(time.Since(s.startTime).Seconds()), Checks: make(map[string]Check),
-		Warnings: make([]string, 0), Database: Database{ExpectedSchema: 3}, AccessRejections: s.access.Snapshot()}
+		Warnings: make([]string, 0), Database: Database{ExpectedSchema: 4}, AccessRejections: s.access.Snapshot()}
 	degrade := func(name, summary string) {
 		result.Checks[name] = Check{Status: "degraded", Summary: summary}
 		result.Ready = false
@@ -153,9 +156,9 @@ func (s *Service) Snapshot(ctx context.Context, tenantID string) (*Snapshot, err
 			degrade("database", "security state diagnostics unavailable")
 		} else {
 			result.Database = Database{Connected: true, IntegrityOK: diagnostics.IntegrityOK,
-				Schema: diagnostics.Schema, ExpectedSchema: 3, DatabaseBytes: diagnostics.DatabaseSize,
+				Schema: diagnostics.Schema, ExpectedSchema: 4, DatabaseBytes: diagnostics.DatabaseSize,
 				WALBytes: diagnostics.WALSize, Associations: diagnostics.Associations, AuditEvents: diagnostics.AuditEvents}
-			if !diagnostics.IntegrityOK || diagnostics.Schema != 3 {
+			if !diagnostics.IntegrityOK || diagnostics.Schema != 4 {
 				degrade("database", "security state integrity or schema check failed")
 			} else {
 				ok("database", "security state integrity and schema verified")
@@ -207,7 +210,7 @@ func (s *Service) Snapshot(ctx context.Context, tenantID string) (*Snapshot, err
 				result.Flight = &Flight{ObservedAt: f.ObservedAt, SelfTest: f.SelfTest, CryptoBackend: f.CryptoBackend,
 					CurrentSPI: f.CurrentSPI, NextSPI: f.NextSPI, RecoverySPI: f.RecoverySPI, SecurityEpoch: f.SecurityEpoch,
 					RootVersion: f.RootVersion, PendingRootPresent: f.PendingRootPresent, ReceiveCount: f.ReceiveCount,
-					LastReceiveUS: f.LastReceiveUS, MaxReceiveUS: f.MaxReceiveUS, CycleLimitExceededCount: f.CycleLimitExceededCount, ClockAnomalyCount: f.ClockAnomalyCount}
+					LastReceiveUS: f.LastReceiveUS, MaxReceiveUS: f.MaxReceiveUS, CycleLimitExceededCount: f.CycleLimitExceededCount, ClockAnomalyCount: f.ClockAnomalyCount, CurrentAuthUsed: f.CurrentAuthUsed, NextAuthUsed: f.NextAuthUsed, ReceptionPaused: f.ReceptionPaused}
 			}
 		}
 	}

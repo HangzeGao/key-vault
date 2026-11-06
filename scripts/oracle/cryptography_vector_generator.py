@@ -15,14 +15,13 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.cmac import CMAC
 
 
-EXPECTED_CRYPTOGRAPHY_VERSION = "49.0.0"
-EXPECTED_OPENSSL_VERSION = "OpenSSL 4.0.1 9 Jun 2026"
+EXPECTED_CRYPTOGRAPHY_VERSION = "50.0.2"
+EXPECTED_OPENSSL_VERSION = "OpenSSL 4.0.3 29 Sep 2026"
 RFC8998 = "https://www.rfc-editor.org/rfc/rfc8998.html#appendix-A.1"
 SM4_REFERENCE = "GB/T-32907-2016-example-1"
-HCTR_REFERENCE = "GB/T-17964-2021-chapter-11-project-profile-v1"
 KDF_REFERENCE = "NIST-SP-800-108r1-counter-mode-project-encoding-v1"
-CRYPTOGRAPHY_REFERENCE = "https://cryptography.io/en/49.0.0/hazmat/primitives/symmetric-encryption/#cryptography.hazmat.primitives.ciphers.algorithms.SM4"
-VERSION = f"{cryptography.__version__}/OpenSSL-4.0.1"
+CRYPTOGRAPHY_REFERENCE = "https://cryptography.io/en/50.0.2/hazmat/primitives/symmetric-encryption/#cryptography.hazmat.primitives.ciphers.algorithms.SM4"
+VERSION = f"{cryptography.__version__}/OpenSSL-4.0.3"
 
 
 @dataclass(frozen=True)
@@ -90,76 +89,6 @@ def gcm(key: bytes, nonce: bytes, aad: bytes, plaintext: bytes) -> tuple[bytes, 
     if len(context.tag) != 16:
         raise RuntimeError("cryptography SM4-GCM tag length mismatch")
     return ciphertext, context.tag
-
-
-def xor(left: bytes, right: bytes) -> bytes:
-    if len(left) != len(right):
-        raise ValueError("xor length mismatch")
-    return bytes(a ^ b for a, b in zip(left, right, strict=True))
-
-
-def multiply(left: bytes, right: bytes) -> bytes:
-    accumulator = bytearray(16)
-    value = bytearray(right)
-    for bit in range(128):
-        if left[bit // 8] & (0x80 >> (bit % 8)):
-            for index in range(16):
-                accumulator[index] ^= value[index]
-        lsb = value[15] & 1
-        carry = 0
-        for index in range(16):
-            next_carry = value[index] & 1
-            value[index] = (value[index] >> 1) | (carry << 7)
-            carry = next_carry
-        if lsb:
-            value[0] ^= 0xE1
-    return bytes(accumulator)
-
-
-def universal_hash(hash_key: bytes, tweak: bytes, message: bytes) -> bytes:
-    state = bytes(16)
-    offset = 0
-    while len(message) - offset >= 16:
-        state = multiply(xor(state, message[offset:offset + 16]), hash_key)
-        offset += 16
-    remaining = len(message) - offset
-    if remaining == 0:
-        state = multiply(xor(state, tweak), hash_key)
-    else:
-        block = bytearray(message[offset:] + tweak[:16 - remaining])
-        state = multiply(xor(state, bytes(block)), hash_key)
-        block[:16 - remaining] = tweak[remaining:]
-        block[remaining:] = bytes(16 - remaining)
-        state = multiply(xor(state, bytes(block)), hash_key)
-    length_block = bytes(8) + ((len(message) + 16) * 8).to_bytes(8, "big")
-    return multiply(xor(state, length_block), hash_key)
-
-
-def ctr_xor(key: bytes, base: bytes, value: bytes) -> bytes:
-    output = bytearray(len(value))
-    for offset in range(0, len(value), 16):
-        number = offset // 16 + 1
-        stream = sm4_block(key, xor(base, bytes(8) + number.to_bytes(8, "big")))
-        count = min(16, len(value) - offset)
-        for index in range(count):
-            output[offset + index] = value[offset + index] ^ stream[index]
-    return bytes(output)
-
-
-def hctr(working_key: bytes, tweak: bytes, value: bytes, encrypt: bool) -> bytes:
-    cipher_key, hash_key = working_key[:16], working_key[16:]
-    tail = value[16:]
-    if encrypt:
-        z1 = xor(universal_hash(hash_key, tweak, tail), value[:16])
-        z2 = sm4_block(cipher_key, z1)
-        base = xor(z1, z2)
-        output_tail = ctr_xor(cipher_key, base, tail)
-        return xor(z2, universal_hash(hash_key, tweak, output_tail)) + output_tail
-    z2 = xor(universal_hash(hash_key, tweak, tail), value[:16])
-    z1 = sm4_block(cipher_key, z2, False)
-    base = xor(z2, z1)
-    output_tail = ctr_xor(cipher_key, base, tail)
-    return xor(z1, universal_hash(hash_key, tweak, output_tail)) + output_tail
 
 
 def counter_kdf(key: bytes, label: bytes, context: bytes, output_length: int) -> bytes:
@@ -233,32 +162,24 @@ def vectors() -> list[Vector]:
                              nonce=nonce, aad=aad, plaintext=plaintext,
                              ciphertext=ciphertext, tag=tag))
 
-    working_key = decode(
-        "2b7e151628aed2a6abf7158809cf4f3c000102030405060708090a0b0c0d0e0f"
-    )
-    tweak = decode("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
-    for length in (16, 17, 31, 32, 33, 64, 1011):
-        plaintext = pattern(length, 0x20 + length)
-        ciphertext = hctr(working_key, tweak, plaintext, True)
-        if hctr(working_key, tweak, ciphertext, False) != plaintext:
-            raise RuntimeError(f"independent HCTR reference failed length {length}")
-        result.append(Vector(f"sm4-hctr-cryptography-ref-len-{length}", "INDEPENDENT",
-                             HCTR_REFERENCE + "+" + CRYPTOGRAPHY_REFERENCE,
-                             "SM4_HCTR", working_key, nonce=tweak,
-                             plaintext=plaintext, ciphertext=ciphertext,
-                             generator="pyca-cryptography+independent-HCTR-reference",
-                             generator_version=f"{VERSION}/profile-v1"))
+    for length in (0, 16, 17, 31, 32, 64, 1011):
+        key=pattern(16,0x27+length); nonce=pattern(12,0x72+length)
+        aad=pattern(7,0x45); plaintext=pattern(length,0x20+length)
+        ciphertext,tag=gcm(key,nonce,aad,plaintext)
+        result.append(Vector(f"sm4-gcm32-cryptography-len-{length}","INDEPENDENT",
+                             CRYPTOGRAPHY_REFERENCE,"SM4_GCM_32",key,nonce=nonce,aad=aad,
+                             plaintext=plaintext,ciphertext=ciphertext,tag=tag[:4]))
 
-    ordinary_label = b"TC-TRAFFIC"
-    ordinary_context = decode("123401001320010000000700000009")
+    ordinary_label = b"TC-GCM32-V1"
+    ordinary_context = decode("123401000320010000000700000009")
     result.append(Vector("sm4-kdf-cryptography-tc-traffic", "INDEPENDENT",
                          KDF_REFERENCE + "+" + CRYPTOGRAPHY_REFERENCE,
                          "SP800_108_SM4_CMAC", standard_key,
                          label=ordinary_label, context=ordinary_context,
-                         output=counter_kdf(standard_key, ordinary_label, ordinary_context, 32),
+                         output=counter_kdf(standard_key, ordinary_label, ordinary_context, 16),
                          generator="pyca-cryptography+SP800-108-reference",
                          generator_version=f"{VERSION}/profile-v1"))
-    recovery_label = b"TC-RECOVERY-GCM"
+    recovery_label = b"TC-GCM128-RECOVERY-V1"
     recovery_context = decode("12340002700200000003")
     result.append(Vector("sm4-kdf-cryptography-recovery", "INDEPENDENT",
                          KDF_REFERENCE + "+" + CRYPTOGRAPHY_REFERENCE,

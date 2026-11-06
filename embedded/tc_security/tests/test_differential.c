@@ -1,6 +1,6 @@
 #include "tc_security.h"
 #include "tc_security_kdf.h"
-#include "hctr.h"
+#include "gcm.h"
 #include "sm4.h"
 
 #include <stdio.h>
@@ -31,24 +31,21 @@ static int decode(const char *text, uint8_t *output, size_t capacity, size_t *le
 }
 
 static int ordinary(char **fields) {
-    uint8_t root[16], tweak[16], plaintext[TCSEC_MAX_FRAME_LENGTH];
-    uint8_t expected[TCSEC_MAX_FRAME_LENGTH], actual[TCSEC_MAX_FRAME_LENGTH];
-    uint8_t recovered[TCSEC_MAX_FRAME_LENGTH], working[TCSEC_HCTR_WORKING_KEY_LENGTH];
-    size_t root_length, tweak_length, plaintext_length, expected_length;
-    uint16_t spacecraft = (uint16_t)strtoul(fields[2], NULL, 16);
-    uint16_t spi = (uint16_t)strtoul(fields[3], NULL, 16);
-    uint32_t epoch = (uint32_t)strtoul(fields[4], NULL, 16);
-    uint32_t version = (uint32_t)strtoul(fields[5], NULL, 16);
-    return decode(fields[1], root, sizeof(root), &root_length) && root_length == sizeof(root) &&
-           decode(fields[6], tweak, sizeof(tweak), &tweak_length) && tweak_length == sizeof(tweak) &&
-           decode(fields[7], plaintext, sizeof(plaintext), &plaintext_length) && plaintext_length >= 16u &&
-           decode(fields[8], expected, sizeof(expected), &expected_length) && expected_length == plaintext_length &&
-           tcsec_derive_ordinary_key(root, root_length, spacecraft, TCSEC_SUITE_SM4_HCTR,
-                                     spi, epoch, version, working, sizeof(working)) == 0 &&
-           tcsec_sm4_hctr_encrypt(working, tweak, plaintext, actual, plaintext_length) == 0 &&
-           memcmp(actual, expected, expected_length) == 0 &&
-           tcsec_sm4_hctr_decrypt(working, tweak, actual, recovered, plaintext_length) == 0 &&
-           memcmp(recovered, plaintext, plaintext_length) == 0;
+    uint8_t root[16], nonce[12], plain[1024], encrypted[1024], tag[4], out[1024], key[16];
+    size_t rn, nn, pn, cn, tn;
+    uint16_t scid = (uint16_t)strtoul(fields[2], NULL, 16),
+             spi = (uint16_t)strtoul(fields[3], NULL, 16);
+    uint32_t epoch = (uint32_t)strtoul(fields[4], NULL, 16),
+             version = (uint32_t)strtoul(fields[5], NULL, 16);
+    return decode(fields[1], root, 16, &rn) && rn == 16 && decode(fields[6], nonce, 12, &nn) &&
+           nn == 12 && decode(fields[7], plain, 1024, &pn) &&
+           decode(fields[8], encrypted, 1024, &cn) && cn == pn && decode(fields[9], tag, 4, &tn) &&
+           tn == 4 &&
+           tcsec_derive_ordinary_key(root, rn, scid, TCSEC_SUITE_SM4_GCM_32, spi, epoch, version,
+                                     key, 16) == 0 &&
+           tcsec_gcm_open_short(key, nonce, (const uint8_t *)"TC-AAD!", 7, encrypted, cn, tag,
+                                out) == 0 &&
+           memcmp(out, plain, pn) == 0;
 }
 
 static int recovery(char **fields) {
@@ -75,14 +72,14 @@ int main(int argc, char **argv) {
     if (tcsec_sm4_key_init(&diagnostic, zero) != 0) return 1;
     backend = tcsec_sm4_backend_name(&diagnostic);
     while (fgets(line, sizeof(line), file) != NULL) {
-        char *fields[9];
+        char *fields[10];
         char *token = strtok(line, " \r\n");
         size_t count = 0u;
-        while (token != NULL && count < 9u) {
+        while (token != NULL && count < 10u) {
             fields[count++] = token;
             token = strtok(NULL, " \r\n");
         }
-        if ((count == 9u && strcmp(fields[0], "O") == 0 && ordinary(fields)) ||
+        if ((count == 10u && strcmp(fields[0], "O") == 0 && ordinary(fields)) ||
             (count == 6u && strcmp(fields[0], "R") == 0 && recovery(fields))) {
             cases++;
             continue;

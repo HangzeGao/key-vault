@@ -4,7 +4,7 @@
 
 本手册面向测控软件、遥测适配软件和地面集成人员，说明普通遥控加密、星载密码状态上报、只读诊断及受控换根的实际接入方式。地面密码服务接收完整 TC 明帧，返回可直接交给测控链路发送的完整密帧。测控调用方不选择密钥、SPI、IV 或安全代次。
 
-本手册与星务端接口手册使用同一遥控合同。普通遥控采用 SM4-HCTR，无认证标签；恢复通道换根准备采用 SM4-GCM，标签 16 字节。AES 下行不在本手册范围内。代码核对基线为提交 48174ab。
+本手册与星务端接口手册使用同一遥控合同。普通遥控采用 SM4-GCM 和 4 字节标签；恢复通道换根准备采用独立工作密钥的 SM4-GCM 和 16 字节标签。AES 下行不在本手册范围内。地面状态格式为 schema 4，任务配置与星载状态上报格式均为版本 2；星载公开接口版本为 5。
 
 | 接入项 | 实际入口与责任 |
 | --- | --- |
@@ -20,12 +20,12 @@
 | --- | --- |
 | TC | 遥控。本文的完整帧包含 5 字节主导头和末尾 2 字节帧校验序列。 |
 | 安全关联 SA | 密钥版本、SPI、算法、Nonce 前缀和计数状态等共同构成的一组帧保护配置。 |
-| 安全参数索引 SPI | 密帧安全域中的 16 位关联编号，星载用它选择 Current、Next 或 Recovery。 |
+| 安全参数索引 SPI | 内部持久保存的 16 位逻辑关联编号，参与 KDF 和 nonce；空口使用代次模 3 的 2 位选择值，值 3 专属 Recovery。 |
 | Current 与 Next | 当前和下一普通关联。Next SPI 为 Current SPI 加 1，按 16 位回绕；Next 安全代次为当前加 1。 |
 | Recovery Root Prepare | 恢复通道换根准备。认证并在星上保存待生效业务根，等待首个合法 Next 帧启用。 |
 | 根密钥与工作密钥 | 根是受控保管的 16 字节材料；工作密钥由根及关联参数派生，用于实际加解密。 |
 | 安全代次 epoch | 普通关联的派生输入，随切换递增；与根版本、SPI、IV 分别承担不同责任。 |
-| IV 计数器 | 每关联独立的 32 位发送计数器。允许跳号，禁止回退或重复分配。 |
+| IV 计数器 | 普通帧在 2 字节控制字中携带 14 位计数，地面每工作密钥最多分配 1024 帧；Recovery 为独立 32 位计数。允许跳号，禁止回退和重复。 |
 | TPM 与 SQLite | TPM 用于封装根材料；SQLite 持久化封装对象、关联、发送计数和运行证据。 |
 
 ## 1 接入边界与生命周期
@@ -78,7 +78,9 @@ JSON 使用代码约定的字段名，未知字段会被严格解析器拒绝。
 | HTTP 200 | 生成一份完整密帧；只证明地面保护完成，不证明星上接收或指令执行。 |
 | protected_frame | string。标准 Base64，解码后为完整密帧。没有单独的 SPI、IV、Tag 或元数据响应字段。 |
 
-密帧为 `Primary Header 5字节 + SPI 2字节 + IV 4字节 + Ciphertext N字节 + FECF 2字节`，总长比明帧增加 6 字节，最大 1024。普通 HCTR 不增加 Tag。主导头中帧长和末尾 FECF 由服务更新，调用方将返回字节原样交给链路，不再插入安全域或重算正常返回帧。
+密帧为 Primary Header 5 字节 ＋ 控制字 2 字节 ＋ Tag 4 字节 ＋ Ciphertext N 字节 ＋ FECF 2 字节，总长比明帧增加 6 字节，最大 1024。控制字高 2 位为 security_epoch mod 3，低 14 位为计数。安全域仍为偏移 5 起的连续 6 字节，密文仍从偏移 11 开始。主导头中帧长和末尾 FECF 由服务更新，调用方将返回字节原样交给链路，不再插入安全域或重算正常返回帧。
+
+普通帧 AAD 为最终主导头与控制字，共 7 字节。两类帧的 nonce 均为相应前缀 6 字节、内部完整 SPI 2 字节与 uint32 大端计数 4 字节。Recovery 的安全域为 0xC000 加 4 字节计数，AAD 为主导头与完整安全域 11 字节；41 字节管理密文后追加 16 字节标签，完整帧 70 字节。字节编码及派生输入以 [TC GCM 帧格式](TC_GCM_PROFILE.md) 为准。
 
 ### 加密处理与发送顺序
 
@@ -95,7 +97,7 @@ sequenceDiagram
     G->>S: 持久分配本次 IV
     S-->>G: 返回唯一计数
     G->>S: 取得受控根并派生
-    G->>G: 加密并生成完整密帧
+    G->>G: GCM 加密 生成 4 字节标签并组帧
     G->>S: 更新地面轮换证据
     G-->>C: 返回完整密帧
     Note over C,G: 地面成功不代表星上已接收
@@ -171,19 +173,21 @@ if __name__ == "__main__":
 
 | 请求字段 | 类型与含义 |
 | --- | --- |
-| format_version | uint16，当前固定为 1。 |
+| format_version | uint16，当前固定为 2。 |
 | profile_digest | string，64 个十六进制字符表示 32 字节任务配置摘要，必须与地面绑定值一致才能核对为匹配。 |
 | self_test | string，仅 PASSED 或 LOCKED。由星载自检状态映射。 |
 | crypto_backend | string，仅 SOFTWARE 或 ARMV7_NEON。由星载密码后端映射。 |
 | current_spi、next_spi、recovery_spi | uint16，当前、下一、恢复关联。next_spi 必须等于 current_spi 加 1 后按 16 位回绕。 |
 | security_epoch、root_version | uint32，非零；分别是星载普通安全代次与业务根版本。 |
 | pending_root_present | bool，是否保存了待生效业务根。 |
+| current_auth_used、next_auth_used | uint32，分别为当前和下一工作密钥已经持久预留的验证次数，均为 0～2048 的偶数。星载复位不清零。 |
+| reception_paused | bool，星载是否因存储或完整性故障停收。 |
 | receive_count | uint64，本次星载运行中的接收计数，重启后可重新计数。 |
 | last_receive_us、max_receive_us | uint64，最近及最大收帧耗时，微秒。未注册计时回调时为零。 |
 | cycle_limit_exceeded_count | uint64，超过 120 ms 诊断阈值的次数。 |
 | clock_anomaly_count | uint64，计时异常次数。 |
 
-所有上述字段均应由适配方明确提供，数值字段在 JSON 中使用十进制整数。JavaScript 等客户端处理 uint64 时须避免超过安全整数范围后的精度丢失；不得将数字字段擅自改成字符串。接口不接收根、工作密钥、Nonce 前缀、重放位图、reception_paused 或 last_status。
+所有上述字段均应由适配方明确提供，数值字段在 JSON 中使用十进制整数。JavaScript 等客户端处理 uint64 时须避免超过安全整数范围后的精度丢失；不得将数字字段擅自改成字符串。接口不接收根、工作密钥、Nonce 前缀、重放位图或 last_status。
 
 C 枚举须转换为表中字符串，不能直接发送枚举整数。星载的 self-test 未运行或诊断调用失败时，不能伪造 PASSED 来满足上报校验，应进入遥测适配异常处理。
 
@@ -193,7 +197,7 @@ C 枚举须转换为表中字符串，不能直接发送枚举整数。星载的
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "profile_digest": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
   "self_test": "PASSED",
   "crypto_backend": "SOFTWARE",
@@ -203,6 +207,9 @@ C 枚举须转换为表中字符串，不能直接发送枚举整数。星载的
   "security_epoch": 8,
   "root_version": 7,
   "pending_root_present": false,
+  "current_auth_used": 24,
+  "next_auth_used": 0,
+  "reception_paused": false,
   "receive_count": 12,
   "last_receive_us": 0,
   "max_receive_us": 0,
@@ -213,7 +220,7 @@ C 枚举须转换为表中字符串，不能直接发送枚举整数。星载的
 
 HTTP 204 表示状态被接收并保存，不保证内容与地面匹配。运维快照另行比较任务摘要、自检、Current SPI、安全代次、根版本和 Recovery SPI。上报不会自动改地面 Current、回退 IV 或触发换根；不匹配记录为诊断告警，而不是自动修复。
 
-当前上报对象没有星上采样时间或遥测序列号，observed_at 是地面接收保存时间；不能据此判断原始遥测一定新鲜。迟到或重放的遥测可能覆盖最近记录，适配方须在提交前完成来源、顺序和新鲜度检查。接口也没有把停收标志传给运维视图，星务停收不能仅凭 MATCHED 推断为健康。
+当前上报对象没有星上采样时间或遥测序列号，observed_at 是地面接收保存时间；不能据此判断原始遥测一定新鲜。迟到或重放的遥测可能覆盖最近记录，适配方须在提交前完成来源、顺序和新鲜度检查。停收状态已通过 reception_paused 传给运维视图并生成告警；仍不能仅凭 MATCHED 推断业务健康。
 
 ```mermaid
 sequenceDiagram
@@ -256,8 +263,8 @@ sequenceDiagram
 | --- | --- |
 | id、direction、state、suite_id | 关联标识、方向、状态和固定算法名称，不含原始根或工作密钥。 |
 | spi、security_epoch、key_version、policy_version | SPI、普通安全代次、根版本、策略版本。Recovery 不使用普通安全代次。 |
-| sequence_number_length、transmitted_iv_length、tag_length、replay_window | 管理参数；普通发送 IV 为 4 字节、Tag 为 0，恢复通道 Tag 为 16 字节。 |
-| next_iv_counter | 可省略 uint64；下一发送计数，可达耗尽标记 2 的 32 次方，不能存进 uint32。 |
+| sequence_number_length、transmitted_iv_length、tag_length、replay_window | 管理参数。普通发送为 2 字节控制字、4 字节 Tag；恢复通道为 4 字节计数、16 字节 Tag。两类发送的 sequence_number_length 与 replay_window 均为 0。 |
+| next_iv_counter | 可省略 uint64。普通关联的下一发送计数最多到耗尽标记 1024；Recovery 可到耗尽标记 2 的 32 次方，不能存进 uint32。 |
 | replay_highest、replay_seen | 可省略最高计数及有效标志；按方向适用性解释，不代替星载重放窗口。 |
 
 ### 诊断结论与运维示例
@@ -313,12 +320,20 @@ CLI 退出码：0 就绪，1 降级，2 连接或请求不可达，3 审计完�
 
 | 项目 | 派生与存储关系 |
 | --- | --- |
-| 普通工作材料 | SM4-CMAC Counter KDF，标签 TC-TRAFFIC，输入航天器号、遥控方向、套件、SPI、安全代次和根版本，输出 32 字节。前后各 16 字节用于 SM4 与 HCTR 散列。 |
-| 恢复工作密钥 | 相同 KDF，标签 TC-RECOVERY-GCM，输入航天器号、恢复套件、SPI 和恢复根版本，输出 16 字节。 |
-| 帧级输入 | 普通 tweak 由 6 字节前缀、SPI、IV 和 4 字节零保留域组成；恢复 nonce 为 6 字节前缀、SPI 和 IV。 |
+| 普通工作材料 | SM4-CMAC Counter KDF，标签 TC-GCM32-V1，输入航天器号、遥控方向、套件 0x0003、内部完整 SPI、安全代次和根版本，输出 16 字节 SM4 工作密钥。 |
+| 恢复工作密钥 | 相同 KDF，标签 TC-GCM128-RECOVERY-V1，输入航天器号、恢复套件 0x0002、内部完整 SPI 和恢复根版本，输出 16 字节。 |
+| 帧级输入 | 两类 GCM nonce 均为 6 字节前缀、2 字节内部 SPI、4 字节大端计数；普通计数由 14 位补零。 |
 | 地面保存 | 根以 TPM 封装形式保存，工作材料按需派生并清理。应用请求不携带根。 |
 
-根版本只在根材料更新时按任务规划前进；安全代次每次普通关联提升加 1；SPI 可从 0xFFFF 回绕至 0；IV 在新的关联中独立分配。SPI 回绕不允许安全代次或根版本跟着回退。临近代次上限或 Recovery SPI 碰撞时，按星地共同合同拒绝无法安全继续的切换。
+根版本只在根材料更新时按任务规划前进；安全代次每次普通关联提升加 1；SPI 可从 0xFFFF 回绕至 0；IV 在新的关联中独立分配。SPI 回绕不允许安全代次或根版本跟着回退。临近代次上限时，按星地共同合同拒绝无法安全继续的切换。
+
+### 短标签预算与工作密钥轮换
+
+普通帧密文与 AAD 总长最多 1018 字节。按 NIST SP 800-38D 附录 C 表 1 的 32 位标签限制，星上单工作密钥最多进行 2048 次认证解密；每帧最多验证两次，认证前先持久预留 2 次。因此地面每工作密钥最多分配 1024 帧，即计数 0～1023，达到 90% 时产生 TC_IV_NEAR_EXHAUSTION，达到上限拒绝加密。14 位计数空间不代表可以发送满 16384 帧。
+
+星上无效标签和验证后的掉电也消耗预算，复位不能返还。遥测适配必须上报 current_auth_used 与 next_auth_used；FLIGHT_AUTH_BUDGET_LOW 和 FLIGHT_NEXT_AUTH_BUDGET_LOW 表示达到 90%，FLIGHT_RECEPTION_PAUSED 表示需要先恢复存储状态。预算告警可早于地面帧数告警。32 位标签保障仍受短标签长度限制。
+
+常规切换流程是先协调发送调度、核对最新可信星载状态，再运行 ccsds-activate，随后用新的工作密钥保护普通任务指令。星上首个合法 Next 帧原子提升并回报；确认之前不得继续推进再下一代次。地面已经生成的密帧消耗计数，即使网络响应丢失也不能回退。单密钥限制按关联身份和持久分配状态执行，不能重新建库或换关联 ID 来重复使用同一密钥。
 
 ### 首装配置与制备命令
 
@@ -326,24 +341,26 @@ CLI 退出码：0 就绪，1 降级，2 连接或请求不可达，3 审计完�
 
 | 配置字段 | 含义和约束 |
 | --- | --- |
-| format_version、mission_id、tenant_id、spacecraft_id | 版本固定 1，任务和租户非空，航天器号为 0～1023。 |
+| format_version、mission_id、tenant_id、spacecraft_id | 版本固定 2，任务和租户非空，航天器号为 0～1023。 |
 | tc.current_spi、tc.security_epoch | 初始当前 SPI 和非零安全代次，代次不能为 UINT32_MAX。 |
 | tc.current_root_version、tc.current_operational_root_hex | 当前业务根版本非零，根为 16 字节的 32 个十六进制字符。 |
 | tc.next_root_version、tc.next_operational_root_hex | 下一业务根版本大于当前，根为 16 字节。 |
 | tc.nonce_prefix_hex | 普通关联 6 字节前缀，Current 与 Next 保持相同任务绑定。 |
-| tc.recovery_spi、tc.recovery_root_version | 恢复 SPI 与 Current、Next 不同，恢复根版本非零。 |
+| tc.recovery_spi、tc.recovery_root_version | 恢复通道内部逻辑 SPI；恢复根版本非零。 |
 | tc.recovery_root_hex、tc.recovery_nonce_prefix_hex | 独立恢复根 16 字节，恢复前缀 6 字节。 |
 | tc.recovery_transaction_id、tc.recovery_primary_header_hex | 非零换根事务号，5 字节恢复帧主导头模板。 |
 
 ```text
-ccsds-provision --config GROUND_CONFIG --mission-profile MISSION_PROFILE --artifacts-dir PRIVATE_ARTIFACTS
+ccsds-provision --config GROUND_CONFIG \
+  --mission-profile MISSION_PROFILE \
+  --artifacts-dir PRIVATE_ARTIFACTS
 ```
 
 三个参数分别指定地面 YAML 配置、受控任务配置和私有工件目录。后两项必填；config 使用部署配置加载规则，正式操作应明确指定。工具严格校验配置和已存材料，一致记录可核验复用；出现冲突会失败，不允许用重跑覆盖未知状态。
 
 输出 `root-prepare.tc` 是完整恢复密帧，`release-evidence.json` 是任务与密帧哈希等证据。证据最后发布，部分工件写入中断时应核对哈希。输出不包含星载 NVM 镜像。星务通过自己的受控导入途径灌入首装根、参数和独立首装标记，运行时由加载回调交给模块。
 
-制备包含多步持久化和工件发布，不是跨 TPM、数据库与文件系统的一次原子事务；失败时检查已完成步骤和计数，再决定续办。生成恢复帧不等于地面事务已具备可激活条件；必须核实 PREPARED 记录。不要凭“制备成功”自动执行激活。
+制备包含多步持久化和工件发布，不是跨 TPM、数据库与文件系统的一次原子事务；失败时检查已完成步骤和计数，再决定续办。保护恢复帧时会持久写入匹配的 PREPARED 记录。该记录表示地面准备阶段，不证明星上已经保存 Pending；必须核对星上可信回报后再激活。
 
 ### 换根准备与地面切换
 
@@ -353,13 +370,13 @@ ccsds-activate --config GROUND_CONFIG --tenant TENANT --reason REASON --ticket-i
 
 | 参数或结果 | 含义 |
 | --- | --- |
-| tenant | 必填目标租户，须存在唯一已准备轮换。 |
+| tenant | 必填目标租户，须存在唯一合法 Next。换根须有匹配的 PREPARED；同根工作密钥切换须有与当前 SPI、代次、根版本一致且自检通过、任务摘要匹配、未停收、无 Pending 且 Next 尚有预算的星载状态回报。 |
 | reason、ticket-id | 必填变更原因和批准单据标识，用于审计记录。 |
 | config | 地面部署配置路径，建议显式填写。 |
-| 成功 | 本地 Current 退役、Next 提升，事务进入 SWITCHING；下一次加密使用新关联。 |
+| 成功 | 本地 Current 退役、Next 提升，事务进入 SWITCHING，并按同一根准备再下一代次关联及独立计数；下一次加密使用新关联。 |
 | 失败 | 不应盲目重跑。特别是“状态已推进但成功审计失败”，应先读取实际状态。 |
 
-PREPARED 的建立属于受控管理流程。当前这两项 CLI 不提供通用“任意在线追加 Next 并准备事务”的完整命令链，普通测控 HTTP 也不提供该写入口。集成人员须核对实际管理流程已建立 PREPARED；不得直接改 SQL 或调用内部函数来替代正式接入。
+换根准备方法将精确匹配的 Current、Next、根版本与事务号记为 PREPARED。普通测控 HTTP 不提供任意替换 Next 根或在线写关联的入口；后续新业务根的导入须通过受控管理流程，不得直接修改 SQL。常规工作密钥轮换复用已生效业务根，通过新代次派生新工作密钥，无需发送换根准备指令。
 
 星上先成功认证并持久化 Pending，再由受控流程确认，随后执行地面切换并发送首个符合正式任务规则的 Next 普通帧。地面制备根、新版关联和星上待生效根必须一致；首个 Next 帧不需要新增空口管理指令。
 
@@ -391,7 +408,8 @@ sequenceDiagram
 | IV 已分配后加密或响应失败 | IV 可能已消耗，允许跳号；重启后使用数据库下一值，禁止恢复旧计数。 |
 | 响应已返回但尚未发送 | 地面成功不证明星上处理；发送队列决定续发，避免另一次请求造成业务重复。 |
 | 星载提交前失败 | 星载不交付明文；恢复加载后按真实持久状态判断能否重新接收。 |
-| 星载已提交但确认丢失 | 重启后重放窗口已推进，同一密帧应被拒绝；不能回退状态以强行再次解密。 |
+| 星载预算预留后中断 | 已扣预算保留，重放和业务状态尚未推进；重载可信状态后重新预留额度再认证。 |
+| 星载业务状态已提交但确认丢失 | 重启后重放窗口已推进，同一密帧应被拒绝；不能回退状态以强行再次解密。 |
 | Pending 写入后重启 | 通过星务加载回调恢复 Pending，确认版本和事务后继续切换。 |
 | 地面切换后尚未生成新帧 | 可能停留 SWITCHING，重启核对状态后继续新关联；不直接改回旧关联。 |
 | 已生成首个新帧但链路丢失 | 地面可能 ACTIVE，星上仍旧 Current；用后续合法 Next 帧和状态回报完成核对。 |
@@ -417,7 +435,7 @@ sequenceDiagram
     Note over C,F: 业务去重由测控和星务共同处理
 ```
 
-普通 HCTR 无 Tag，FECF 是误码检查而非密码学认证。攻击或错误密钥可能产生仍可交付的 Current 明文；星务校验责任不因地面加密成功而消失。Next 依赖模块链接的正式任务规则，测试策略不能替代飞行规则。
+普通帧使用 4 字节 GCM 标签验证主导头、控制字和密文，篡改或错误密钥验证失败时不交付明文。FECF 只用于误码检查。星务仍须完成业务语义和联锁校验。Next 依赖模块链接的正式任务规则，测试策略不能替代飞行规则。
 
 ## 附录 A 接入开发指导
 
@@ -440,7 +458,7 @@ sequenceDiagram
 
 调用方不需要内部 Go 结构成员、数据库表布局或密钥派生函数。地面接口采用 HTTP 对象，不能照搬星载的 .h/.a 交付方式。也不需要复制星载回调；地面 TPM 与数据库由服务部署层接入。
 
-验收时至少执行普通遥控加密与星上解密、畸形帧、重放、乱序、地面重启、连续存储失败、Recovery 认证失败、Pending 重启和首个 Next 提升。已有 51 个主机进程场景分别在优化版与 ASan/UBSan 版通过，共 102 次执行，不能当作所有异常空间的覆盖百分比。
+验收时至少执行普通遥控加密与星上解密、畸形帧、重放、乱序、地面重启、连续存储失败、Recovery 认证失败、Pending 重启和首个 Next 提升。已有 59 个登记主机进程场景，包括预算持久化、中断和连续轮换；优化与 ASan/UBSan 构建共执行 118 次，不能当作所有异常空间的覆盖百分比。
 
 ## 附录 B 对外数据合同原文
 
@@ -475,6 +493,9 @@ type observeFlightStatusRequest struct {
 	MaxReceiveUS            uint64                       `json:"max_receive_us"`
 	CycleLimitExceededCount uint64                       `json:"cycle_limit_exceeded_count"`
 	ClockAnomalyCount       uint64                       `json:"clock_anomaly_count"`
+	CurrentAuthUsed         uint32                       `json:"current_auth_used"`
+	NextAuthUsed            uint32                       `json:"next_auth_used"`
+	ReceptionPaused         bool                         `json:"reception_paused"`
 }
 ```
 
@@ -556,6 +577,9 @@ type Flight struct {
 	MaxReceiveUS            uint64                       `json:"max_receive_us"`
 	CycleLimitExceededCount uint64                       `json:"cycle_limit_exceeded_count"`
 	ClockAnomalyCount       uint64                       `json:"clock_anomaly_count"`
+	CurrentAuthUsed         uint32                       `json:"current_auth_used"`
+	NextAuthUsed            uint32                       `json:"next_auth_used"`
+	ReceptionPaused         bool                         `json:"reception_paused"`
 }
 ```
 
@@ -598,14 +622,14 @@ type CounterSnapshot struct {
 
 ## 附录 C 版本核对与待集成事项
 
-本手册对应基线 48174ab。普通遥控与状态 HTTP 路由、运维快照、受控制备及激活 CLI 均按当前代码核对。后续接口变化需同步正文、字段原文及 Word，不得保留已失效的接入示例。
+本手册对应星载接口版本 5、地面状态 schema 4 与版本 2 的 GCM 帧合同。普通遥控与状态 HTTP 路由、运维快照、受控制备及激活 CLI 均按当前代码核对。后续接口变化需同步正文、字段原文及 Word，不得保留已失效的接入示例。
 
 | 项目 | 当前边界 |
 | --- | --- |
-| 软件证据 | 完整 release gate 已通过，星载 C 97.41%，地面 TC 相关包综合语句覆盖率 95.00%。 |
+| 软件证据 | 本版本须通过完整 release gate，C 和地面 TC Go 覆盖率均不低于 95%；实际结果见当前发布证据。 |
 | 主机闭环 | 真实 HTTP/SQLite/C 进程，使用公开测试根、测试 Next 规则和文件持久化回调。 |
 | 目标验收 | 物理 TPM、真实 NVM 掉电、正式任务规则、链路与星务业务去重仍需目标环境验证。 |
-| 运维写链路 | 完整在线预置下一关联和建立 PREPARED 的管理接入需明确，不能把内部 Store 方法当作现有外部 API。 |
+| 运维写链路 | 新业务根的受控导入仍需管理接入；已生效根的未来 Next 由提升事务建立。普通 HTTP 不提供根写入。 |
 | 遥测新鲜度 | 当前上报接口不含采样时间或序列号，调用方补足来源与时序校验。 |
 | 自动放行 | 诊断匹配与 ready 是观测结果，不是测控发送或业务执行的唯一授权条件。 |
 

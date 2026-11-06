@@ -13,12 +13,12 @@ func TestCMACCounterKDFCanonicalVectors(t *testing.T) {
 		derive func() ([]byte, error)
 		want   string
 	}{
-		{"sm4 hctr ordinary", func() ([]byte, error) {
-			return DeriveOrdinaryTrafficKey(kdfHex("0123456789abcdeffedcba9876543210"), 0x1234, suite.SM4HCTR, 0x2001, 7, 9)
-		}, "d077e6052e64fa4b35b2465d3250dcb7055fa70d4d1de6807b5a2497d5c703e6"},
+		{"sm4 gcm32 ordinary", func() ([]byte, error) {
+			return DeriveOrdinaryTrafficKey(kdfHex("0123456789abcdeffedcba9876543210"), 0x1234, suite.SM4GCM32, 0x2001, 7, 9)
+		}, "e65e51da8d91ab0265ae2edc06df6345"},
 		{"sm4 recovery", func() ([]byte, error) {
 			return DeriveRecoveryGCMKey(kdfHex("0123456789abcdeffedcba9876543210"), 0x1234, suite.SM4GCM, 0x7002, 3)
-		}, "173537c63f1e50ad3629cfdc49118d2b"},
+		}, "fd9de82c509cc2b9b7afd907a63baa7e"},
 	}
 	for _, test := range tests {
 		got, err := test.derive()

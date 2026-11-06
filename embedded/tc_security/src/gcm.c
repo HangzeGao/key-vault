@@ -79,18 +79,18 @@ static void increment_counter32(uint8_t counter[16]) {
     }
 }
 
-static int constant_time_equal(const uint8_t left[16], const uint8_t right[16]) {
+static int constant_time_equal(const uint8_t left[16], const uint8_t right[16], size_t length) {
     uint8_t difference = 0u;
     size_t index;
-    for (index = 0u; index < 16u; ++index) difference |= (uint8_t)(left[index] ^ right[index]);
+    for (index = 0u; index < length; ++index)
+        difference |= (uint8_t)(left[index] ^ right[index]);
     return difference == 0u;
 }
 
-int tcsec_gcm_open(tcsec_suite_t suite, const uint8_t *key,
-                   const uint8_t nonce[TCSEC_GCM_NONCE_LENGTH],
-                   const uint8_t *aad, size_t aad_length,
-                   const uint8_t *ciphertext, size_t ciphertext_length,
-                   const uint8_t tag[TCSEC_GCM_TAG_LENGTH], uint8_t *plaintext) {
+static int gcm_open(tcsec_suite_t suite, const uint8_t *key,
+                    const uint8_t nonce[TCSEC_GCM_NONCE_LENGTH], const uint8_t *aad,
+                    size_t aad_length, const uint8_t *ciphertext, size_t ciphertext_length,
+                    const uint8_t *tag, size_t tag_length, uint8_t *plaintext) {
     uint8_t hash_key[16] = {0u};
     uint8_t state[16] = {0u};
     uint8_t length_block[16] = {0u};
@@ -107,7 +107,10 @@ int tcsec_gcm_open(tcsec_suite_t suite, const uint8_t *key,
     if (aad_length > UINT64_MAX / 8u || ciphertext_length > UINT64_MAX / 8u ||
         ciphertext_length > ((uint64_t)UINT32_MAX - 1u) * 16u) return -1;
 #endif
-    if (suite != TCSEC_SUITE_SM4_GCM || tcsec_sm4_key_init(&key_context, key) != 0) return -1;
+    if (((suite != TCSEC_SUITE_SM4_GCM || tag_length != 16u) &&
+         (suite != TCSEC_SUITE_SM4_GCM_32 || tag_length != 4u)) ||
+        tcsec_sm4_key_init(&key_context, key) != 0)
+        return -1;
     tcsec_sm4_encrypt_with_key(&key_context, hash_key, hash_key);
     ghash_bytes(state, hash_key, aad, aad_length);
     ghash_bytes(state, hash_key, ciphertext, ciphertext_length);
@@ -118,7 +121,7 @@ int tcsec_gcm_open(tcsec_suite_t suite, const uint8_t *key,
     j0[15] = 1u;
     tcsec_sm4_encrypt_with_key(&key_context, j0, mask);
     for (offset = 0u; offset < 16u; ++offset) expected_tag[offset] = (uint8_t)(state[offset] ^ mask[offset]);
-    if (!constant_time_equal(expected_tag, tag)) {
+    if (!constant_time_equal(expected_tag, tag, tag_length)) {
         result = -2;
         goto done;
     }
@@ -146,4 +149,21 @@ done:
     zeroize(expected_tag, sizeof(expected_tag));
     if (result != 0 && plaintext != NULL) zeroize(plaintext, ciphertext_length);
     return result;
+}
+
+int tcsec_gcm_open(tcsec_suite_t suite, const uint8_t *key, const uint8_t nonce[12],
+                   const uint8_t *aad, size_t aad_length, const uint8_t *ciphertext, size_t length,
+                   const uint8_t tag[16], uint8_t *plaintext) {
+    if (suite != TCSEC_SUITE_SM4_GCM)
+        return -1;
+    return gcm_open(suite, key, nonce, aad, aad_length, ciphertext, length, tag, 16u, plaintext);
+}
+
+int tcsec_gcm_open_short(const uint8_t key[16], const uint8_t nonce[12], const uint8_t *aad,
+                         size_t aad_length, const uint8_t *ciphertext, size_t length,
+                         const uint8_t tag[4], uint8_t *plaintext) {
+    if (aad_length > 1024u || length > 1024u - aad_length)
+        return -1;
+    return gcm_open(TCSEC_SUITE_SM4_GCM_32, key, nonce, aad, aad_length, ciphertext, length, tag,
+                    4u, plaintext);
 }

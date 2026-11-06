@@ -38,7 +38,7 @@ func TestStrictStoreContractAndProtocolKeyReads(t *testing.T) {
 	if err := store.CreateProtocolKey(ctx, nil, nil); err == nil {
 		t.Fatal("nil protocol key accepted")
 	}
-	key, version := testKey("tenant", "root", "SM4_HCTR", 1)
+	key, version := testKey("tenant", "root", "SM4_GCM_32", 1)
 	if err := store.CreateProtocolKey(ctx, key, version); err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestMissionBindingAndFlightObservationFailClosed(t *testing.T) {
 	if _, err := store.ReadMissionProfileDigest(ctx, "missing"); !errors.Is(err, ccsds.ErrAssociationNotFound) {
 		t.Fatalf("missing digest error=%v", err)
 	}
-	status := ccsds.FlightSecurityStatus{FormatVersion: 1, ProfileDigest: digest,
+	status := ccsds.FlightSecurityStatus{FormatVersion: 2, ProfileDigest: digest,
 		SelfTest: ccsds.FlightSelfTestPassed, CryptoBackend: ccsds.FlightBackendARMv7NEON,
 		CurrentSPI: 0xffff, NextSPI: 0, RecoverySPI: 0x7001, SecurityEpoch: 3, RootVersion: 2,
 		PendingRootPresent: true, ReceiveCount: ^uint64(0), LastReceiveUS: 12, MaxReceiveUS: 44,
@@ -286,12 +286,12 @@ func TestClosedDatabaseFailsAllPersistenceBoundaries(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	key, version := testKey("tenant", "root", "SM4_HCTR", 1)
+	key, version := testKey("tenant", "root", "SM4_GCM_32", 1)
 	association := ccsds.SecurityAssociation{ID: "sa", TenantID: "tenant", SPI: 1, Direction: ccsds.DirectionTCTx,
-		KeyID: "root", KeyVersion: 1, SecurityEpoch: 1, PolicyVersion: 1, SuiteID: "SM4_HCTR",
-		State: ccsds.AssociationCurrent, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: []byte{1, 2, 3, 4, 5, 6}}}
+		KeyID: "root", KeyVersion: 1, SecurityEpoch: 1, PolicyVersion: 1, SuiteID: "SM4_GCM_32",
+		State: ccsds.AssociationCurrent, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 2, TagLength: 4, NoncePrefix: []byte{1, 2, 3, 4, 5, 6}}}
 	digest := [32]byte{1}
-	status := ccsds.FlightSecurityStatus{FormatVersion: 1, ProfileDigest: digest, SelfTest: ccsds.FlightSelfTestPassed,
+	status := ccsds.FlightSecurityStatus{FormatVersion: 2, ProfileDigest: digest, SelfTest: ccsds.FlightSelfTestPassed,
 		CryptoBackend: ccsds.FlightBackendSoftware, CurrentSPI: 1, NextSPI: 2, SecurityEpoch: 1, RootVersion: 1}
 	rotation := ccsds.TCRotationState{Phase: ccsds.TCRotationPrepared, TransactionID: 1,
 		CurrentSPI: 1, NextSPI: 2, CurrentRootVersion: 1, NextRootVersion: 2}
@@ -366,7 +366,7 @@ func TestCorruptRowsAndTransactionalFailuresFailClosed(t *testing.T) {
 	if _, err := store.db.ExecContext(ctx, `CREATE TRIGGER reject_key_version BEFORE INSERT ON protocol_key_versions BEGIN SELECT RAISE(ABORT,'reject'); END`); err != nil {
 		t.Fatal(err)
 	}
-	key, version := testKey("tenant-1", "rejected-root", "SM4_HCTR", 3)
+	key, version := testKey("tenant-1", "rejected-root", "SM4_GCM_32", 3)
 	if err := store.CreateProtocolKey(ctx, key, version); !errors.Is(err, ErrConflict) {
 		t.Fatalf("key transaction error=%v", err)
 	}
@@ -377,7 +377,7 @@ func TestCorruptRowsAndTransactionalFailuresFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	extraKey, extraVersion := testKey("tenant-1", "extra-root", "SM4_HCTR", 3)
+	extraKey, extraVersion := testKey("tenant-1", "extra-root", "SM4_GCM_32", 3)
 	if err := store.CreateProtocolKey(ctx, extraKey, extraVersion); err != nil {
 		t.Fatal(err)
 	}
@@ -385,8 +385,8 @@ func TestCorruptRowsAndTransactionalFailuresFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	extra := ccsds.SecurityAssociation{ID: "extra", TenantID: "tenant-1", SPI: 0x3001, Direction: ccsds.DirectionTCTx,
-		KeyID: extraKey.ID, KeyVersion: 3, SecurityEpoch: 3, PolicyVersion: 1, SuiteID: "SM4_HCTR",
-		State: ccsds.AssociationNext, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 4, NoncePrefix: []byte{1, 2, 3, 4, 5, 6}}}
+		KeyID: extraKey.ID, KeyVersion: 3, SecurityEpoch: 3, PolicyVersion: 1, SuiteID: "SM4_GCM_32",
+		State: ccsds.AssociationNext, Parameters: ccsds.ManagedParameters{TransmittedIVLength: 2, TagLength: 4, NoncePrefix: []byte{1, 2, 3, 4, 5, 6}}}
 	if err := store.CreateAssociation(ctx, extra); err == nil {
 		t.Fatal("runtime-state trigger failure ignored")
 	}

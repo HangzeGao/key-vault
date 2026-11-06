@@ -1,5 +1,6 @@
 # TC 地面端到星载端端到端测试设计
 
+普通 TC、Recovery、KDF、短标签预算及当前版本以 [TC GCM 帧格式](TC_GCM_PROFILE.md) 为准。
 本文是 [`CRYPTOGRAPHIC_TEST_DESIGN.md`](CRYPTOGRAPHIC_TEST_DESIGN.md) 的 TC 专项下位测试设计。所有 TC 测试必须先满足上位合同中的算法 KAT、独立差分、加固、证据和变更触发要求；发生冲突时以上位合同为准。
 
 ## 1. 目标与验收边界
@@ -33,20 +34,23 @@ HTTP API -> 地面 CCSDS 应用服务 -> SQLite SecurityState/测试 TPM
 | 地面重启及重新保护 | 1 | 已生成但丢弃的帧消耗 IV，重开数据库后不重用；延迟帧与重复帧判定 |
 | 连续存储失败 | 2 | 提交前失败、候选半写，各连续三次；停收不再调用提交，reset 后恢复 |
 | 状态丢失与损坏 | 3 | 缺失、截断、校验损坏，初始化拒绝，不自动首装 |
-| Current 无认证边界 | 1 | 修改密文并重算 FECF，可能交付被修改的明文；须由星务业务校验 |
+| 普通帧认证 | 1 | 头、计数、标签与密文篡改并重算 FECF，均认证失败且保留已扣预算 |
 | Recovery 认证异常 | 5 | 头、IV、密文、Tag、错误根；重算 FECF 后认证仍拒绝，Pending 和重放状态不推进 |
 | Next 切换拒绝 | 2 | 非法指令、密文变异；保留 Current 与 Pending，后续合法 Next 可提升 |
 | 三类提交中断与重试 | 21 | 普通重放、换根准备、Next 提升，各执行正常、失败、半写、不确定及三种进程终止 |
 | 地面输入拒绝 | 4 | 非法 Base64、未知字段、短明帧、错误 FECF，不消耗 IV |
-| 合计 | 51 | 包括正常对照与异常路径，不是全部异常空间的覆盖百分比 |
+| 预算跨复位与 Recovery | 1 | 1024 次无效帧耗尽预算，重启保留额度，Recovery 换根后新工作密钥独立可用 |
+| 预算提交中断 | 6 | 预留前失败、半写、不确定和三种进程终止，未预留时不得调用密码验证 |
+| 连续工作密钥轮换 | 1 | 确认前禁止超前、同根三次提升、选择值循环后旧帧认证拒绝 |
+| 合计 | 59 | 包括正常对照与异常路径，不是全部异常空间的覆盖百分比 |
 
-每个场景分别运行优化版和 ASan/UBSan 版，共 102 次场景执行。正式清单在
+每个场景分别运行优化版和 ASan/UBSan 版，共 118 次场景执行。正式清单在
 `testdata/tc-process-scenarios.json`。门禁从 `go test -json` 生成报告，要求
 清单中所有场景通过、测试包完整结束、无跳过、无未登记的叶用例。增加或
 重命名场景须同步清单；不得仅依赖测试函数名过滤后输出总体 passed。
 
 普通帧必须逐字节匹配发送前的公开明文；拒绝或管理消息的明文长度为零，
-输出缓冲无明文。拒绝和确定未提交的场景还比较持久快照哈希。提交后确认
+输出缓冲无明文。拒绝和确定未提交的场景比较根、代次及重放状态的规范化快照哈希，排除有意增加的验证预算；预算字段另行明确断言。提交后确认
 丢失或进程终止时，以重载后的完整状态和重复接收判定为准，不能要求回退。
 换根使用不同于旧根的新测试根，覆盖 Pending 重启、旧 SPI 退役、后续新根
 指令和真实星载诊断经 HTTP 回传、地面数据库重载后的核对。
@@ -62,16 +66,16 @@ HTTP API -> 地面 CCSDS 应用服务 -> SQLite SecurityState/测试 TPM
 
 ## 2. 当前协议契约
 
-普通 TC 使用 SM4-HCTR：
+普通 TC 使用 SM4-GCM-32：
 
 ```text
-TC Primary Header(5) | SPI(2) | IV Counter(4) | Ciphertext(N) | FECF(2)
+TC Primary Header(5) | Selector2/Counter14(2) | Tag(4) | Ciphertext(N) | FECF(2)
 ```
 
 Recovery TC 使用 SM4-GCM：
 
 ```text
-TC Primary Header(5) | Recovery SPI(2) | IV Counter(4)
+TC Primary Header(5) | Control 0xC000(2) | IV Counter(4)
 | Recovery Ciphertext(41) | Tag(16) | FECF(2)
 ```
 
@@ -80,14 +84,14 @@ TC Primary Header(5) | Recovery SPI(2) | IV Counter(4)
 | 模块 | 输入 | 输出或职责 |
 | --- | --- | --- |
 | 测控调用方 | 带合法帧长和 FECF 的完整 TC 明帧 | 调用 `POST /api/v1/tc:protect` |
-| 地面密码系统普通 TC API | Base64 完整明帧 | Base64 完整 `Primary Header \| SPI \| IV \| Ciphertext \| FECF` 密帧 |
+| 地面密码系统普通 TC API | Base64 完整明帧 | Base64 完整 `Primary Header \| Control \| Tag4 \| Ciphertext \| FECF` 密帧 |
 | 地面密码系统受控 Recovery 流程 | 主导头模板与换根事务 | 完整 Recovery GCM 密帧；Primary Header 与安全头均被认证 |
 | 测控链路适配器 | 地面返回的完整密帧 | 原样传输并提供受控故障注入，不再组帧 |
 | 星载密码模块 | 完整 TC 帧 | 状态码、普通明文；Recovery 消息不输出普通明文 |
 | 星务适配器 | 解密明文 | 按测控团队提供的规则校验包格式和允许范围 |
 | 星载 NVM 适配器 | 待提交状态 | 原子持久化；失败时不得释放明文或推进重放状态 |
 
-Current 帧通过密码模块检查后先持久化 replay 再交付。首个 Next 帧还须通过内部明文校验才持久化切换。HCTR 提供宽块扩散，缺少完整性认证。
+Current 帧通过密码模块检查后先持久化 replay 再交付。首个 Next 帧还须通过内部明文校验才持久化切换。GCM32 验证主导头、控制字和密文，认证保障受 32 位标签限制，且必须遵守持久预算。
 
 重传合同固定为“再次保护、使用新 IV”：同一明帧每次调用 `tc:protect` 都分配新 Counter 并产生新密帧；密码系统不缓存密帧，也不实现 `Idempotency-Key`。测控链路重传同一逻辑帧时必须保持 TC 主导头中的帧序列号不变，星载 FARM/COP-1 或等价接收层负责阻止同一帧序列号重复交付。IV replay 只拒绝完全相同的旧密帧，不能替代帧序列号去重。
 
@@ -143,11 +147,11 @@ Harness 内部只保留以下适配器：
 
 | 项目 | 测试值 |
 | --- | --- |
-| 普通算法 | SM4-HCTR |
+| 普通算法 | SM4-GCM-32 |
 | Current | SPI `0x1001`，epoch 1，operational root v1 |
 | Next | SPI `0x1002`，epoch 2，初始使用 operational root v1 |
 | Recovery | SPI `0x7001`，SM4-GCM，recovery root v1，Tag 16 字节 |
-| IV | 32 位单调计数器，由地面持久化分配 |
+| IV | 普通空口 14 位，地面单工作密钥分配上限 1024；Recovery 独立 32 位 |
 | 普通重放窗口 | 64 |
 | 普通最大前跳 | 4096 |
 | 最大 TC 帧 | 1024 字节 |
@@ -164,7 +168,7 @@ Harness 内部只保留以下适配器：
 目的：快速验证 Go 与 C 对同一根密钥、SPI、IV、派生上下文和帧字节得到一致结果。
 
 - 每次提交运行。
-- 使用当前 SM4-HCTR 与 SM4-GCM Recovery 共享向量，并单独校验 HCTR 整块和非整块标准向量。
+- 使用当前 SM4-GCM-32 与 SM4-GCM Recovery 共享向量，并单独校验 GCM32 整块和非整块标准向量。
 - 覆盖 C 模块的 replay、FECF、持久化失败、Next promotion 和 Recovery authentication。
 - 不声称覆盖 HTTP、数据库、TPM、并发 IV 分配或进程重启。
 
@@ -231,12 +235,12 @@ Harness 内部只保留以下适配器：
 
 ### 6.6 首个 Next 帧的明文规则
 
-1. 修改首个 Next 帧的 HCTR 密文中的一位，并重新计算正确 FECF。
+1. 修改首个 Next 帧的 GCM32 密文中的一位，并重新计算正确 FECF。
 2. 期望 FECF 通过，但明文校验失败并返回 `PLAINTEXT_REJECTED`。
 3. 断言不释放明文，不提交 replay 或切换状态。
 4. 另发一帧可解密、业务语义非法的 Current 帧。星务拒绝执行后，重放同一密帧仍被密码模块拒绝。
 
-Next 篡改用例必须使用测控团队提供的正式明文校验规则。HCTR 会把篡改扩散为整段不可控变化，但不能代替认证；该用例验证的是关闭式拒绝边界，不能只用“前两个字节固定”作为最终验收。
+Next 篡改用例必须使用测控团队提供的正式明文校验规则。重新计算 FECF 不能生成合法 GCM 标签；篡改须在密码认证阶段拒绝。任务规则检查则使用已正确认证但语义非法的 Next 帧验证。
 
 ## 7. P0 拒绝矩阵
 
@@ -317,7 +321,7 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 
 密码系统无法判断一条业务指令是否危险，但星载密码模块必须在切换前确认首个 Next 帧符合包结构和任务规则。必选校验合同、规则表输入和反例矩阵统一定义在 [`TC_PLAINTEXT_VALIDATION_DESIGN.md`](TC_PLAINTEXT_VALIDATION_DESIGN.md)，本测试设计不复制另一套字段规则。
 
-端到端测试必须链接正式任务规则，并至少覆盖固定 TC 主导头、唯一未分段 Space Packet、长度精确一致、`VCID -> APID -> 指令码` 白名单、参数范围、保留位和填充。合成规则和合成指令只用于底层 C 模块机制测试。任务级规则表及其正反样例未冻结前，HCTR 篡改用例不得标记为安全验收完成。
+端到端测试必须链接正式任务规则，并至少覆盖固定 TC 主导头、唯一未分段 Space Packet、长度精确一致、`VCID -> APID -> 指令码` 白名单、参数范围、保留位和填充。合成规则和合成指令只用于底层 C 模块机制测试。任务级规则表及其正反样例未冻结前，正式 Next 任务规则不得标记为验收完成。
 
 ### 11.5 真实板载适配器
 
@@ -331,8 +335,8 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 - 任意校验、认证、重放或持久化失败均不会释放明文或推进状态；
 - 地面并发与重启不会造成 IV 重用；
 - 星载重启不会遗忘已接受帧或 pending root；
-- HCTR 篡改能被正式遥控包规则拒绝；
-- SM4-HCTR 普通链路和 SM4-GCM Recovery 链路均使用真实生产代码；
+- GCM32 篡改在认证阶段拒绝，已认证但非法的 Next 指令由正式任务规则拒绝；
+- SM4-GCM-32 普通链路和 SM4-GCM Recovery 链路均使用真实生产代码；
 - 物理 TPM 与目标星载板卡的硬件在环测试满足已分配的执行时间和资源预算。
 
 

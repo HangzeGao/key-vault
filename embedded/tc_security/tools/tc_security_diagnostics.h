@@ -4,30 +4,40 @@
 #include "tc_security.h"
 
 static inline const char *tcsec_status_string(tcsec_status_t status) {
-    static const char *const names[] = {
-        "OK", "INVALID_ARGUMENT", "INVALID_CONFIGURATION", "FRAME_LENGTH_INVALID",
-        "FECF_INVALID", "ASSOCIATION_NOT_FOUND", "REPLAY_REJECTED",
-        "IV_FORWARD_JUMP_REJECTED", "AUTHENTICATION_FAILED", "OUTPUT_TOO_SMALL",
-        "PLAINTEXT_REJECTED", "ROOT_PREPARE_REJECTED", "PERSISTENCE_FAILED",
-        "STATE_INTEGRITY_FAILED", "EPOCH_PROMOTED", "ROOT_PREPARED",
-        "ROOT_ALREADY_PREPARED", "SELF_TEST_FAILED",
-        "NOT_INITIALIZED",
-        "ALREADY_INITIALIZED",
-        "MISSING_CALLBACK",
-        "RECEPTION_PAUSED",
-        "STORAGE_UNAVAILABLE",
-        "STORAGE_NO_QUORUM",
-        "STORAGE_ROLLBACK_DETECTED",
-        "STORAGE_NOT_COMMISSIONED",
-        "STORAGE_COMMIT_UNCERTAIN",
-        "STATE_COMMIT_REJECTED",
-        "CALLBACK_RESULT_INVALID",
-        "EPOCH_EXHAUSTED",
-        "SPI_COLLISION",
-        "KEY_DERIVATION_FAILED",
-        "PROFILE_MISMATCH"
-    };
-    return (int)status >= 0 && status <= TCSEC_PROFILE_MISMATCH ? names[status] : "UNKNOWN";
+    static const char *const names[] = {"OK",
+                                        "INVALID_ARGUMENT",
+                                        "INVALID_CONFIGURATION",
+                                        "FRAME_LENGTH_INVALID",
+                                        "FECF_INVALID",
+                                        "ASSOCIATION_NOT_FOUND",
+                                        "REPLAY_REJECTED",
+                                        "IV_FORWARD_JUMP_REJECTED",
+                                        "AUTHENTICATION_FAILED",
+                                        "OUTPUT_TOO_SMALL",
+                                        "PLAINTEXT_REJECTED",
+                                        "ROOT_PREPARE_REJECTED",
+                                        "PERSISTENCE_FAILED",
+                                        "STATE_INTEGRITY_FAILED",
+                                        "EPOCH_PROMOTED",
+                                        "ROOT_PREPARED",
+                                        "ROOT_ALREADY_PREPARED",
+                                        "SELF_TEST_FAILED",
+                                        "NOT_INITIALIZED",
+                                        "ALREADY_INITIALIZED",
+                                        "MISSING_CALLBACK",
+                                        "RECEPTION_PAUSED",
+                                        "STORAGE_UNAVAILABLE",
+                                        "STORAGE_NO_QUORUM",
+                                        "STORAGE_ROLLBACK_DETECTED",
+                                        "STORAGE_NOT_COMMISSIONED",
+                                        "STORAGE_COMMIT_UNCERTAIN",
+                                        "STATE_COMMIT_REJECTED",
+                                        "CALLBACK_RESULT_INVALID",
+                                        "EPOCH_EXHAUSTED",
+                                        "KEY_DERIVATION_FAILED",
+                                        "PROFILE_MISMATCH",
+                                        "AUTH_BUDGET_EXHAUSTED"};
+    return (int)status >= 0 && status <= TCSEC_AUTH_BUDGET_EXHAUSTED ? names[status] : "UNKNOWN";
 }
 
 #endif

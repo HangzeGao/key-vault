@@ -11,14 +11,14 @@ import (
 const tcDirectionCode byte = 1
 
 var (
-	ordinaryKDFLabel = []byte("TC-TRAFFIC")
-	recoveryKDFLabel = []byte("TC-RECOVERY-GCM")
+	ordinaryKDFLabel = []byte("TC-GCM32-V1")
+	recoveryKDFLabel = []byte("TC-GCM128-RECOVERY-V1")
 )
 
 func DeriveOrdinaryTrafficKey(root []byte, spacecraftID uint16, ordinarySuite suite.ID,
 	spi uint16, securityEpoch, keyVersion uint32) ([]byte, error) {
-	if ordinarySuite != suite.SM4HCTR {
-		return nil, fmt.Errorf("%w: ordinary KDF requires SM4_HCTR", ErrFrameInvalid)
+	if ordinarySuite != suite.SM4GCM32 {
+		return nil, fmt.Errorf("%w: ordinary KDF requires SM4_GCM_32", ErrFrameInvalid)
 	}
 	context := ordinaryKDFContext(spacecraftID, ordinarySuite, spi, securityEpoch, keyVersion)
 	return kdf.CMACCounter(root, ordinarySuite, ordinaryKDFLabel, context)

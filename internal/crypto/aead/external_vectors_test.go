@@ -62,12 +62,12 @@ func TestExternalOpenSourceSM4Vectors(t *testing.T) {
 				}
 			case "SM4_GCM":
 				assertCipherVector(t, suite.SM4GCM, vector)
-			case "SM4_HCTR":
-				assertCipherVector(t, suite.SM4HCTR, vector)
+			case "SM4_GCM_32":
+				assertCipherVector(t, suite.SM4GCM32, vector)
 			case "SP800_108_SM4_CMAC":
 				target := suite.SM4GCM
-				if len(vector.output) == suite.SM4HCTR.WorkingKeyBytes() {
-					target = suite.SM4HCTR
+				if len(vector.output) == suite.SM4GCM32.KeyBytes() {
+					target = suite.SM4GCM32
 				}
 				got, err := cryptokdf.CMACCounter(vector.key, target, vector.label, vector.context)
 				if err != nil {
@@ -82,7 +82,7 @@ func TestExternalOpenSourceSM4Vectors(t *testing.T) {
 	}
 	for algorithm, minimum := range map[string]int{
 		"SM4_BLOCK": 5, "SM4_CMAC": 8, "SM4_GCM": 6,
-		"SM4_HCTR": 7, "SP800_108_SM4_CMAC": 2,
+		"SM4_GCM_32": 7, "SP800_108_SM4_CMAC": 2,
 	} {
 		if counts[algorithm] < minimum {
 			t.Fatalf("%s vector count = %d, want >= %d", algorithm, counts[algorithm], minimum)
@@ -94,7 +94,7 @@ func assertExternalOracle(t *testing.T, vector externalVector) {
 	t.Helper()
 	switch vector.algorithm {
 	case "SM4_BLOCK", "SM4_CMAC":
-		if vector.generator != "pyca-cryptography" || vector.generatorVersion != "49.0.0/OpenSSL-4.0.1" {
+		if vector.generator != "pyca-cryptography" || vector.generatorVersion != "50.0.2/OpenSSL-4.0.3" {
 			t.Fatalf("unexpected cryptography oracle %q/%q", vector.generator, vector.generatorVersion)
 		}
 	case "SM4_GCM":
@@ -103,17 +103,17 @@ func assertExternalOracle(t *testing.T, vector externalVector) {
 				t.Fatalf("unexpected normative GCM oracle %q/%q", vector.generator, vector.generatorVersion)
 			}
 		} else if vector.generator != "pyca-cryptography" ||
-			vector.generatorVersion != "49.0.0/OpenSSL-4.0.1" || vector.sourceClass != "INDEPENDENT" {
+			vector.generatorVersion != "50.0.2/OpenSSL-4.0.3" || vector.sourceClass != "INDEPENDENT" {
 			t.Fatalf("unexpected independent GCM oracle %q/%q/%q", vector.generator, vector.generatorVersion, vector.sourceClass)
 		}
-	case "SM4_HCTR":
-		if vector.generator != "pyca-cryptography+independent-HCTR-reference" ||
-			vector.generatorVersion != "49.0.0/OpenSSL-4.0.1/profile-v1" || vector.sourceClass != "INDEPENDENT" {
-			t.Fatalf("unexpected HCTR oracle %q/%q/%q", vector.generator, vector.generatorVersion, vector.sourceClass)
+	case "SM4_GCM_32":
+		if vector.generator != "pyca-cryptography" ||
+			vector.generatorVersion != "50.0.2/OpenSSL-4.0.3" || vector.sourceClass != "INDEPENDENT" {
+			t.Fatalf("unexpected GCM32 oracle %q/%q/%q", vector.generator, vector.generatorVersion, vector.sourceClass)
 		}
 	case "SP800_108_SM4_CMAC":
 		if vector.generator != "pyca-cryptography+SP800-108-reference" ||
-			vector.generatorVersion != "49.0.0/OpenSSL-4.0.1/profile-v1" || vector.sourceClass != "INDEPENDENT" {
+			vector.generatorVersion != "50.0.2/OpenSSL-4.0.3/profile-v1" || vector.sourceClass != "INDEPENDENT" {
 			t.Fatalf("unexpected KDF oracle %q/%q/%q", vector.generator, vector.generatorVersion, vector.sourceClass)
 		}
 	default:

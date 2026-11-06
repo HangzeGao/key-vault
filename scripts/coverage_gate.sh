@@ -37,7 +37,7 @@ readonly C_SOURCES=(
   src/next_validation.c
   src/selftest.c
   src/sm4.c
-  src/hctr.c
+
   src/gcm.c
   src/kdf.c
   tests/test_tc_security.c
@@ -53,7 +53,7 @@ done
 
 "${CC:-cc}" --coverage "$COVERAGE_DIR"/*.o -o "$COVERAGE_DIR/test_tc_security"
 "$COVERAGE_DIR/test_tc_security" \
-  "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" \
+  "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_ordinary.txt" \
   "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"
 
 # Reuse the same instrumented production objects so injected failures contribute
@@ -66,10 +66,10 @@ done
   -Wall -Wextra -Wpedantic -Werror -DTCSEC_TEST_NEXT_POLICY=1 --coverage \
   "$C_DIR/tests/test_fault_injection.c" "${fault_objects[@]}" \
   -Wl,--wrap=tcsec_crypto_self_test -Wl,--wrap=tcsec_derive_ordinary_key \
-  -Wl,--wrap=tcsec_derive_recovery_key -Wl,--wrap=tcsec_sm4_hctr_decrypt \
+  -Wl,--wrap=tcsec_derive_recovery_key -Wl,--wrap=tcsec_gcm_open_short \
   -Wl,--wrap=tcsec_gcm_open -o "$COVERAGE_DIR/test_fault_injection"
 "$COVERAGE_DIR/test_fault_injection" \
-  "$ROOT_DIR/testdata/ccsds_tc_sm4_hctr.txt" \
+  "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_ordinary.txt" \
   "$ROOT_DIR/testdata/ccsds_tc_sm4_gcm_recovery.txt"
 
 "${CC:-cc}" -I"$C_DIR/include" -I"$C_DIR/src" -std=c11 -O2 \
@@ -82,7 +82,7 @@ readonly GCOV_OUTPUT="$COVERAGE_DIR/gcov-summary.txt"
 (
   cd "$COVERAGE_DIR"
   gcov -b -c -o . \
-    "$C_DIR/src/tc_security.c" "$C_DIR/src/sm4.c" "$C_DIR/src/hctr.c" \
+    "$C_DIR/src/tc_security.c" "$C_DIR/src/sm4.c" \
     "$C_DIR/src/gcm.c" "$C_DIR/src/kdf.c" \
     "$C_DIR/src/selftest.c" "$C_DIR/src/next_validation.c"
 ) | tee "$GCOV_OUTPUT"

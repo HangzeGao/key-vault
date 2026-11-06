@@ -101,9 +101,10 @@ func TestOperationsStatusReportsRotationClosureWarnings(t *testing.T) {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 	next.KeyVersion = current.KeyVersion
+	next.KeyID = "different-root"
 	legacy, _ := newTestSecurity(t, &fakeCore{}, current, next, recoveryAssociation())
 	status, err = legacy.OperationsStatus(context.Background(), "tenant-1")
-	if err != nil || !containsWarning(status.Warnings, "TC_NEXT_ROOT_NOT_ADVANCED") {
+	if err != nil || !containsWarning(status.Warnings, "TC_NEXT_ROOT_BINDING_MISMATCH") {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
 }

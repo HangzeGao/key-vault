@@ -4,21 +4,16 @@ import (
 	"encoding/binary"
 )
 
-func encodeTCSecurityHeader(spi uint16, counter uint32) []byte {
-	header := make([]byte, TCSecurityHeaderLength)
-	binary.BigEndian.PutUint16(header[0:2], spi)
-	binary.BigEndian.PutUint32(header[2:6], counter)
+func encodeRecoverySecurityHeader(counter uint32) []byte {
+	header := make([]byte, 6)
+	binary.BigEndian.PutUint16(header[:2], 0xc000)
+	binary.BigEndian.PutUint32(header[2:], counter)
 	return header
 }
-
-func tcHCTRTweak(prefix []byte, spi uint16, counter uint32) []byte {
-	tweak := make([]byte, 16)
-	copy(tweak[0:TCNoncePrefixLength], prefix)
-	binary.BigEndian.PutUint16(tweak[6:8], spi)
-	binary.BigEndian.PutUint32(tweak[8:12], counter)
-	// The final four bytes are a fixed domain-reserved field. They are zero in
-	// the sole current TC profile and are not a per-block CTR counter.
-	return tweak
+func encodeOrdinaryControl(epoch, counter uint32) []byte {
+	control := make([]byte, 2)
+	binary.BigEndian.PutUint16(control, uint16(epoch%3)<<14|uint16(counter))
+	return control
 }
 
 func validateTCFrame(frame []byte) error {

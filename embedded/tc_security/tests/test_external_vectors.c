@@ -1,7 +1,6 @@
 #include "tc_security.h"
 #include "tc_security_kdf.h"
 #include "gcm.h"
-#include "hctr.h"
 #include "sm4.h"
 
 #include <stdio.h>
@@ -113,47 +112,46 @@ static int test_gcm(const vector_t *vector) {
     return memcmp(plaintext, vector->plaintext, vector->plaintext_length) == 0;
 }
 
-static int test_hctr(const vector_t *vector) {
-    uint8_t ciphertext[VALUE_CAPACITY];
-    uint8_t plaintext[VALUE_CAPACITY];
-    if (vector->key_length != TCSEC_HCTR_WORKING_KEY_LENGTH ||
-        vector->nonce_length != TCSEC_HCTR_TWEAK_LENGTH ||
-        vector->plaintext_length < 16u ||
-        vector->ciphertext_length != vector->plaintext_length) return 0;
-    return tcsec_sm4_hctr_encrypt(vector->key, vector->nonce, vector->plaintext,
-                                  ciphertext, vector->plaintext_length) == 0 &&
-           memcmp(ciphertext, vector->ciphertext, vector->ciphertext_length) == 0 &&
-           tcsec_sm4_hctr_decrypt(vector->key, vector->nonce, vector->ciphertext,
-                                  plaintext, vector->ciphertext_length) == 0 &&
-           memcmp(plaintext, vector->plaintext, vector->plaintext_length) == 0;
+static int test_gcm32(const vector_t *v) {
+    uint8_t output[VALUE_CAPACITY];
+    if (v->key_length != 16 || v->nonce_length != 12 || v->tag_length != 4 ||
+        v->ciphertext_length != v->plaintext_length)
+        return 0;
+    if (tcsec_gcm_open_short(v->key, v->nonce, v->aad, v->aad_length, v->ciphertext,
+                             v->ciphertext_length, v->tag, output) != 0 ||
+        memcmp(output, v->plaintext, v->plaintext_length) != 0)
+        return 0;
+    return 1;
 }
 
 static int test_kdf(const vector_t *vector) {
-    uint8_t output[TCSEC_HCTR_WORKING_KEY_LENGTH];
+    uint8_t output[TCSEC_SM4_KEY_LENGTH];
     if (vector->key_length != TCSEC_SM4_KEY_LENGTH) return 0;
-    if (vector->output_length == TCSEC_HCTR_WORKING_KEY_LENGTH) {
-        return vector->label_length == 10u && memcmp(vector->label, "TC-TRAFFIC", 10u) == 0 &&
+    if (vector->context_length == 15u) {
+        return vector->label_length == 11u && memcmp(vector->label, "TC-GCM32-V1", 11u) == 0 &&
                vector->context_length == 15u &&
-               tcsec_derive_ordinary_key(vector->key, vector->key_length,
+               tcsec_derive_ordinary_key(
+                   vector->key, vector->key_length,
                    (uint16_t)((vector->context[0] << 8) | vector->context[1]),
-                   TCSEC_SUITE_SM4_HCTR,
+                   TCSEC_SUITE_SM4_GCM_32,
                    (uint16_t)((vector->context[5] << 8) | vector->context[6]),
                    ((uint32_t)vector->context[7] << 24) | ((uint32_t)vector->context[8] << 16) |
-                   ((uint32_t)vector->context[9] << 8) | vector->context[10],
+                       ((uint32_t)vector->context[9] << 8) | vector->context[10],
                    ((uint32_t)vector->context[11] << 24) | ((uint32_t)vector->context[12] << 16) |
-                   ((uint32_t)vector->context[13] << 8) | vector->context[14],
+                       ((uint32_t)vector->context[13] << 8) | vector->context[14],
                    output, sizeof(output)) == 0 &&
                memcmp(output, vector->output, vector->output_length) == 0;
     }
-    if (vector->output_length == TCSEC_SM4_KEY_LENGTH) {
-        return vector->label_length == 15u && memcmp(vector->label, "TC-RECOVERY-GCM", 15u) == 0 &&
+    if (vector->context_length == 10u) {
+        return vector->label_length == 21u &&
+               memcmp(vector->label, "TC-GCM128-RECOVERY-V1", 21u) == 0 &&
                vector->context_length == 10u &&
-               tcsec_derive_recovery_key(vector->key, vector->key_length,
-                   (uint16_t)((vector->context[0] << 8) | vector->context[1]),
-                   TCSEC_SUITE_SM4_GCM,
+               tcsec_derive_recovery_key(
+                   vector->key, vector->key_length,
+                   (uint16_t)((vector->context[0] << 8) | vector->context[1]), TCSEC_SUITE_SM4_GCM,
                    (uint16_t)((vector->context[4] << 8) | vector->context[5]),
                    ((uint32_t)vector->context[6] << 24) | ((uint32_t)vector->context[7] << 16) |
-                   ((uint32_t)vector->context[8] << 8) | vector->context[9],
+                       ((uint32_t)vector->context[8] << 8) | vector->context[9],
                    output, sizeof(output)) == 0 &&
                memcmp(output, vector->output, vector->output_length) == 0;
     }
@@ -163,7 +161,7 @@ static int test_kdf(const vector_t *vector) {
 int main(int argc, char **argv) {
     FILE *file;
     char line[LINE_CAPACITY];
-    unsigned block_count = 0u, cmac_count = 0u, gcm_count = 0u, hctr_count = 0u, kdf_count = 0u;
+    unsigned block_count = 0u, cmac_count = 0u, gcm_count = 0u, gcm32_count = 0u, kdf_count = 0u;
     if (argc != 2) { fprintf(stderr, "expected external vector path\n"); return 2; }
     file = fopen(argv[1], "rb");
     if (file == NULL) { fprintf(stderr, "cannot open external vectors\n"); return 2; }
@@ -175,16 +173,23 @@ int main(int argc, char **argv) {
         if (!parse(line, &vector)) { fprintf(stderr, "invalid external vector row\n"); fclose(file); return 1; }
         if (strcmp(vector.algorithm, "SM4_BLOCK") == 0) { ok = test_block(&vector); block_count++; }
         else if (strcmp(vector.algorithm, "SM4_CMAC") == 0) { ok = test_cmac(&vector); cmac_count++; }
-        else if (strcmp(vector.algorithm, "SM4_GCM") == 0) { ok = test_gcm(&vector); gcm_count++; }
-        else if (strcmp(vector.algorithm, "SM4_HCTR") == 0) { ok = test_hctr(&vector); hctr_count++; }
-        else if (strcmp(vector.algorithm, "SP800_108_SM4_CMAC") == 0) { ok = test_kdf(&vector); kdf_count++; }
+        else if (strcmp(vector.algorithm, "SM4_GCM") == 0) { ok = test_gcm(&vector); gcm_count++;
+        } else if (strcmp(vector.algorithm, "SM4_GCM_32") == 0) {
+            ok = test_gcm32(&vector);
+            gcm32_count++;
+        } else if (strcmp(vector.algorithm, "SP800_108_SM4_CMAC") == 0) {
+            ok = test_kdf(&vector);
+            kdf_count++;
+        }
         if (!ok) { fprintf(stderr, "external vector failed: %s\n", vector.id); fclose(file); return 1; }
     }
     fclose(file);
-    if (block_count < 5u || cmac_count < 8u || gcm_count < 6u || hctr_count < 7u || kdf_count < 2u) {
+    if (block_count < 5u || cmac_count < 8u || gcm_count < 6u || gcm32_count < 7u ||
+        kdf_count < 2u) {
         fprintf(stderr, "external vector coverage is incomplete\n"); return 1;
     }
-    printf("External pyca/cryptography/RFC vectors passed: block=%u cmac=%u gcm=%u hctr=%u kdf=%u\n",
-           block_count, cmac_count, gcm_count, hctr_count, kdf_count);
+    printf(
+        "External pyca/cryptography/RFC vectors passed: block=%u cmac=%u gcm=%u gcm32=%u kdf=%u\n",
+        block_count, cmac_count, gcm_count, gcm32_count, kdf_count);
     return 0;
 }
