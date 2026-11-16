@@ -137,7 +137,7 @@ type Snapshot struct {
 func (s *Service) Snapshot(ctx context.Context, tenantID string) (*Snapshot, error) {
 	result := &Snapshot{ObservedAt: time.Now().UTC(), Status: "READY", Ready: true,
 		UptimeSeconds: int64(time.Since(s.startTime).Seconds()), Checks: make(map[string]Check),
-		Warnings: make([]string, 0), Database: Database{ExpectedSchema: 4}, AccessRejections: s.access.Snapshot()}
+		Warnings: make([]string, 0), Database: Database{ExpectedSchema: securitystate.SchemaVersion}, AccessRejections: s.access.Snapshot()}
 	degrade := func(name, summary string) {
 		result.Checks[name] = Check{Status: "degraded", Summary: summary}
 		result.Ready = false
@@ -156,9 +156,9 @@ func (s *Service) Snapshot(ctx context.Context, tenantID string) (*Snapshot, err
 			degrade("database", "security state diagnostics unavailable")
 		} else {
 			result.Database = Database{Connected: true, IntegrityOK: diagnostics.IntegrityOK,
-				Schema: diagnostics.Schema, ExpectedSchema: 4, DatabaseBytes: diagnostics.DatabaseSize,
+				Schema: diagnostics.Schema, ExpectedSchema: securitystate.SchemaVersion, DatabaseBytes: diagnostics.DatabaseSize,
 				WALBytes: diagnostics.WALSize, Associations: diagnostics.Associations, AuditEvents: diagnostics.AuditEvents}
-			if !diagnostics.IntegrityOK || diagnostics.Schema != 4 {
+			if !diagnostics.IntegrityOK || diagnostics.Schema != securitystate.SchemaVersion {
 				degrade("database", "security state integrity or schema check failed")
 			} else {
 				ok("database", "security state integrity and schema verified")

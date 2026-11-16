@@ -22,7 +22,7 @@ flowchart LR
 
 ## 配置、装星与轮换
 
-星地使用同一份受控任务配置。地面 `ccsds-provision` 将 Current、Next 和 Recovery 根密钥封装到 TPM，输出完整的恢复通道换根准备帧及哈希证据。地面制备证据版本为 2，记录任务配置摘要和恢复帧哈希。
+星地核对同一份版本 3 非秘密任务清单摘要。地面 `ccsds-provision` 验证设备绑定封装和安装授权，将 Current、Next 和 Recovery 根密钥封装到 TPM 并提交暂存记录。安装确认及放行后才发布运行关联，Next 根随后通过 Recovery 事务安装。
 
 ### 星载首装与运行恢复
 

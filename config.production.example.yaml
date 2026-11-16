@@ -51,6 +51,8 @@ traffic_guard:
 ccsds:
   max_frame_length: 65536
   tc_spacecraft_id: 0
+  # Root-owned enrollment used by the offline commissioning command.
+  commissioning_trust_file: /etc/key-vault/commissioning-enrollment.yaml
 
 baseline:
   version: replace-with-approved-baseline

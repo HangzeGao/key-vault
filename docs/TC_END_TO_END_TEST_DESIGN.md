@@ -307,7 +307,7 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 
 ### 11.1 星地同源测试密钥装载
 
-`ccsds-provision` 只接受严格的 TC Mission Security Profile，导入 Current/Next/Recovery Root，并生成 Recovery Root Prepare 完整帧和哈希证据。星务通过受控首装工序灌装初始状态。
+`ccsds-provision` 验证版本 3 非秘密任务清单、设备绑定封装包和签名安装授权，原子暂存地面三份封存根。星务通过受控首装工序灌装初始状态。
 
 ### 11.2 地面 epoch 切换的生产编排入口
 
@@ -315,7 +315,7 @@ PR 门禁要求：所有 P0 通过、无 sanitizer 错误、无密钥泄漏、�
 
 ### 11.3 Recovery 帧生成入口
 
-普通测控 API 仍只接收带有效 FECF 的完整明文 TC 帧。Root Prepare 由离线 Mission Security Profile 强类型生成，Harness 消费同一个 `root-prepare.tc` 制品，不允许测控调用方传入 root、SPI、IV 或事务字段。
+普通测控 API 仍只接收带有效 FECF 的完整明文 TC 帧。Harness 以受控测试材料构造 Root Prepare，调用地面帧保护路径后送入星载 C。测控请求只接受业务帧，不接收 root、SPI、IV 或事务字段。
 
 ### 11.4 正式明文校验规则
 

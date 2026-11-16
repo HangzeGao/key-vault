@@ -38,4 +38,4 @@ TC Root 由 TPM 直接封装；不存在额外包装密钥层。
 
 普通 TC、Recovery TC 及星载接口以 `docs/TC_GROUND_FLIGHT_ARCHITECTURE.md` 和测试向量为准。
 
-数据库只接受 schema version 4 的 TC 表集合；含有下行状态表的数据库拒绝打开。
+数据库只接受 schema version 5 的 TC 表集合；含有下行状态表的数据库拒绝打开。

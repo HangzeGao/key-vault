@@ -26,7 +26,7 @@ func TestProtocolTCStateSurvivesRestart(t *testing.T) {
 		t.Fatalf("restored current=%+v err=%v", current, err)
 	}
 	diagnostics, err := store.Diagnostics(ctx)
-	if err != nil || diagnostics.Schema != schemaVersion || !diagnostics.IntegrityOK {
+	if err != nil || diagnostics.Schema != SchemaVersion || !diagnostics.IntegrityOK {
 		t.Fatalf("diagnostics=%+v err=%v", diagnostics, err)
 	}
 }

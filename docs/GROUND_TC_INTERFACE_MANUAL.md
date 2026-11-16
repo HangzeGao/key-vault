@@ -4,14 +4,14 @@
 
 本手册面向测控软件、遥测适配软件和地面集成人员，说明普通遥控加密、星载密码状态上报、只读诊断及受控换根的实际接入方式。地面密码服务接收完整 TC 明帧，返回可直接交给测控链路发送的完整密帧。测控调用方不选择密钥、SPI、IV 或安全代次。
 
-本手册与星务端接口手册使用同一遥控合同。普通遥控采用 SM4-GCM 和 4 字节标签；恢复通道换根准备采用独立工作密钥的 SM4-GCM 和 16 字节标签。AES 下行不在本手册范围内。地面状态格式为 schema 4，任务配置与星载状态上报格式均为版本 2；星载公开接口版本为 5。
+本手册与星务端接口手册使用同一遥控合同。普通遥控采用 SM4-GCM 和 4 字节标签；恢复通道换根准备采用独立工作密钥的 SM4-GCM 和 16 字节标签。AES 下行不在本手册范围内。地面状态格式为 schema 5，任务清单格式为版本 3，星载状态上报格式为版本 2；星载公开接口版本为 5。
 
 | 接入项 | 实际入口与责任 |
 | --- | --- |
 | 普通遥控加密 | POST /api/v1/tc:protect，输入和输出均为完整帧的 Base64。 |
 | 星载状态回传 | POST /api/v1/flight-status:observe，遥测适配方提交脱敏状态。 |
 | 只读运行诊断 | GET /ops/v1/status，运维方读取状态，不分配 IV、不执行切换。 |
-| 首装和换根制备 | ccsds-provision，受控读取任务配置、封装地面根并生成换根准备密帧。 |
+| 首装和换根制备 | ccsds-provision，验证签名安装授权及设备绑定封装，在地面 TPM 封存并暂存首装根。 |
 | 地面发送关联切换 | ccsds-activate，在地面推进已准备事务，不产生空口管理指令。 |
 
 ### 术语
@@ -335,32 +335,30 @@ CLI 退出码：0 就绪，1 降级，2 连接或请求不可达，3 审计完�
 
 常规切换流程是先协调发送调度、核对最新可信星载状态，再运行 ccsds-activate，随后用新的工作密钥保护普通任务指令。星上首个合法 Next 帧原子提升并回报；确认之前不得继续推进再下一代次。地面已经生成的密帧消耗计数，即使网络响应丢失也不能回退。单密钥限制按关联身份和持久分配状态执行，不能重新建库或换关联 ID 来重复使用同一密钥。
 
-### 首装配置与制备命令
+### 正式首装暂存命令
 
-地面首装使用受控任务配置，不将真实根放入源码、命令行参数、示例、日志或版本库。完整任务配置包含密钥材料，文件整体须按敏感材料管理。摘要是整个配置规范化 JSON 的 SHA-256；由制备工具生成，不手工拼接或只对非敏感字段计算。
+工装在关测回执获得核验后取得安装授权。操作员提交非秘密任务清单、地面设备绑定封装包和签名安装授权。任务清单只描述遥控参数，允许公开校验其摘要。
 
-| 配置字段 | 含义和约束 |
+| 清单字段 | 含义和约束 |
 | --- | --- |
-| format_version、mission_id、tenant_id、spacecraft_id | 版本固定 2，任务和租户非空，航天器号为 0～1023。 |
+| format_version、mission_id、tenant_id、spacecraft_id | 版本固定 3，任务和租户非空，航天器号为 0～1023。 |
 | tc.current_spi、tc.security_epoch | 初始当前 SPI 和非零安全代次，代次不能为 UINT32_MAX。 |
-| tc.current_root_version、tc.current_operational_root_hex | 当前业务根版本非零，根为 16 字节的 32 个十六进制字符。 |
-| tc.next_root_version、tc.next_operational_root_hex | 下一业务根版本大于当前，根为 16 字节。 |
-| tc.nonce_prefix_hex | 普通关联 6 字节前缀，Current 与 Next 保持相同任务绑定。 |
-| tc.recovery_spi、tc.recovery_root_version | 恢复通道内部逻辑 SPI；恢复根版本非零。 |
-| tc.recovery_root_hex、tc.recovery_nonce_prefix_hex | 独立恢复根 16 字节，恢复前缀 6 字节。 |
-| tc.recovery_transaction_id、tc.recovery_primary_header_hex | 非零换根事务号，5 字节恢复帧主导头模板。 |
+| tc.current_root_version、tc.next_root_version | 当前根版本非零，下一根版本严格大于当前。 |
+| tc.nonce_prefix_hex | 普通关联 6 字节前缀，Current 与 Next 共用。 |
+| tc.recovery_spi、tc.recovery_root_version、tc.recovery_nonce_prefix_hex | 恢复通道内部 SPI、独立根的非零版本及 6 字节前缀。 |
 
 ```text
-ccsds-provision --config GROUND_CONFIG \
-  --mission-profile MISSION_PROFILE \
-  --artifacts-dir PRIVATE_ARTIFACTS
+ccsds-provision --config /etc/key-vault/config.yaml \
+  --mission-profile MISSION.yaml \
+  --envelope GROUND_ENVELOPE.yaml \
+  --authorization INSTALL_APPROVAL.yaml
 ```
 
-三个参数分别指定地面 YAML 配置、受控任务配置和私有工件目录。后两项必填；config 使用部署配置加载规则，正式操作应明确指定。工具严格校验配置和已存材料，一致记录可核验复用；出现冲突会失败，不允许用重跑覆盖未知状态。
+四个参数均必填。部署配置及其 `ccsds.commissioning_trust_file` 均须为 root 所有、组及其他用户不可写的绝对路径普通文件。命令从该配置读取设置，使用目标机的原生 TPM。登记、封装包和授权使用各自的版本 1 YAML 文档。字段和签名原文见[根密钥首装设计](TC_ROOT_KEY_COMMISSIONING_DESIGN.md)。
 
-输出 `root-prepare.tc` 是完整恢复密帧，`release-evidence.json` 是任务与密帧哈希等证据。证据最后发布，部分工件写入中断时应核对哈希。输出不包含星载 NVM 镜像。星务通过自己的受控导入途径灌入首装根、参数和独立首装标记，运行时由加载回调交给模块。
+导入前核对本机、租户、航天器、任务摘要、事务、导入对象、封装签名和安装授权。封存 Current、Recovery 和 Next 根后，一次提交暂存记录。成功日志包含事务号、清单摘要及 `INSTALLED_LOCKED`。命令只写暂存记录和部署初始化数据，业务关联及计数由后续放行流程发布。
 
-制备包含多步持久化和工件发布，不是跨 TPM、数据库与文件系统的一次原子事务；失败时检查已完成步骤和计数，再决定续办。保护恢复帧时会持久写入匹配的 PREPARED 记录。该记录表示地面准备阶段，不证明星上已经保存 Pending；必须核对星上可信回报后再激活。
+三把根必须全部封存成功才持久提交。同一授权绑定重试保留第一份完整记录，冲突或损坏时停下来核查。正式发送以冷启动后的星地密钥确认和认证放行回执为依据。本命令只负责本地暂存；放行链路和实机验收尚待接入。
 
 ### 换根准备与地面切换
 
@@ -622,7 +620,7 @@ type CounterSnapshot struct {
 
 ## 附录 C 版本核对与待集成事项
 
-本手册对应星载接口版本 5、地面状态 schema 4 与版本 2 的 GCM 帧合同。普通遥控与状态 HTTP 路由、运维快照、受控制备及激活 CLI 均按当前代码核对。后续接口变化需同步正文、字段原文及 Word，不得保留已失效的接入示例。
+本手册对应星载接口版本 5、地面状态 schema 5 与版本 2 的 GCM 帧合同。普通遥控与状态 HTTP 路由、运维快照、受控制备及激活 CLI 均按当前代码核对。后续接口变化需同步正文、字段原文及 Word，不得保留已失效的接入示例。
 
 | 项目 | 当前边界 |
 | --- | --- |
@@ -646,4 +644,4 @@ type CounterSnapshot struct {
 | 正式首装 | 交付物为非秘密任务清单、设备绑定密钥封装件和认证回执。收齐重启确认及星上放行回执后才允许地面正式组帧。 |
 | 在轨运行 | 业务通过授权接口使用密码服务，人员可见版本、状态和审计结果。更新按 Recovery 流程执行。 |
 
-主机参考实现支持 TPM 随机源、HPKE 封装、ECDSA 验签及阶段门控。此处列出工装接线和部署约束。现行 `ccsds-provision` 的输入见第 5 节。正式切换须完成 TPM 对象注册、导入权限、受保护事务状态及星务回执联试。[根密钥首装设计](TC_ROOT_KEY_COMMISSIONING_DESIGN.md)
+地面命令已接通设备绑定的 TPM 导入及事务暂存，输入见第 5 节。受保护阶段锚、重启后密钥确认、星务回执和生产放行须在目标平台接入和验收。[根密钥首装设计](TC_ROOT_KEY_COMMISSIONING_DESIGN.md)

@@ -42,4 +42,4 @@ Use [config.production.example.yaml](config.production.example.yaml) as the
 field reference. Install the service under a dedicated non-root account; do not
 run it through the removed Docker/Compose development path.
 
-The database accepts schema version 4 only. Because the system is not in production, obsolete databases are deliberately rejected and must be reprovisioned from the controlled Mission Security Profile.
+The database accepts schema version 5 only. Because the system is not in production, obsolete databases are deliberately rejected and must be reprovisioned through authorized commissioning. The production staging command uses a public version-3 manifest and a device-bound envelope.

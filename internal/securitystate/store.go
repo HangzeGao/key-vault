@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 4
+const SchemaVersion = 5
 
 var (
 	ErrNotFound = errors.New("securitystate: not found")
@@ -115,8 +115,8 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, `SELECT version FROM schema_meta WHERE singleton=1`).Scan(&version); err != nil {
 		return fmt.Errorf("securitystate: read schema version: %w", err)
 	}
-	if version != schemaVersion {
-		return fmt.Errorf("securitystate: schema version %d is unsupported; expected %d", version, schemaVersion)
+	if version != SchemaVersion {
+		return fmt.Errorf("securitystate: schema version %d is unsupported; expected %d", version, SchemaVersion)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("securitystate: commit schema: %w", err)
@@ -127,9 +127,9 @@ func (s *Store) migrate(ctx context.Context) error {
 var schemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS schema_meta (
 		singleton INTEGER PRIMARY KEY CHECK (singleton=1),
-		version INTEGER NOT NULL CHECK (version=4)
+		version INTEGER NOT NULL CHECK (version=5)
 	) STRICT`,
-	`INSERT INTO schema_meta(singleton, version) VALUES(1, 4) ON CONFLICT(singleton) DO NOTHING`,
+	`INSERT INTO schema_meta(singleton, version) VALUES(1, 5) ON CONFLICT(singleton) DO NOTHING`,
 	`CREATE TABLE IF NOT EXISTS tenants (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
@@ -155,6 +155,13 @@ var schemaStatements = []string{
 		tenant_id TEXT PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
 		profile_digest BLOB NOT NULL CHECK (length(profile_digest)=32),
 		bound_at TEXT NOT NULL
+	) STRICT`,
+	`CREATE TABLE IF NOT EXISTS ground_commissioning (
+		tenant_id TEXT PRIMARY KEY REFERENCES tenants(id),
+		transaction_id BLOB NOT NULL UNIQUE CHECK (length(transaction_id)=32),
+		binding_digest BLOB NOT NULL CHECK (length(binding_digest)=32),
+		sealed_installation BLOB NOT NULL CHECK (length(sealed_installation)>0),
+		installation_digest BLOB NOT NULL CHECK (length(installation_digest)=32)
 	) STRICT`,
 	`CREATE TABLE IF NOT EXISTS flight_security_status (
 		tenant_id TEXT PRIMARY KEY REFERENCES mission_profiles(tenant_id) ON DELETE CASCADE,
@@ -380,7 +387,7 @@ func (s *Store) Diagnostics(ctx context.Context) (*Diagnostics, error) {
 	if info, err := os.Stat(s.path + "-wal"); err == nil {
 		walSize = info.Size()
 	}
-	return &Diagnostics{ObservedAt: time.Now().UTC(), Schema: schemaVersion, DatabaseSize: size,
+	return &Diagnostics{ObservedAt: time.Now().UTC(), Schema: SchemaVersion, DatabaseSize: size,
 		WALSize: walSize, Associations: associations, AuditEvents: auditEvents, IntegrityOK: integrity == "ok"}, nil
 }
 

@@ -104,7 +104,19 @@ sequenceDiagram
 
 本仓库的 `internal/commissioning` 提供软件参考实现，覆盖阶段迁移、权限判定、允许阶段的授权导入、HPKE 封装、签名校验和短期明文清理。原生 TPM 提供 `FillRandom`，调用方可作为受控制备的随机来源。平台必须实现记录鉴别、反回退、验证授权和证据、读写串行化以及提交确认。参考实现的主机测试使用测试凭据和内存记录。地面命令接线、TPM 签名和导入对象授权、星务维护协议、安全启动、调试锁定、实物掉电及关测回执还需目标平台集成验证。
 
-地面修改 `ccsds-provision`，输入改为非秘密任务清单和设备绑定的封装包。共享任务摘要改为对规范化非秘密清单计算，另用签名及各自包摘要审计交付物。摘要语义变化须与星务同步冻结和切换。地面补齐事务记录、放行检查及停机续办。星务在维护导入模块实现验签、解封和安全存储提交，运行模块仍通过 `load_state` 取得安全快照。实现前确认 BSP 的设备凭据、防回退锚和真实擦写能力。缺少这些能力的板卡可做测试密钥联调，正式根灌装以目标整机验收为前提。
+地面命令已接入非秘密清单、设备绑定的地面封装、签名安装授权及 TPM 导入对象。三份封存根和关联参数只进入本地暂存记录。待集成项包括设备台账登记、关测回执签发和验证、可信防回退锚、密钥确认、认证放行和运行关联发布。星务维护导入、受保护存储提交及真实掉电也须在目标 BSP 验收。
+
+### 地面导入文档与签名
+
+版本 3 任务清单只含地面接口手册所列字段，清单摘要为 Go `encoding/json.Marshal` 规范输出的 SHA-256。字段按手册次序写入，顶层为 `format_version, mission_id, tenant_id, spacecraft_id, tc`，`tc` 内依次为 `current_spi, security_epoch, current_root_version, next_root_version, nonce_prefix_hex, recovery_spi, recovery_root_version, recovery_nonce_prefix_hex`。两个十六进制前缀先转小写，规范输出无多余空白。
+
+| 版本 1 YAML 文档 | 字段 |
+| --- | --- |
+| 本地登记 | `format_version`、`node_id`、`tenant_id`、`device_id_hex`、`recipient_key_id_hex`、`import_handle`、`import_object_name_hex`、`storage_object_name_hex`、`envelope_issuer_p256_hex`、`install_authority_ed25519_hex`。设备 ID 和接收公钥指纹各 32 字节，TPM Name 各 34 字节，签名验证公钥分别为 65 字节未压缩 P-256 点及 32 字节 Ed25519 公钥。 |
+| 地面封装包 | `format_version`、`enc_hex`、`ciphertext_hex`、`signature_der_hex`。三个二进制字段分别为 65 字节封装公钥、64 字节认证密文、ECDSA DER 签名。 |
+| 安装授权 | `format_version`、`transaction_id_hex`、`closure_receipt_sha256`、`expires_unix`、`signature_hex`。事务号和关测回执摘要各 32 字节，有效期为 UTC Unix 秒，签名为 64 字节 Ed25519。 |
+
+安装审批方在核验关测回执及操作授权后签发安装授权。签名原文按顺序拼接 ASCII `TC-GROUND-INSTALL-V1`、一个 `00` 字节、第 3 节定义的地面封装绑定字节串、`SHA256(enc || ciphertext || DER 签名)`、关测回执的 SHA-256、8 字节大端截止时间。签名和截止时间通过才允许导入。暂存去重绑定对相同原文去掉末尾截止时间后计算 SHA-256。操作员可在同一受保护事务内续办，收到暂存成功后须完成冷启动确认和认证放行才能发送。
 
 | 验收项 | 最低预期 |
 | --- | --- |

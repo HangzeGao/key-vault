@@ -82,6 +82,6 @@ SP 800-108 Counter KDF 使用 SM4-CMAC，输入为 Counter32BE（从 1 起）＋
 
 ## 接口版本与验证
 
-公开星载接口版本为 5，函数仍为 init、reset、receive、get_runtime_status；新增的是持久预算字段和 AUTH_BUDGET 提交种类。地面 SQLite schema 为 4，任务配置版本 2，星载状态观察版本 2，换根准备载荷版本 2。未知或过时格式直接拒绝，不保留兼容转换。
+公开星载接口版本为 5，函数仍为 init、reset、receive、get_runtime_status；新增的是持久预算字段和 AUTH_BUDGET 提交种类。地面 SQLite schema 为 5，非秘密任务清单版本 3，星载状态观察版本 2，换根准备载荷版本 2。未知或过时格式直接拒绝，不保留兼容转换。
 
 规范锚点使用 SM4 分组 KAT 和 RFC 8998 GCM KAT；独立 OpenSSL 向量、Go 与 C 差分、ARMv7/QEMU、真实 HTTP/SQLite/C 进程及中断注入共同验证。主机存储模型与合成任务规则不替代目标 BSP 掉电和正式任务规则验收。

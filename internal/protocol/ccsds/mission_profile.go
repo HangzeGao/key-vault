@@ -7,16 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/kvlt/key-vault/internal/crypto/suite"
 	"gopkg.in/yaml.v3"
 )
 
-const MissionProfileVersion = 2
+const MissionProfileVersion = 3
 
-// MissionSecurityProfile is the single controlled source used to provision
-// the ground security state and authenticated Recovery frame. Its root fields
-// are secret and must only be handled by the offline provisioning process.
+// MissionSecurityProfile contains the public parameters bound to both envelopes.
 type MissionSecurityProfile struct {
 	FormatVersion uint16           `yaml:"format_version" json:"format_version"`
 	MissionID     string           `yaml:"mission_id" json:"mission_id"`
@@ -26,19 +25,14 @@ type MissionSecurityProfile struct {
 }
 
 type MissionTCProfile struct {
-	CurrentSPI               uint16 `yaml:"current_spi" json:"current_spi"`
-	SecurityEpoch            uint32 `yaml:"security_epoch" json:"security_epoch"`
-	CurrentRootVersion       uint32 `yaml:"current_root_version" json:"current_root_version"`
-	CurrentRootHex           string `yaml:"current_operational_root_hex" json:"current_operational_root_hex"`
-	NextRootVersion          uint32 `yaml:"next_root_version" json:"next_root_version"`
-	NextRootHex              string `yaml:"next_operational_root_hex" json:"next_operational_root_hex"`
-	NoncePrefixHex           string `yaml:"nonce_prefix_hex" json:"nonce_prefix_hex"`
-	RecoverySPI              uint16 `yaml:"recovery_spi" json:"recovery_spi"`
-	RecoveryRootVersion      uint32 `yaml:"recovery_root_version" json:"recovery_root_version"`
-	RecoveryRootHex          string `yaml:"recovery_root_hex" json:"recovery_root_hex"`
-	RecoveryNoncePrefixHex   string `yaml:"recovery_nonce_prefix_hex" json:"recovery_nonce_prefix_hex"`
-	RecoveryTransactionID    uint64 `yaml:"recovery_transaction_id" json:"recovery_transaction_id"`
-	RecoveryPrimaryHeaderHex string `yaml:"recovery_primary_header_hex" json:"recovery_primary_header_hex"`
+	CurrentSPI             uint16 `yaml:"current_spi" json:"current_spi"`
+	SecurityEpoch          uint32 `yaml:"security_epoch" json:"security_epoch"`
+	CurrentRootVersion     uint32 `yaml:"current_root_version" json:"current_root_version"`
+	NextRootVersion        uint32 `yaml:"next_root_version" json:"next_root_version"`
+	NoncePrefixHex         string `yaml:"nonce_prefix_hex" json:"nonce_prefix_hex"`
+	RecoverySPI            uint16 `yaml:"recovery_spi" json:"recovery_spi"`
+	RecoveryRootVersion    uint32 `yaml:"recovery_root_version" json:"recovery_root_version"`
+	RecoveryNoncePrefixHex string `yaml:"recovery_nonce_prefix_hex" json:"recovery_nonce_prefix_hex"`
 }
 
 // MissionAssociationIDs are stable persistence identifiers chosen by the
@@ -47,10 +41,6 @@ type MissionTCProfile struct {
 type MissionAssociationIDs struct {
 	CurrentKey, NextKey, RecoveryKey string
 	CurrentSA, NextSA, RecoverySA    string
-}
-
-type MissionSecrets struct {
-	CurrentRoot, NextRoot, RecoveryRoot []byte
 }
 
 // DecodeMissionSecurityProfile accepts one strict YAML document. Unknown and
@@ -63,14 +53,14 @@ func DecodeMissionSecurityProfile(reader io.Reader) (*MissionSecurityProfile, er
 	decoder.KnownFields(true)
 	var profile MissionSecurityProfile
 	if err := decoder.Decode(&profile); err != nil {
-		return nil, fmt.Errorf("ccsds: decode mission profile: %w", err)
+		return nil, errors.New("ccsds: invalid mission profile document")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return nil, errors.New("ccsds: mission profile contains multiple documents")
 		}
-		return nil, fmt.Errorf("ccsds: decode mission profile trailer: %w", err)
+		return nil, errors.New("ccsds: invalid mission profile trailer")
 	}
 	if err := profile.Validate(); err != nil {
 		return nil, err
@@ -87,19 +77,15 @@ func (profile MissionSecurityProfile) Validate() error {
 	}
 	tc := profile.TC
 	if tc.SecurityEpoch == 0 || tc.SecurityEpoch == ^uint32(0) || tc.CurrentRootVersion == 0 ||
-		tc.NextRootVersion <= tc.CurrentRootVersion || tc.RecoveryRootVersion == 0 ||
-		tc.RecoveryTransactionID == 0 {
-		return errors.New("ccsds: invalid TC epoch, root version, or recovery transaction")
+		tc.NextRootVersion <= tc.CurrentRootVersion || tc.RecoveryRootVersion == 0 {
+		return errors.New("ccsds: invalid TC epoch or root version")
 	}
 	for name, value := range map[string]struct {
 		value  string
 		length int
 	}{
-		"current root": {tc.CurrentRootHex, 16}, "next root": {tc.NextRootHex, 16},
-		"recovery root":           {tc.RecoveryRootHex, 16},
-		"ordinary nonce prefix":   {tc.NoncePrefixHex, TCNoncePrefixLength},
-		"recovery nonce prefix":   {tc.RecoveryNoncePrefixHex, TCNoncePrefixLength},
-		"recovery primary header": {tc.RecoveryPrimaryHeaderHex, TCPrimaryHeaderLength},
+		"ordinary nonce prefix": {tc.NoncePrefixHex, TCNoncePrefixLength},
+		"recovery nonce prefix": {tc.RecoveryNoncePrefixHex, TCNoncePrefixLength},
 	} {
 		if _, err := decodeProfileHex(value.value, value.length); err != nil {
 			return fmt.Errorf("ccsds: invalid %s: %w", name, err)
@@ -112,32 +98,13 @@ func (profile MissionSecurityProfile) Digest() ([32]byte, error) {
 	if err := profile.Validate(); err != nil {
 		return [32]byte{}, err
 	}
+	profile.TC.NoncePrefixHex = strings.ToLower(profile.TC.NoncePrefixHex)
+	profile.TC.RecoveryNoncePrefixHex = strings.ToLower(profile.TC.RecoveryNoncePrefixHex)
 	canonical, err := json.Marshal(profile)
 	if err != nil {
 		return [32]byte{}, err
 	}
 	return sha256.Sum256(canonical), nil
-}
-
-func (profile MissionSecurityProfile) Secrets() (MissionSecrets, error) {
-	if err := profile.Validate(); err != nil {
-		return MissionSecrets{}, err
-	}
-	current, _ := decodeProfileHex(profile.TC.CurrentRootHex, 16)
-	next, _ := decodeProfileHex(profile.TC.NextRootHex, 16)
-	recovery, _ := decodeProfileHex(profile.TC.RecoveryRootHex, 16)
-	return MissionSecrets{CurrentRoot: current, NextRoot: next, RecoveryRoot: recovery}, nil
-}
-
-func (secrets *MissionSecrets) Zeroize() {
-	if secrets == nil {
-		return
-	}
-	for _, value := range [][]byte{secrets.CurrentRoot, secrets.NextRoot, secrets.RecoveryRoot} {
-		for index := range value {
-			value[index] = 0
-		}
-	}
 }
 
 func (profile MissionSecurityProfile) Associations(ids MissionAssociationIDs, policyVersion uint32) ([]SecurityAssociation, error) {
@@ -174,18 +141,6 @@ func (profile MissionSecurityProfile) Associations(ids MissionAssociationIDs, po
 		}
 	}
 	return associations, nil
-}
-
-func (profile MissionSecurityProfile) RootPrepareCommand() (RootPrepareCommand, []byte, error) {
-	secrets, err := profile.Secrets()
-	if err != nil {
-		return RootPrepareCommand{}, nil, err
-	}
-	header, _ := decodeProfileHex(profile.TC.RecoveryPrimaryHeaderHex, TCPrimaryHeaderLength)
-	return RootPrepareCommand{TransactionID: profile.TC.RecoveryTransactionID,
-		ExpectedCurrentRootVersion: profile.TC.CurrentRootVersion, NewRootVersion: profile.TC.NextRootVersion,
-		NextSecurityEpoch: profile.TC.SecurityEpoch + 1, NextSPI: NextSPI(profile.TC.CurrentSPI),
-		OrdinarySuiteID: suite.SM4GCM32, NewOperationalRoot: secrets.NextRoot}, header, nil
 }
 
 func decodeProfileHex(value string, length int) ([]byte, error) {

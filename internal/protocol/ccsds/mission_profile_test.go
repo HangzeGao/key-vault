@@ -1,14 +1,13 @@
 package ccsds
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-const validMissionProfile = `format_version: 2
+const validMissionProfile = `format_version: 3
 mission_id: demo-sat
 tenant_id: tenant-1
 spacecraft_id: 291
@@ -16,16 +15,11 @@ tc:
   current_spi: 4097
   security_epoch: 9
   current_root_version: 7
-  current_operational_root_hex: "00112233445566778899aabbccddeeff"
   next_root_version: 8
-  next_operational_root_hex: "102132435465768798a9bacbdcedfe0f"
   nonce_prefix_hex: "102030405060"
   recovery_spi: 28673
   recovery_root_version: 3
-  recovery_root_hex: "0123456789abcdeffedcba9876543210"
   recovery_nonce_prefix_hex: "a0a1a2a3a4a5"
-  recovery_transaction_id: 72623859790382856
-  recovery_primary_header_hex: "2001000001"
 `
 
 func loadMissionProfile(t *testing.T) *MissionSecurityProfile {
@@ -54,12 +48,6 @@ func TestMissionProfileOwnsGroundAndRecoveryConfiguration(t *testing.T) {
 	if err != nil || digest == [32]byte{} {
 		t.Fatalf("digest=%x err=%v", digest, err)
 	}
-	secrets, err := profile.Secrets()
-	if err != nil || len(secrets.CurrentRoot) != 16 || len(secrets.NextRoot) != 16 ||
-		bytes.Equal(secrets.CurrentRoot, secrets.NextRoot) {
-		t.Fatalf("secrets=%+v err=%v", secrets, err)
-	}
-	defer secrets.Zeroize()
 	ids := MissionAssociationIDs{CurrentKey: "kc", NextKey: "kn", RecoveryKey: "kr",
 		CurrentSA: "sc", NextSA: "sn", RecoverySA: "sr"}
 	associations, err := profile.Associations(ids, 1)
@@ -71,11 +59,7 @@ func TestMissionProfileOwnsGroundAndRecoveryConfiguration(t *testing.T) {
 		next.SPI != NextSPI(current.SPI) || next.SecurityEpoch != current.SecurityEpoch+1 {
 		t.Fatalf("Current/Next not closed: current=%+v next=%+v", current, next)
 	}
-	command, header, err := profile.RootPrepareCommand()
-	if err != nil || command.NewRootVersion != next.KeyVersion || command.NextSPI != next.SPI ||
-		!bytes.Equal(command.NewOperationalRoot, secrets.NextRoot) || len(header) != TCPrimaryHeaderLength {
-		t.Fatalf("command=%+v header=%x err=%v", command, header, err)
-	}
+
 }
 
 func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
@@ -83,11 +67,12 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 		t.Fatal("nil reader accepted")
 	}
 	for name, input := range map[string]string{
+		"plaintext root":               strings.Replace(validMissionProfile, "  current_spi:", "  current_operational_root_hex: secret\n  current_spi:", 1),
 		"unknown":                      strings.Replace(validMissionProfile, "mission_id: demo-sat", "unknown: x\nmission_id: demo-sat", 1),
 		"duplicate":                    strings.Replace(validMissionProfile, "mission_id: demo-sat", "mission_id: one\nmission_id: two", 1),
-		"multiple":                     validMissionProfile + "---\nformat_version: 2\n",
+		"multiple":                     validMissionProfile + "---\nformat_version: 3\n",
 		"trailer syntax":               validMissionProfile + "broken: [unterminated\n",
-		"bad hex":                      strings.Replace(validMissionProfile, "00112233445566778899aabbccddeeff", "00", 1),
+		"bad hex":                      strings.Replace(validMissionProfile, "102030405060", "00", 1),
 		"unsupported hardware profile": validMissionProfile + "downlink:\n  active_kek_slot: 0\n",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -104,7 +89,6 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 		func(p *MissionSecurityProfile) { p.TC.SecurityEpoch = 0 },
 		func(p *MissionSecurityProfile) { p.TC.SecurityEpoch = ^uint32(0) },
 		func(p *MissionSecurityProfile) { p.TC.NextRootVersion = p.TC.CurrentRootVersion },
-		func(p *MissionSecurityProfile) { p.TC.RecoveryTransactionID = 0 },
 	}
 	for index, mutate := range mutations {
 		candidate := base
@@ -121,26 +105,19 @@ func TestMissionProfileParsingAndValidationFailClosed(t *testing.T) {
 	if _, err := base.Associations(ids, 0); err == nil {
 		t.Fatal("zero policy version accepted")
 	}
-	var empty MissionSecrets
-	empty.Zeroize()
-	(*MissionSecrets)(nil).Zeroize()
-	secrets, _ := base.Secrets()
-	secrets.Zeroize()
-	if !bytes.Equal(secrets.CurrentRoot, make([]byte, 16)) {
-		t.Fatal("mission secrets were not zeroized")
-	}
 	invalid := base
-	invalid.TC.CurrentRootHex = "00"
+	invalid.TC.NoncePrefixHex = "00"
 	if _, err := invalid.Associations(ids, 1); err == nil {
 		t.Fatal("invalid profile associations accepted")
 	}
 	if _, err := invalid.Digest(); err == nil {
 		t.Fatal("invalid profile digest accepted")
 	}
-	if _, err := invalid.Secrets(); err == nil {
-		t.Fatal("invalid profile secrets accepted")
-	}
-	if _, _, err := invalid.RootPrepareCommand(); err == nil {
-		t.Fatal("invalid recovery command accepted")
+	uppercase := base
+	uppercase.TC.RecoveryNoncePrefixHex = strings.ToUpper(base.TC.RecoveryNoncePrefixHex)
+	if got, _ := uppercase.Digest(); got == [32]byte{} {
+		t.Fatal("valid uppercase hex rejected")
+	} else if want, _ := base.Digest(); got != want {
+		t.Fatal("hex case changed the public profile digest")
 	}
 }

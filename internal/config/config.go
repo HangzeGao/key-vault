@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -91,8 +92,9 @@ type BaselineConfig struct {
 // CCSDSConfig defines mission-fixed frame boundaries. Per-association wire
 // parameters remain in the CCSDS Security Association store.
 type CCSDSConfig struct {
-	MaxFrameLength int    `yaml:"max_frame_length"`
-	TCSpacecraftID uint16 `yaml:"tc_spacecraft_id"`
+	MaxFrameLength         int    `yaml:"max_frame_length"`
+	TCSpacecraftID         uint16 `yaml:"tc_spacecraft_id"`
+	CommissioningTrustFile string `yaml:"commissioning_trust_file"`
 }
 
 // Diagnostic is a non-secret, user-facing configuration assessment emitted at
@@ -176,6 +178,38 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// LoadCommissioning reads the root-owned configuration without environment
+// overrides. The operator cannot substitute deployment settings at invocation.
+func LoadCommissioning(path string) (*Config, error) {
+	file, err := OpenCommissioningTrust(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	const maxConfigSize = 64 << 10
+	raw, err := io.ReadAll(io.LimitReader(file, maxConfigSize+1))
+	if err != nil || len(raw) > maxConfigSize {
+		return nil, fmt.Errorf("invalid commissioning configuration size")
+	}
+	decoder := yaml.NewDecoder(strings.NewReader(string(raw)))
+	decoder.KnownFields(true)
+	cfg := Default()
+	if decoder.Decode(cfg) != nil || decoder.Decode(new(any)) != io.EOF || cfg.Environment != "production" {
+		return nil, fmt.Errorf("invalid production commissioning configuration")
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func OpenCommissioningTrust(path string) (*os.File, error) {
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("commissioning trust requires an absolute path")
+	}
+	return openCommissioningTrust(path)
 }
 
 func applyEnv(c *Config) {

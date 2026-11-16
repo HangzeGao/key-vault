@@ -1,10 +1,10 @@
-// Command ccsds-provision consumes one controlled Mission Security Profile and
-// creates matching ground state, a Recovery frame, and hash evidence.
+// Command ccsds-provision stages a device-bound ground root installation.
 package main
 
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -13,328 +13,147 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"time"
 
-	"github.com/kvlt/key-vault/internal/auditchain"
 	"github.com/kvlt/key-vault/internal/bootstrap"
 	"github.com/kvlt/key-vault/internal/config"
 	"github.com/kvlt/key-vault/internal/crypto/suite"
 	"github.com/kvlt/key-vault/internal/protocol/ccsds"
-	"github.com/kvlt/key-vault/internal/repository/models"
-	"github.com/kvlt/key-vault/internal/securitystate"
+	"github.com/kvlt/key-vault/internal/resolver/keyresolver"
+	"github.com/kvlt/key-vault/internal/tpm/provider"
 )
 
-const (
-	defaultPolicyID  = "default-v1"
-	defaultPolicyVer = 1
-)
+type provisionOptions struct {
+	configPath, profilePath, envelopePath, authorizationPath string
+}
 
 func main() {
-	configPath := flag.String("config", "", "path to ground YAML configuration")
-	profilePath := flag.String("mission-profile", "", "path to the controlled Mission Security Profile")
-	artifactsDir := flag.String("artifacts-dir", "", "private directory for the Recovery frame and evidence")
+	var options provisionOptions
+	flag.StringVar(&options.configPath, "config", "", "path to trusted production configuration")
+	flag.StringVar(&options.profilePath, "mission-profile", "", "path to the public mission manifest")
+	flag.StringVar(&options.envelopePath, "envelope", "", "path to the device-bound ground envelope")
+	flag.StringVar(&options.authorizationPath, "authorization", "", "path to the signed installation authorization")
 	flag.Parse()
-	if err := run(context.Background(), provisionOptions{configPath: *configPath,
-		profilePath: *profilePath, artifactsDir: *artifactsDir}); err != nil {
-		slog.Error("CCSDS provisioning failed", "error", err)
+	if flag.NArg() != 0 {
+		slog.Error("CCSDS staging takes no positional arguments")
+		os.Exit(2)
+	}
+	if err := run(context.Background(), options); err != nil {
+		slog.Error("CCSDS staging failed", "error", err)
 		os.Exit(1)
 	}
 }
 
-type provisionOptions struct {
-	configPath, profilePath, artifactsDir string
-}
-
-func (options provisionOptions) validate() error {
-	if options.profilePath == "" || options.artifactsDir == "" {
-		return errors.New("mission-profile and artifacts-dir are required")
-	}
-	return nil
-}
-
 func run(ctx context.Context, options provisionOptions) error {
-	if err := options.validate(); err != nil {
+	if options.configPath == "" || options.profilePath == "" || options.envelopePath == "" || options.authorizationPath == "" {
+		return errors.New("config, mission-profile, envelope and authorization are required")
+	}
+	cfg, err := config.LoadCommissioning(options.configPath)
+	if err != nil || cfg.Environment != "production" || cfg.TPM.Provider != "native" || cfg.CCSDS.CommissioningTrustFile == "" {
+		return errors.New("staging requires trusted production configuration and a native TPM")
+	}
+	profileData, err := input(options.profilePath)
+	if err != nil {
+		return errors.New("cannot read mission manifest")
+	}
+	defer clear(profileData)
+	profile, err := ccsds.DecodeMissionSecurityProfile(bytes.NewReader(profileData))
+	if err != nil || cfg.CCSDS.TCSpacecraftID != profile.SpacecraftID {
+		return errors.New("invalid mission manifest or spacecraft mismatch")
+	}
+	digest, err := profile.Digest()
+	if err != nil {
 		return err
 	}
-	file, err := os.Open(options.profilePath)
+	trust, err := config.OpenCommissioningTrust(cfg.CCSDS.CommissioningTrustFile)
 	if err != nil {
-		return fmt.Errorf("open mission profile: %w", err)
+		return errors.New("cannot open trusted commissioning enrollment")
 	}
-	profile, err := ccsds.DecodeMissionSecurityProfile(file)
-	closeErr := file.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close mission profile: %w", closeErr)
-	}
-	digest, _ := profile.Digest()
-	secrets, err := profile.Secrets()
+	defer trust.Close()
+	request, err := loadInstallRequest(trust, options.envelopePath, options.authorizationPath, digest, time.Now())
 	if err != nil {
 		return err
 	}
-	defer secrets.Zeroize()
-
-	cfg, err := config.Load(options.configPath)
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
+	if request.node != cfg.Server.NodeID || request.tenant != profile.TenantID {
+		return errors.New("commissioning trust does not match the node and tenant")
 	}
-	if cfg.CCSDS.TCSpacecraftID != profile.SpacecraftID {
-		return fmt.Errorf("mission profile spacecraft_id 0x%03X does not match ground config 0x%03X",
-			profile.SpacecraftID, cfg.CCSDS.TCSpacecraftID)
+	ids := provisionIDs(profile.TenantID, profile.TC.CurrentRootVersion, profile.TC.NextRootVersion)
+	associations, err := profile.Associations(ids, 1)
+	if err != nil {
+		return err
 	}
 	app, err := bootstrap.Build(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("bootstrap: %w", err)
+		return fmt.Errorf("initialize commissioning deployment: %w", err)
 	}
 	defer app.TPM.Close()
 	defer app.Store.Close()
-	if err := app.Store.BindMissionProfile(ctx, profile.TenantID, digest); err != nil {
-		return fmt.Errorf("bind mission profile digest: %w", err)
+	tpm, ok := app.TPM.(*provider.NativeProvider)
+	if !ok || app.AccessVerifier.TenantID() != profile.TenantID {
+		return errors.New("deployment provider or tenant mismatch")
 	}
-
-	ids := provisionIDs(profile.TenantID, profile.TC.CurrentRootVersion, profile.TC.NextRootVersion)
-	keySpecs := []keySpec{
-		{id: ids.CurrentKey, name: "CCSDS TC current operational root", suite: "SM4_GCM_32", version: profile.TC.CurrentRootVersion, material: secrets.CurrentRoot},
-		{id: ids.NextKey, name: "CCSDS TC next operational root", suite: "SM4_GCM_32", version: profile.TC.NextRootVersion, material: secrets.NextRoot},
-		{id: ids.RecoveryKey, name: "CCSDS TC Recovery root", suite: "SM4_GCM", version: profile.TC.RecoveryRootVersion, material: secrets.RecoveryRoot},
-	}
-	for _, spec := range keySpecs {
-		if err := ensureProtocolKey(ctx, app, profile.TenantID, hex.EncodeToString(digest[:]), spec); err != nil {
-			return err
-		}
-	}
-	associations, err := profile.Associations(ids, defaultPolicyVer)
+	var sealed []byte
+	err = tpm.WithImportKey(ctx, request.registration, func(key ecdh.KeyExchanger) error {
+		return request.authorized.Import(key, request.issuer, func(roots []byte) error {
+			installation, err := sealInstallation(ctx, associations, roots, app.Resolver.SealExternalKey)
+			if err != nil {
+				return err
+			}
+			sealed = installation
+			return nil
+		})
+	})
 	if err != nil {
-		return err
+		return errors.New("device-bound root import failed")
 	}
-	for _, association := range associations {
-		created, err := ensureAssociation(ctx, app, association)
-		if err != nil {
-			return err
-		}
-		result := "verified"
-		if created {
-			result = "created"
-		}
-		slog.Info("CCSDS association ready", "association_id", association.ID,
-			"direction", association.Direction, "state", association.State,
-			"spi", fmt.Sprintf("0x%04X", association.SPI), "result", result)
+	if err := app.Store.StageGroundCommissioning(ctx, profile.TenantID, request.binding.Transaction, request.authorized.RecordDigest(), sealed); err != nil {
+		return errors.New("cannot stage installation or existing installation conflicts")
 	}
-	command, primaryHeader, err := profile.RootPrepareCommand()
-	if err != nil {
-		return err
-	}
-	defer clear(command.NewOperationalRoot)
-	recoveryFrame, err := app.CCSDSFrameSecurity.ProtectRootPrepareFrame(ctx, profile.TenantID, primaryHeader, command)
-	if err != nil {
-		return fmt.Errorf("create authenticated Recovery frame: %w", err)
-	}
-	if err := writeArtifacts(options.artifactsDir, *profile, digest, recoveryFrame.Frame); err != nil {
-		return err
-	}
-	slog.Info("CCSDS mission provisioning complete", "mission_id", profile.MissionID,
-		"tenant_id", profile.TenantID, "profile_sha256", hex.EncodeToString(digest[:]),
-		"artifacts_dir", options.artifactsDir)
+	slog.Info("CCSDS installation staged", "transaction", hex.EncodeToString(request.binding.Transaction[:]),
+		"profile_sha256", hex.EncodeToString(digest[:]), "state", "INSTALLED_LOCKED")
 	return nil
 }
 
-type keySpec struct {
-	id, name, suite string
-	version         uint32
-	material        []byte
+type stagedAssociation struct {
+	Association    ccsds.SecurityAssociation
+	VersionID      string
+	SealedMaterial []byte
 }
 
-func ensureProtocolKey(ctx context.Context, app *bootstrap.App, tenantID, profileDigest string, spec keySpec) error {
-	existing, err := app.Store.GetKey(ctx, tenantID, spec.id)
-	if err == nil {
-		if existing.TenantID != tenantID || existing.Purpose != "encrypt_decrypt" ||
-			existing.UsageScope != models.KeyUsageProtocol || existing.PolicyID != defaultPolicyID ||
-			existing.SuiteID != spec.suite || existing.CurrentVersion != spec.version ||
-			existing.Status != "ACTIVE" {
-			return fmt.Errorf("existing protocol key %s does not match the strict mission profile", spec.id)
-		}
-		version, err := app.Store.GetKeyVersionByNo(ctx, spec.id, spec.version)
+func sealInstallation(ctx context.Context, associations []ccsds.SecurityAssociation, roots []byte,
+	seal func(context.Context, suite.ID, string, []byte) (*keyresolver.Material, error)) ([]byte, error) {
+	const rootSize = 16
+	if len(associations) != 3 || len(roots) != 3*rootSize {
+		return nil, errors.New("invalid installation contents")
+	}
+	var staged [3]stagedAssociation
+	// Associations are ordered Current, Next, Recovery. The envelope is
+	// ordered Current, Recovery, Next.
+	for pos, rootIndex := range [...]int{0, 2, 1} {
+		association := associations[pos]
+		suiteID, err := suite.Parse(association.SuiteID)
 		if err != nil {
-			return fmt.Errorf("read protocol key version %s: %w", spec.id, err)
+			return nil, err
 		}
-		plaintext, err := app.Resolver.UnsealKey(ctx, version.SealedMaterial, version.ID)
+		versionID := fmt.Sprintf("%s-v%d", association.KeyID, association.KeyVersion)
+		material, err := seal(ctx, suiteID, versionID, roots[rootIndex*rootSize:(rootIndex+1)*rootSize])
 		if err != nil {
-			return fmt.Errorf("verify protocol key %s: %w", spec.id, err)
+			return nil, err
 		}
-		defer clear(plaintext)
-		if !bytes.Equal(plaintext, spec.material) {
-			return fmt.Errorf("existing protocol key %s material does not match the mission profile", spec.id)
-		}
-		return nil
+		staged[pos] = stagedAssociation{Association: association, VersionID: versionID, SealedMaterial: material.SealedMaterial}
 	}
-	if !errors.Is(err, securitystate.ErrNotFound) {
-		return fmt.Errorf("read protocol key %s: %w", spec.id, err)
-	}
-	suiteID, err := suite.Parse(spec.suite)
-	if err != nil {
-		return err
-	}
-	versionID := fmt.Sprintf("%s-v%d", spec.id, spec.version)
-	material, err := app.Resolver.SealExternalKey(ctx, suiteID, versionID, spec.material)
-	if err != nil {
-		return fmt.Errorf("seal protocol key %s: %w", spec.id, err)
-	}
-	now := time.Now().UTC()
-	key := &models.Key{ID: spec.id, TenantID: tenantID, Name: spec.name, Purpose: "encrypt_decrypt",
-		UsageScope: models.KeyUsageProtocol, PolicyID: defaultPolicyID, SuiteID: spec.suite,
-		CurrentVersion: spec.version, Status: "ACTIVE", Tags: map[string]string{"owner": "ccsds",
-			"provisioning": "mission-profile", "mission_profile_sha256": profileDigest}, CreatedAt: now, UpdatedAt: now}
-	version := &models.KeyVersion{ID: versionID, KeyID: spec.id, VersionNo: spec.version, SuiteID: spec.suite,
-		SealedMaterial: material.SealedMaterial, Status: "ACTIVE", CreatedAt: now}
-	if err := app.Store.CreateProtocolKey(ctx, key, version); err != nil {
-		return fmt.Errorf("create protocol key %s: %w", spec.id, err)
-	}
-	return nil
+	return json.Marshal(staged)
 }
 
-type provisionedIDs = ccsds.MissionAssociationIDs
-
-func provisionIDs(tenantID string, currentVersion, nextVersion uint32) provisionedIDs {
+func provisionIDs(tenantID string, currentVersion, nextVersion uint32) ccsds.MissionAssociationIDs {
 	digest := sha256.Sum256([]byte(tenantID))
-	scope := hex.EncodeToString(digest[:6])
-	prefix := "ccsds-" + scope
-	return provisionedIDs{
+	prefix := "ccsds-" + hex.EncodeToString(digest[:6])
+	return ccsds.MissionAssociationIDs{
 		CurrentKey:  fmt.Sprintf("%s-tc-root-v%d", prefix, currentVersion),
 		NextKey:     fmt.Sprintf("%s-tc-root-v%d", prefix, nextVersion),
 		RecoveryKey: prefix + "-tc-recovery-root",
 		CurrentSA:   fmt.Sprintf("%s-tc-sa-v%d", prefix, currentVersion),
 		NextSA:      fmt.Sprintf("%s-tc-sa-v%d", prefix, nextVersion),
 		RecoverySA:  prefix + "-tc-recovery",
-	}
-}
-
-func ensureAssociation(ctx context.Context, app *bootstrap.App, desired ccsds.SecurityAssociation) (bool, error) {
-	if err := desired.Validate(); err != nil {
-		return false, err
-	}
-	existing, err := app.CCSDSStore.GetAssociation(ctx, desired.TenantID, desired.ID)
-	if err == nil {
-		if !associationEqual(*existing, desired) {
-			return false, fmt.Errorf("existing association %s does not match the strict mission profile", desired.ID)
-		}
-		return false, nil
-	}
-	if !errors.Is(err, ccsds.ErrAssociationNotFound) {
-		return false, fmt.Errorf("read association %s: %w", desired.ID, err)
-	}
-	if err := app.AuditChain.Record(ctx, auditchain.RecordRequest{TenantID: desired.TenantID,
-		ActorType: "system", ActorHash: "offline:ccsds-provision", Action: "ccsds.association.provision.requested",
-		TargetType: "ccsds_association", TargetIDHash: shortHash(desired.ID), Result: "requested",
-		Metadata: map[string]string{"direction": string(desired.Direction), "spi": fmt.Sprintf("0x%04X", desired.SPI)}}); err != nil {
-		return false, fmt.Errorf("audit association provisioning: %w", err)
-	}
-	if err := app.Store.CreateAssociation(ctx, desired); err != nil {
-		return false, fmt.Errorf("create association %s: %w", desired.ID, err)
-	}
-	if err := app.AuditChain.Record(ctx, auditchain.RecordRequest{TenantID: desired.TenantID,
-		ActorType: "system", ActorHash: "offline:ccsds-provision", Action: "ccsds.association.provisioned",
-		TargetType: "ccsds_association", TargetIDHash: shortHash(desired.ID), Result: "success",
-		Metadata: map[string]string{"direction": string(desired.Direction), "spi": fmt.Sprintf("0x%04X", desired.SPI)}}); err != nil {
-		return true, fmt.Errorf("association %s was created but success audit failed: %w", desired.ID, err)
-	}
-	return true, nil
-}
-
-func associationEqual(left, right ccsds.SecurityAssociation) bool {
-	return left.ID == right.ID && left.TenantID == right.TenantID && left.SPI == right.SPI &&
-		left.Direction == right.Direction && left.KeyID == right.KeyID && left.KeyVersion == right.KeyVersion &&
-		left.SecurityEpoch == right.SecurityEpoch && left.PolicyVersion == right.PolicyVersion &&
-		left.SuiteID == right.SuiteID && left.State == right.State &&
-		left.Parameters.SequenceNumberLength == right.Parameters.SequenceNumberLength &&
-		left.Parameters.TransmittedIVLength == right.Parameters.TransmittedIVLength &&
-		left.Parameters.TagLength == right.Parameters.TagLength && left.Parameters.ReplayWindow == right.Parameters.ReplayWindow &&
-		bytes.Equal(left.Parameters.NoncePrefix, right.Parameters.NoncePrefix)
-}
-
-type releaseEvidence struct {
-	FormatVersion       uint16 `json:"format_version"`
-	MissionID           string `json:"mission_id"`
-	TenantID            string `json:"tenant_id"`
-	ProfileSHA256       string `json:"profile_sha256"`
-	RecoveryFrameSHA256 string `json:"recovery_frame_sha256"`
-	CurrentSPI          uint16 `json:"current_spi"`
-	NextSPI             uint16 `json:"next_spi"`
-	RecoverySPI         uint16 `json:"recovery_spi"`
-	CurrentRootVersion  uint32 `json:"current_root_version"`
-	NextRootVersion     uint32 `json:"next_root_version"`
-}
-
-func writeArtifacts(directory string, profile ccsds.MissionSecurityProfile, digest [32]byte,
-	recoveryFrame []byte) error {
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return fmt.Errorf("create artifact directory: %w", err)
-	}
-	if err := os.Chmod(directory, 0o700); err != nil {
-		return fmt.Errorf("protect artifact directory: %w", err)
-	}
-	evidence := releaseEvidence{FormatVersion: 2, MissionID: profile.MissionID, TenantID: profile.TenantID,
-		ProfileSHA256:       hex.EncodeToString(digest[:]),
-		RecoveryFrameSHA256: digestBytes(recoveryFrame), CurrentSPI: profile.TC.CurrentSPI,
-		NextSPI: ccsds.NextSPI(profile.TC.CurrentSPI), RecoverySPI: profile.TC.RecoverySPI,
-		CurrentRootVersion: profile.TC.CurrentRootVersion, NextRootVersion: profile.TC.NextRootVersion}
-	encodedEvidence, err := json.MarshalIndent(evidence, "", "  ")
-	if err != nil {
-		return err
-	}
-	encodedEvidence = append(encodedEvidence, '\n')
-	for _, artifact := range []struct {
-		name string
-		data []byte
-	}{
-		{"root-prepare.tc", recoveryFrame},
-		// Evidence is installed last. Its hashes make any interrupted prior
-		// artifact replacement detectable on the next verification.
-		{"release-evidence.json", encodedEvidence},
-	} {
-		if err := writeAtomicPrivate(filepath.Join(directory, artifact.name), artifact.data); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func writeAtomicPrivate(path string, data []byte) error {
-	temporary, err := os.CreateTemp(filepath.Dir(path), ".tcsec-artifact-*")
-	if err != nil {
-		return fmt.Errorf("create temporary artifact: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return fmt.Errorf("install artifact %s: %w", filepath.Base(path), err)
-	}
-	return nil
-}
-
-func shortHash(value string) string { return digestBytes([]byte(value))[:16] }
-func digestBytes(value []byte) string {
-	digest := sha256.Sum256(value)
-	return hex.EncodeToString(digest[:])
-}
-func clear(value []byte) {
-	for index := range value {
-		value[index] = 0
 	}
 }
