@@ -1,6 +1,6 @@
 module github.com/kvlt/key-vault
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/emmansun/gmsm v0.43.0

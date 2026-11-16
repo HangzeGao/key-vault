@@ -35,7 +35,8 @@ printf '%s\n' "$coverage_output"
 c_coverage="$(printf '%s\n' "$coverage_output" | awk '/Flight C line coverage gate passed/ {gsub(/%/,"",$7); print $7}')"
 go_coverage="$(printf '%s\n' "$coverage_output" | awk '/Ground TC Go statement coverage gate passed/ {gsub(/%/,"",$8); print $8}')"
 access_coverage="$(printf '%s\n' "$coverage_output" | awk '/Ground access Go statement coverage gate passed/ {gsub(/%/,"",$8); print $8}')"
-if [[ -z "$c_coverage" || -z "$go_coverage" || -z "$access_coverage" ]]; then echo "release gate failed: coverage evidence missing" >&2; exit 1; fi
+commissioning_coverage="$(printf '%s\n' "$coverage_output" | awk '/Root commissioning Go statement coverage gate passed/ {gsub(/%/, "", $8); print $8}')"
+if [[ -z "$c_coverage" || -z "$go_coverage" || -z "$access_coverage" || -z "$commissioning_coverage" ]]; then echo "release gate failed: coverage evidence missing" >&2; exit 1; fi
 
 mkdir -p "$EVIDENCE_DIR"
 GO_BIN="$go_bin" bash scripts/flight_package_gate.sh
@@ -91,6 +92,7 @@ cat > "$EVIDENCE_DIR/release-evidence.json" <<EOF
   "flight_c_line_coverage": $c_coverage,
   "ground_tc_go_statement_coverage": $go_coverage,
   "ground_access_go_statement_coverage": $access_coverage,
+  "root_commissioning_go_statement_coverage": $commissioning_coverage,
   "ordinary_vector_sha256": "$ordinary_hash",
   "recovery_vector_sha256": "$recovery_hash",
   "external_vector_generator": "pyca/cryptography 50.0.2 (OpenSSL 4.0.3) + RFC 8998 Appendix A.1",

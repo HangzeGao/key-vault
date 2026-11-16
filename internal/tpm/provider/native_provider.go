@@ -113,6 +113,30 @@ func (p *NativeProvider) EnsureStorage(ctx context.Context, name string) (*TPMOb
 	return &TPMObjectRef{Name: name}, nil
 }
 
+// FillRandom fills the caller-owned buffer from the physical TPM. Callers
+// must restrict access to the TPM transport and clear the resulting material.
+func (p *NativeProvider) FillRandom(ctx context.Context, output []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	remaining := output
+	for len(remaining) != 0 {
+		if err := ctx.Err(); err != nil {
+			clear(output)
+			return err
+		}
+		requested := min(len(remaining), 32)
+		part, err := legacy.GetRandom(p.rw, uint16(requested))
+		if err != nil || len(part) == 0 || len(part) > requested {
+			clear(part)
+			clear(output)
+			return errors.New("provider: TPM random generation failed")
+		}
+		remaining = remaining[copy(remaining, part):]
+		clear(part)
+	}
+	return nil
+}
+
 func (p *NativeProvider) Seal(ctx context.Context, storage *TPMObjectRef, plaintext []byte, sealContext aad.SealContext) (*SealedObject, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

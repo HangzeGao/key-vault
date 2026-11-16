@@ -26,6 +26,15 @@ func TestNativeProviderSealUnsealAndRestart(t *testing.T) {
 	}
 	defer p.Close()
 	ctx := context.Background()
+	random := make([]byte, 48)
+	if err := p.FillRandom(ctx, random); err != nil || bytes.Equal(random, make([]byte, 48)) {
+		t.Fatalf("48 bytes of TPM random: %v", err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := p.FillRandom(cancelled, random); err != context.Canceled || !bytes.Equal(random, make([]byte, 48)) {
+		t.Fatalf("cancelled TPM random: %v", err)
+	}
 	a := testPolicyContext()
 	storage, err := p.EnsureStorage(ctx, a.StorageName)
 	if err != nil {
