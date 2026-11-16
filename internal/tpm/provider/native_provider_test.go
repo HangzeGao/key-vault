@@ -3,12 +3,53 @@ package provider
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
+	"io"
 	"testing"
 
 	"github.com/google/go-tpm-tools/simulator"
+	"github.com/google/go-tpm/tpm2"
 	"github.com/kvlt/key-vault/internal/crypto/aad"
 )
+
+type nativeWireCapture struct {
+	io.ReadWriteCloser
+	command    tpm2.TPMCC
+	create     []byte
+	responses  map[tpm2.TPMCC][][]byte
+	corruptRNG bool
+}
+
+func (w *nativeWireCapture) Write(data []byte) (int, error) {
+	w.command = tpm2.TPMCC(binary.BigEndian.Uint32(data[6:10]))
+	if w.command == tpm2.TPMCCCreate {
+		w.create = bytes.Clone(data)
+	}
+	return w.ReadWriteCloser.Write(data)
+}
+
+func (w *nativeWireCapture) Read(data []byte) (int, error) {
+	n, err := w.ReadWriteCloser.Read(data)
+	if w.command == tpm2.TPMCCGetRandom || w.command == tpm2.TPMCCUnseal {
+		w.responses[w.command] = append(w.responses[w.command], bytes.Clone(data[:n]))
+	}
+	if w.corruptRNG && w.command == tpm2.TPMCCGetRandom && n > 16 {
+		// Header, parameter size and TPM2B length precede the ciphertext.
+		data[16] ^= 1
+	}
+	return n, err
+}
+
+func requireEncryptedParameter(t *testing.T, packet, plaintext []byte) {
+	t.Helper()
+	if len(packet) < 10 || binary.BigEndian.Uint16(packet) != uint16(tpm2.TPMSTSessions) {
+		t.Fatal("TPM packet did not carry an authorization session")
+	}
+	if bytes.Contains(packet, plaintext) {
+		t.Fatal("sensitive parameter appeared in the TPM transport")
+	}
+}
 
 func testPolicyContext() aad.SealContext {
 	return aad.SealContext{Purpose: "test", ObjectID: "object-a", NodeID: "node-a",
@@ -20,7 +61,8 @@ func TestNativeProviderSealUnsealAndRestart(t *testing.T) {
 	if err != nil {
 		t.Skipf("TPM simulator unavailable in this build: %v", err)
 	}
-	p, err := newNativeProviderWithTransport(sim, []int{7})
+	wire := &nativeWireCapture{ReadWriteCloser: sim, responses: make(map[tpm2.TPMCC][][]byte)}
+	p, err := newNativeProviderWithTransport(wire, []int{7})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,8 +72,20 @@ func TestNativeProviderSealUnsealAndRestart(t *testing.T) {
 	if err := p.FillRandom(ctx, random); err != nil || bytes.Equal(random, make([]byte, 48)) {
 		t.Fatalf("48 bytes of TPM random: %v", err)
 	}
+	rngPackets := wire.responses[tpm2.TPMCCGetRandom]
+	if len(rngPackets) != 2 {
+		t.Fatalf("random response count = %d, want 2", len(rngPackets))
+	}
+	requireEncryptedParameter(t, rngPackets[0], random[:32])
+	requireEncryptedParameter(t, rngPackets[1], random[32:])
+	wire.corruptRNG = true
+	if err := p.FillRandom(ctx, random); err == nil || !bytes.Equal(random, make([]byte, 48)) {
+		t.Fatal("tampered random response was accepted or output was retained")
+	}
+	wire.corruptRNG = false
 	cancelled, cancel := context.WithCancel(ctx)
 	cancel()
+	random[0] = 1
 	if err := p.FillRandom(cancelled, random); err != context.Canceled || !bytes.Equal(random, make([]byte, 48)) {
 		t.Fatalf("cancelled TPM random: %v", err)
 	}
@@ -45,6 +99,7 @@ func TestNativeProviderSealUnsealAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	requireEncryptedParameter(t, wire.create, secret)
 	got, err := p.Unseal(ctx, storage, env, a)
 	if err != nil {
 		t.Fatal(err)
@@ -52,6 +107,11 @@ func TestNativeProviderSealUnsealAndRestart(t *testing.T) {
 	if !bytes.Equal(got, secret) {
 		t.Fatal("unsealed secret mismatch")
 	}
+	unsealPackets := wire.responses[tpm2.TPMCCUnseal]
+	if len(unsealPackets) != 1 {
+		t.Fatalf("unseal response count = %d, want 1", len(unsealPackets))
+	}
+	requireEncryptedParameter(t, unsealPackets[0], secret)
 	if err := sim.Reset(); err != nil {
 		t.Fatal(err)
 	}

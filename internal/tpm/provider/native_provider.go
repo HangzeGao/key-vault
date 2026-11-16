@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	legacy "github.com/google/go-tpm/legacy/tpm2"
+	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/tpm2/transport"
 	"github.com/google/go-tpm/tpmutil"
 	"github.com/kvlt/key-vault/internal/crypto/aad"
 )
@@ -20,8 +22,8 @@ type NativeOptions struct {
 	PCRs []int
 }
 
-// NativeProvider talks directly to TPM 2.0 using go-tpm. Secret plaintext is
-// passed only in the TPM command buffer and is never written to disk.
+// NativeProvider talks directly to TPM 2.0 using go-tpm. Sensitive parameters
+// on the TPM transport are protected by salted sessions.
 type NativeProvider struct {
 	mu   sync.Mutex
 	rw   io.ReadWriteCloser
@@ -52,28 +54,39 @@ func newNativeSRKTemplate() legacy.Public {
 	}
 }
 
-func (p *NativeProvider) ensureStorageRootKey() (tpmutil.Handle, error) {
+func (p *NativeProvider) saltKey() (tpm2.NamedHandle, *tpm2.TPMTPublic, error) {
 	template := newNativeSRKTemplate()
-	public, _, _, err := legacy.ReadPublic(p.rw, nativeSRKPersistentHandle)
-	if err == nil {
-		if !public.MatchesTemplate(template) {
-			return 0, errors.New("provider: persistent SRK handle contains an incompatible object")
-		}
-		return nativeSRKPersistentHandle, nil
-	}
-	var handleErr legacy.HandleError
-	if !errors.As(err, &handleErr) || handleErr.Code != legacy.RCHandle {
-		return 0, fmt.Errorf("provider: inspect persistent SRK: %w", err)
-	}
-	transient, _, err := legacy.CreatePrimary(p.rw, legacy.HandleOwner, legacy.PCRSelection{}, "", "", template)
+	public, name, _, err := legacy.ReadPublic(p.rw, nativeSRKPersistentHandle)
 	if err != nil {
-		return 0, fmt.Errorf("provider: create native storage primary: %w", err)
+		var handleErr legacy.HandleError
+		if !errors.As(err, &handleErr) || handleErr.Code != legacy.RCHandle {
+			return tpm2.NamedHandle{}, nil, fmt.Errorf("provider: inspect persistent SRK: %w", err)
+		}
+		transient, _, err := legacy.CreatePrimary(p.rw, legacy.HandleOwner, legacy.PCRSelection{}, "", "", template)
+		if err != nil {
+			return tpm2.NamedHandle{}, nil, fmt.Errorf("provider: create native storage primary: %w", err)
+		}
+		defer legacy.FlushContext(p.rw, transient)
+		if err := legacy.EvictControl(p.rw, "", legacy.HandleOwner, transient, nativeSRKPersistentHandle); err != nil {
+			return tpm2.NamedHandle{}, nil, fmt.Errorf("provider: persist native storage primary: %w", err)
+		}
+		public, name, _, err = legacy.ReadPublic(p.rw, nativeSRKPersistentHandle)
+		if err != nil {
+			return tpm2.NamedHandle{}, nil, fmt.Errorf("provider: read native storage primary: %w", err)
+		}
 	}
-	defer legacy.FlushContext(p.rw, transient)
-	if err := legacy.EvictControl(p.rw, "", legacy.HandleOwner, transient, nativeSRKPersistentHandle); err != nil {
-		return 0, fmt.Errorf("provider: persist native storage primary: %w", err)
+	if !public.MatchesTemplate(template) {
+		return tpm2.NamedHandle{}, nil, errors.New("provider: persistent SRK handle contains an incompatible object")
 	}
-	return nativeSRKPersistentHandle, nil
+	encoded, err := public.Encode()
+	if err != nil {
+		return tpm2.NamedHandle{}, nil, fmt.Errorf("provider: encode TPM storage public key: %w", err)
+	}
+	key, err := tpm2.Unmarshal[tpm2.TPMTPublic](encoded)
+	if err != nil {
+		return tpm2.NamedHandle{}, nil, fmt.Errorf("provider: decode TPM storage public key: %w", err)
+	}
+	return tpm2.NamedHandle{Handle: tpm2.TPMHandle(nativeSRKPersistentHandle), Name: tpm2.TPM2BName{Buffer: name}}, key, nil
 }
 
 func NewNativeProvider(opts NativeOptions) (*NativeProvider, error) {
@@ -118,6 +131,19 @@ func (p *NativeProvider) EnsureStorage(ctx context.Context, name string) (*TPMOb
 func (p *NativeProvider) FillRandom(ctx context.Context, output []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		clear(output)
+		return err
+	}
+	if len(output) == 0 {
+		return nil
+	}
+	t := transport.FromReadWriter(p.rw)
+	parent, public, err := p.saltKey()
+	if err != nil {
+		clear(output)
+		return err
+	}
 	remaining := output
 	for len(remaining) != 0 {
 		if err := ctx.Err(); err != nil {
@@ -125,8 +151,14 @@ func (p *NativeProvider) FillRandom(ctx context.Context, output []byte) error {
 			return err
 		}
 		requested := min(len(remaining), 32)
-		part, err := legacy.GetRandom(p.rw, uint16(requested))
-		if err != nil || len(part) == 0 || len(part) > requested {
+		session := tpm2.HMAC(tpm2.TPMAlgSHA256, 16, tpm2.Salted(parent.Handle, *public), tpm2.AESEncryption(128, tpm2.EncryptOut))
+		response, err := (tpm2.GetRandom{BytesRequested: uint16(requested)}).Execute(t, session)
+		if err != nil {
+			clear(output)
+			return errors.New("provider: TPM random generation failed")
+		}
+		part := response.RandomBytes.Buffer
+		if len(part) == 0 || len(part) > requested {
 			clear(part)
 			clear(output)
 			return errors.New("provider: TPM random generation failed")
@@ -143,7 +175,8 @@ func (p *NativeProvider) Seal(ctx context.Context, storage *TPMObjectRef, plaint
 	if err := validateNativeInputs(ctx, storage, sealContext); err != nil {
 		return nil, err
 	}
-	primary, err := p.ensureStorageRootKey()
+	t := transport.FromReadWriter(p.rw)
+	parent, public, err := p.saltKey()
 	if err != nil {
 		return nil, err
 	}
@@ -155,11 +188,22 @@ func (p *NativeProvider) Seal(ctx context.Context, storage *TPMObjectRef, plaint
 		return nil, err
 	}
 	_ = legacy.FlushContext(p.rw, session)
-	private, public, err := legacy.Seal(p.rw, primary, "", "", policy, plaintext)
+	created, err := (tpm2.Create{
+		ParentHandle: tpm2.AuthHandle{Handle: parent.Handle, Name: parent.Name,
+			Auth: tpm2.HMAC(tpm2.TPMAlgSHA256, 16, tpm2.Salted(parent.Handle, *public), tpm2.AESEncryption(128, tpm2.EncryptIn))},
+		InSensitive: tpm2.TPM2BSensitiveCreate{Sensitive: &tpm2.TPMSSensitiveCreate{
+			Data: tpm2.NewTPMUSensitiveCreate(&tpm2.TPM2BSensitiveData{Buffer: plaintext}),
+		}},
+		InPublic: tpm2.New2B(tpm2.TPMTPublic{
+			Type: tpm2.TPMAlgKeyedHash, NameAlg: tpm2.TPMAlgSHA256,
+			ObjectAttributes: tpm2.TPMAObject{FixedTPM: true, FixedParent: true},
+			AuthPolicy:       tpm2.TPM2BDigest{Buffer: policy},
+		}),
+	}).Execute(t)
 	if err != nil {
 		return nil, fmt.Errorf("provider: seal secret in native TPM: %w", err)
 	}
-	bundle, err := json.Marshal(nativeSealedBundle{FormatVersion: nativeBundleFormatVersion, Public: public, Private: private, PCRs: p.pcrs})
+	bundle, err := json.Marshal(nativeSealedBundle{FormatVersion: nativeBundleFormatVersion, Public: created.OutPublic.Bytes(), Private: created.OutPrivate.Buffer, PCRs: p.pcrs})
 	if err != nil {
 		return nil, fmt.Errorf("provider: encode native sealed object: %w", err)
 	}
@@ -177,7 +221,7 @@ func (p *NativeProvider) Unseal(ctx context.Context, storage *TPMObjectRef, obje
 	if err := validateNativeInputs(ctx, storage, sealContext); err != nil {
 		return nil, err
 	}
-	if object.StorageName != storage.Name {
+	if object == nil || object.StorageName != storage.Name {
 		return nil, errors.New("provider: storage name mismatch")
 	}
 	if err := validateSealedObjectContext(object, sealContext); err != nil {
@@ -191,25 +235,32 @@ func (p *NativeProvider) Unseal(ctx context.Context, storage *TPMObjectRef, obje
 	if !equalInts(bundle.PCRs, p.pcrs) {
 		return nil, errors.New("provider: TPM policy PCR set mismatch")
 	}
-	primary, err := p.ensureStorageRootKey()
+	t := transport.FromReadWriter(p.rw)
+	parent, public, err := p.saltKey()
 	if err != nil {
 		return nil, err
 	}
-	objectHandle, _, err := legacy.Load(p.rw, primary, "", bundle.Public, bundle.Private)
+	loaded, err := (tpm2.Load{ParentHandle: parent,
+		InPublic: tpm2.BytesAs2B[tpm2.TPMTPublic](bundle.Public), InPrivate: tpm2.TPM2BPrivate{Buffer: bundle.Private},
+	}).Execute(t)
 	if err != nil {
 		return nil, fmt.Errorf("provider: load native sealed object: %w", err)
 	}
-	defer legacy.FlushContext(p.rw, objectHandle)
-	session, _, err := p.policySession()
+	defer (tpm2.FlushContext{FlushHandle: loaded.ObjectHandle}).Execute(t)
+	session, closeSession, err := tpm2.PolicySession(t, tpm2.TPMAlgSHA256, 16,
+		tpm2.Salted(parent.Handle, *public), tpm2.AESEncryption(128, tpm2.EncryptOut))
 	if err != nil {
+		return nil, fmt.Errorf("provider: start encrypted TPM policy session: %w", err)
+	}
+	defer closeSession()
+	if err := p.applyPCRPolicy(tpmutil.Handle(session.Handle())); err != nil {
 		return nil, err
 	}
-	defer legacy.FlushContext(p.rw, session)
-	plaintext, err := legacy.UnsealWithSession(p.rw, session, objectHandle, "")
+	response, err := (tpm2.Unseal{ItemHandle: tpm2.AuthHandle{Handle: loaded.ObjectHandle, Name: loaded.Name, Auth: session}}).Execute(t)
 	if err != nil {
 		return nil, errors.New("provider: TPM policy refused secret unseal")
 	}
-	return plaintext, nil
+	return response.OutData.Buffer, nil
 }
 
 func (p *NativeProvider) policySession() (tpmutil.Handle, []byte, error) {
@@ -217,12 +268,9 @@ func (p *NativeProvider) policySession() (tpmutil.Handle, []byte, error) {
 	if err != nil {
 		return legacy.HandleNull, nil, fmt.Errorf("provider: start TPM policy session: %w", err)
 	}
-	selection := legacy.PCRSelection{Hash: legacy.AlgSHA256, PCRs: p.pcrs}
-	if len(p.pcrs) > 0 {
-		if err := legacy.PolicyPCR(p.rw, session, nil, selection); err != nil {
-			_ = legacy.FlushContext(p.rw, session)
-			return legacy.HandleNull, nil, fmt.Errorf("provider: apply PolicyPCR: %w", err)
-		}
+	if err := p.applyPCRPolicy(session); err != nil {
+		_ = legacy.FlushContext(p.rw, session)
+		return legacy.HandleNull, nil, err
 	}
 	digest, err := legacy.PolicyGetDigest(p.rw, session)
 	if err != nil {
@@ -230,6 +278,16 @@ func (p *NativeProvider) policySession() (tpmutil.Handle, []byte, error) {
 		return legacy.HandleNull, nil, fmt.Errorf("provider: read policy digest: %w", err)
 	}
 	return session, digest, nil
+}
+
+func (p *NativeProvider) applyPCRPolicy(session tpmutil.Handle) error {
+	if len(p.pcrs) > 0 {
+		selection := legacy.PCRSelection{Hash: legacy.AlgSHA256, PCRs: p.pcrs}
+		if err := legacy.PolicyPCR(p.rw, session, nil, selection); err != nil {
+			return fmt.Errorf("provider: apply PolicyPCR: %w", err)
+		}
+	}
+	return nil
 }
 
 func validateNativeInputs(ctx context.Context, storage *TPMObjectRef, a aad.SealContext) error {
