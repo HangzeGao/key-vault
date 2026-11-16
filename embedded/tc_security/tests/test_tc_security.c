@@ -2,6 +2,7 @@
 #include "context_private.h"
 #include "../tools/tc_security_diagnostics.h"
 #include "tc_security_kdf.h"
+#include "../src/commissioning_confirmation.h"
 #include "gcm.h"
 #include "test_gcm_seal.h"
 #include "sm4.h"
@@ -1643,6 +1644,35 @@ static int test_root_retry_preserves_budget(const char *path) {
 
 #include "storage_quorum_model.h"
 
+static int test_commissioning_confirmation(void) {
+    static const uint8_t ground[32] = {
+        0x3e,0x5f,0xe9,0xac,0xfd,0xe8,0xe5,0x2d,0xae,0x20,0xfe,0x21,0xb9,0xc0,0x08,0x98,
+        0xe8,0xd8,0xfb,0x0e,0x56,0xf1,0x5e,0x92,0xff,0xe1,0x4e,0x1d,0xa5,0xcb,0x4f,0xbc
+    };
+    static const uint8_t flight[32] = {
+        0x88,0x0a,0xd9,0x9d,0x91,0x80,0xe7,0xe9,0x37,0x02,0x2f,0x76,0x55,0xf2,0x61,0xf4,
+        0x0c,0x88,0x5d,0x4c,0x08,0x27,0xf0,0xd0,0x16,0xd4,0x92,0xb9,0x88,0x5c,0x01,0x5d
+    };
+    uint8_t current[16], recovery[16], transcript[192] = {0}, proof[32];
+    unsigned int i;
+    memset(current, 0x11, sizeof(current));
+    memset(recovery, 0x22, sizeof(recovery));
+    for (i = 0; i < 6u; ++i) transcript[i * 32u] = (uint8_t)(i + 1u);
+    if (tcsec_confirm_flight(current, recovery, transcript, proof) != 0 || memcmp(proof, flight, sizeof(proof)) != 0 ||
+        tcsec_confirm_verify_ground(current, recovery, transcript, ground) != 0 ||
+        tcsec_confirm_verify_ground(current, recovery, transcript, flight) == 0 ||
+        tcsec_confirm_verify_ground(current, recovery, transcript, NULL) == 0 ||
+        tcsec_confirm_flight(current, recovery, transcript, NULL) == 0 ||
+        tcsec_confirm_flight(current, current, transcript, proof) == 0 ||
+        memcmp(proof, (uint8_t[32]){0}, sizeof(proof)) != 0) return 0;
+    transcript[160] = 7u;
+    if (tcsec_confirm_verify_ground(current, recovery, transcript, ground) == 0) return 0;
+    transcript[160] = 5u;
+    if (tcsec_confirm_flight(current, recovery, transcript, proof) == 0) return 0;
+    transcript[160] = 0u;
+    return tcsec_confirm_flight(current, recovery, transcript, proof) != 0;
+}
+
 int main(int argc, char **argv) {
     int index;
     if (argc != 3) {
@@ -1667,6 +1697,10 @@ int main(int argc, char **argv) {
     }
     if (!test_shared_kdf_vectors()) {
         fprintf(stderr, "CMAC counter KDF shared vector failed\n");
+        return 1;
+    }
+    if (!test_commissioning_confirmation()) {
+        fprintf(stderr, "Commissioning confirmation vectors failed\n");
         return 1;
     }
     if (!test_low_level_rejections()) {

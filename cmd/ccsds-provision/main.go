@@ -120,12 +120,6 @@ func run(ctx context.Context, options provisionOptions) error {
 	return nil
 }
 
-type stagedAssociation struct {
-	Association    ccsds.SecurityAssociation
-	VersionID      string
-	SealedMaterial []byte
-}
-
 type installationKeys interface {
 	SealExternalKey(context.Context, suite.ID, string, []byte) (*keyresolver.Material, error)
 	UnsealKey(context.Context, []byte, string) ([]byte, error)
@@ -137,7 +131,7 @@ func prepareInstallation(ctx context.Context, associations []ccsds.SecurityAssoc
 	if len(associations) != 3 || len(roots) != 3*rootSize {
 		return nil, errors.New("invalid installation contents")
 	}
-	var staged [3]stagedAssociation
+	var staged [3]ccsds.StagedAssociation
 	if existing != nil && json.Unmarshal(existing, &staged) != nil {
 		return nil, errors.New("invalid installation candidate")
 	}
@@ -166,7 +160,7 @@ func prepareInstallation(ctx context.Context, associations []ccsds.SecurityAssoc
 				return nil, errors.New("candidate root does not match the authorized envelope")
 			}
 		}
-		staged[pos] = stagedAssociation{Association: association, VersionID: versionID, SealedMaterial: sealed}
+		staged[pos] = ccsds.StagedAssociation{Association: association, VersionID: versionID, SealedMaterial: sealed}
 	}
 	return json.Marshal(staged)
 }

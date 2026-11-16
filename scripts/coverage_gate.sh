@@ -123,7 +123,7 @@ assert_coverage "Ground TC Go statement" "$go_coverage"
 readonly COMMISSIONING_PROFILE="$COVERAGE_DIR/go-commissioning.out"
 (
   cd "$ROOT_DIR"
-  "$GO_BIN" test -count=1 -covermode=atomic -coverprofile="$COMMISSIONING_PROFILE" ./internal/commissioning
+	"$GO_BIN" test -count=1 -covermode=atomic -coverprofile="$COMMISSIONING_PROFILE" ./internal/commissioning/...
 )
 commissioning_coverage="$(cd "$ROOT_DIR" && "$GO_BIN" tool cover -func="$COMMISSIONING_PROFILE" | awk '/^total:/ { gsub(/%/, "", $3); print $3 }')"
 assert_coverage "Root commissioning Go statement" "$commissioning_coverage"

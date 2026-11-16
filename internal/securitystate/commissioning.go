@@ -8,6 +8,26 @@ import (
 	"errors"
 )
 
+// ReadAnchoredGroundCommissioning reads a committed snapshot without changing
+// it or creating any live mission, association or counter state.
+func (s *Store) ReadAnchoredGroundCommissioning(ctx context.Context, tenant string, transaction, binding, anchor [32]byte) ([]byte, error) {
+	if tenant == "" || transaction == ([32]byte{}) || binding == ([32]byte{}) || anchor == ([32]byte{}) {
+		return nil, ErrConflict
+	}
+	var storedTransaction, storedBinding, payload, storedDigest []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT transaction_id, binding_digest, sealed_installation, installation_digest
+		FROM ground_commissioning WHERE tenant_id=? AND NOT EXISTS (SELECT 1 FROM mission_profiles WHERE tenant_id=?)`,
+		tenant, tenant).Scan(&storedTransaction, &storedBinding, &payload, &storedDigest); err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(payload)
+	if len(payload) == 0 || len(payload) > 64<<10 || !bytes.Equal(storedTransaction, transaction[:]) ||
+		!bytes.Equal(storedBinding, binding[:]) || !bytes.Equal(storedDigest, digest[:]) || groundInstallationCommitment(transaction, binding, digest) != anchor {
+		return nil, ErrConflict
+	}
+	return payload, nil
+}
+
 // StageGroundCommissioning returns the commitment of the first durable
 // installation. If the anchor has already been written, the staged record
 // must exist and match it. Otherwise prepare either seals a new installation

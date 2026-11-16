@@ -23,6 +23,7 @@ type AuthorizedGroundInstall struct {
 	binding      Binding
 	envelope     Envelope
 	recordDigest [32]byte
+	anchorName   [2 + sha256.Size]byte
 }
 
 // AuthorizeGroundInstall verifies the approval before the import key can be
@@ -46,7 +47,7 @@ func AuthorizeGroundInstall(binding Binding, envelope Envelope, auth GroundAutho
 	if !ed25519.Verify(authority, message, auth.Signature) {
 		return nil, ErrLifecycle
 	}
-	return &AuthorizedGroundInstall{binding: binding, recordDigest: recordDigest, envelope: Envelope{
+	return &AuthorizedGroundInstall{binding: binding, recordDigest: recordDigest, anchorName: auth.AnchorName, envelope: Envelope{
 		Enc: append([]byte(nil), envelope.Enc...), Ciphertext: append([]byte(nil), envelope.Ciphertext...),
 		Signature: append([]byte(nil), envelope.Signature...),
 	}}, nil
@@ -59,6 +60,8 @@ func groundPackageDigest(envelope Envelope) [32]byte {
 }
 
 func (a *AuthorizedGroundInstall) RecordDigest() [32]byte { return a.recordDigest }
+func (a *AuthorizedGroundInstall) Binding() Binding       { return a.binding }
+func (a *AuthorizedGroundInstall) AnchorName() [34]byte   { return a.anchorName }
 
 // Import verifies the trusted issuer's envelope signature before ECDH.
 func (a *AuthorizedGroundInstall) Import(key ecdh.KeyExchanger, issuer *ecdsa.PublicKey, install func([]byte) error) error {

@@ -104,7 +104,7 @@ func TestStageDeviceBoundInstallation(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		var sealed [3]stagedAssociation
+		var sealed [3]ccsds.StagedAssociation
 		if !json.Valid(payload) || json.Unmarshal(payload, &sealed) != nil || len(keys.material) != len(sealed) ||
 			sealed[0].VersionID == sealed[1].VersionID || sealed[2].Association.Direction != ccsds.DirectionTCRecoveryTx {
 			t.Fatal("invalid staged installation")

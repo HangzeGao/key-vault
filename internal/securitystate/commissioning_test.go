@@ -75,6 +75,12 @@ func TestStageGroundCommissioningCannotCreateRuntimeState(t *testing.T) {
 	if got, err := store.StageGroundCommissioning(ctx, "tenant", txn, binding, commitment, unexpected); err != nil || got != commitment {
 		t.Fatalf("post-anchor recovery: %v", err)
 	}
+	if payload, err := store.ReadAnchoredGroundCommissioning(ctx, "tenant", txn, binding, commitment); err != nil || string(payload) != "sealed originals" {
+		t.Fatalf("ground confirmation could not read the committed stage: %v", err)
+	}
+	if _, err := store.ReadAnchoredGroundCommissioning(ctx, "tenant", txn, binding, [32]byte{}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("an empty anchor opened the stage: %v", err)
+	}
 	if _, err := store.ReadMissionProfileDigest(ctx, "tenant"); !errors.Is(err, ccsds.ErrAssociationNotFound) {
 		t.Fatalf("staging wrote a live mission binding: %v", err)
 	}
@@ -100,6 +106,9 @@ func TestStageGroundCommissioningCannotCreateRuntimeState(t *testing.T) {
 	if _, err := store.StageGroundCommissioning(ctx, "tenant", txn, binding, commitment, unexpected); !errors.Is(err, ErrConflict) {
 		t.Fatalf("anchored rehashed installation accepted: %v", err)
 	}
+	if _, err := store.ReadAnchoredGroundCommissioning(ctx, "tenant", txn, binding, commitment); !errors.Is(err, ErrConflict) {
+		t.Fatalf("ground confirmation accepted tampered roots: %v", err)
+	}
 	if err := store.EnsureTenant(ctx, "other", "other"); err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +126,9 @@ func TestStageGroundCommissioningCannotCreateRuntimeState(t *testing.T) {
 	}
 	if _, err := store.StageGroundCommissioning(ctx, "tenant", txn, binding, commitment, unexpected); !errors.Is(err, ErrConflict) {
 		t.Fatalf("deleted anchored record reinstalled: %v", err)
+	}
+	if _, err := store.ReadAnchoredGroundCommissioning(ctx, "tenant", txn, binding, commitment); err == nil {
+		t.Fatal("missing stage accepted by confirmation")
 	}
 	var count int
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ground_commissioning`).Scan(&count); err != nil || count != 0 {

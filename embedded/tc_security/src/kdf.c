@@ -1,4 +1,5 @@
 #include "tc_security_kdf.h"
+#include "commissioning_confirmation.h"
 
 #include "sm4.h"
 
@@ -132,4 +133,64 @@ int tcsec_derive_recovery_key(const uint8_t *root, size_t root_length,
     return derive(root, root_length, TCSEC_SM4_KEY_LENGTH,
                   label, sizeof(label) - 1u,
                   context, sizeof(context), output, output_capacity);
+}
+
+static uint8_t confirmation_difference(const uint8_t *left, const uint8_t *right, size_t length) {
+    uint8_t difference = 0u;
+    size_t index;
+    for (index = 0u; index < length; ++index) difference |= (uint8_t)(left[index] ^ right[index]);
+    return difference;
+}
+
+static int confirmation_proof(const uint8_t *current, const uint8_t *recovery,
+                              const uint8_t *transcript, uint8_t direction, uint8_t *proof) {
+    static const uint8_t kdf_label[] = "TC-CONFIRM-KDF-V1";
+    static const uint8_t mac_label[] = "TC-CONFIRM-MAC-V1";
+    static const uint8_t zero[32] = {0u};
+    uint8_t derivation[4u + sizeof(kdf_label) + 1u + TCSEC_CONFIRM_TRANSCRIPT_LENGTH + 4u];
+    uint8_t message[sizeof(mac_label) + 2u + TCSEC_CONFIRM_TRANSCRIPT_LENGTH];
+    uint8_t key[16];
+    const uint8_t *roots[2] = {current, recovery};
+    size_t index;
+    if (proof == NULL) return -1;
+    memset(proof, 0, TCSEC_CONFIRM_PROOF_LENGTH);
+    if (current == NULL || recovery == NULL || transcript == NULL ||
+        confirmation_difference(current, recovery, 16u) == 0u) return -1;
+    for (index = 0u; index < TCSEC_CONFIRM_TRANSCRIPT_LENGTH; index += 32u) {
+        if (memcmp(&transcript[index], zero, sizeof(zero)) == 0) return -1;
+    }
+    if (memcmp(&transcript[64], &transcript[96], 32u) == 0 ||
+        memcmp(&transcript[128], &transcript[160], 32u) == 0) return -1;
+    write_u32(derivation, 1u);
+    memcpy(&derivation[4], kdf_label, sizeof(kdf_label));
+    memcpy(&derivation[4u + sizeof(kdf_label) + 1u], transcript, TCSEC_CONFIRM_TRANSCRIPT_LENGTH);
+    write_u32(&derivation[sizeof(derivation) - 4u], 128u);
+    memcpy(message, mac_label, sizeof(mac_label));
+    message[sizeof(mac_label)] = direction;
+    memcpy(&message[sizeof(mac_label) + 2u], transcript, TCSEC_CONFIRM_TRANSCRIPT_LENGTH);
+    for (index = 0u; index < 2u; ++index) {
+        derivation[4u + sizeof(kdf_label)] = (uint8_t)(index + 1u);
+        message[sizeof(mac_label) + 1u] = (uint8_t)(index + 1u);
+        cmac(roots[index], derivation, sizeof(derivation), key);
+        cmac(key, message, sizeof(message), &proof[index * 16u]);
+        zeroize(key, sizeof(key));
+    }
+    return 0;
+}
+
+int tcsec_confirm_flight(const uint8_t current[16], const uint8_t recovery[16],
+                         const uint8_t transcript[TCSEC_CONFIRM_TRANSCRIPT_LENGTH],
+                         uint8_t proof[TCSEC_CONFIRM_PROOF_LENGTH]) {
+    return confirmation_proof(current, recovery, transcript, 2u, proof);
+}
+
+int tcsec_confirm_verify_ground(const uint8_t current[16], const uint8_t recovery[16],
+                                const uint8_t transcript[TCSEC_CONFIRM_TRANSCRIPT_LENGTH],
+                                const uint8_t proof[TCSEC_CONFIRM_PROOF_LENGTH]) {
+    uint8_t expected[TCSEC_CONFIRM_PROOF_LENGTH];
+    int result;
+    if (proof == NULL || confirmation_proof(current, recovery, transcript, 1u, expected) != 0) return -1;
+    result = confirmation_difference(expected, proof, sizeof(expected)) == 0u ? 0 : -1;
+    zeroize(expected, sizeof(expected));
+    return result;
 }

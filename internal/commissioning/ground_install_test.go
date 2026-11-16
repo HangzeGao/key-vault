@@ -43,7 +43,7 @@ func TestAuthorizedGroundInstall(t *testing.T) {
 	wantRecord := sha256.Sum256(message)
 	auth.Signature = ed25519.Sign(private, binary.BigEndian.AppendUint64(message, uint64(auth.ExpiresUnix)))
 	verified, err := AuthorizeGroundInstall(b, envelope, auth, authority, now)
-	if err != nil || verified.RecordDigest() != wantRecord {
+	if err != nil || verified.RecordDigest() != wantRecord || verified.Binding() != b || verified.AnchorName() != auth.AnchorName {
 		t.Fatalf("authorize: %v", err)
 	}
 	wrong := b

@@ -43,6 +43,14 @@ type MissionAssociationIDs struct {
 	CurrentSA, NextSA, RecoverySA    string
 }
 
+// StagedAssociation is the sealed local installation record shared by the
+// provisioning and confirmation paths. It contains no plaintext roots.
+type StagedAssociation struct {
+	Association    SecurityAssociation
+	VersionID      string
+	SealedMaterial []byte
+}
+
 // DecodeMissionSecurityProfile accepts one strict YAML document. Unknown and
 // duplicate fields are rejected by yaml.v3 KnownFields and mapping validation.
 func DecodeMissionSecurityProfile(reader io.Reader) (*MissionSecurityProfile, error) {

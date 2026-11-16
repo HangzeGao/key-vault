@@ -25,7 +25,7 @@ ifeq ($(ARMV7_NEON),1)
 CPPFLAGS += -DTCSEC_HAVE_ARMV7_NEON_ASM=1
 ASM_SOURCES += src/sm4_armv7_neon.S
 endif
-CORE_HEADERS := include/tc_security.h include/tc_security_kdf.h src/parameters.h src/context_private.h src/next_validation.h src/selftest.h src/sm4.h src/gcm.h
+CORE_HEADERS := include/tc_security.h include/tc_security_kdf.h src/parameters.h src/context_private.h src/next_validation.h src/selftest.h src/sm4.h src/gcm.h src/commissioning_confirmation.h
 CORE_LIB := $(BUILD_DIR)/libtc_security.a
 CORE_OBJECTS := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(TC_SOURCES)) \
                 $(patsubst src/%.S,$(BUILD_DIR)/%.o,$(ASM_SOURCES))
@@ -65,7 +65,7 @@ $(SELFTEST_FAILURE_BIN): $(TC_SOURCES) $(CORE_HEADERS) $(TEST_POLICY) tests/test
 		$(TC_SOURCES) $(TEST_POLICY) \
 		tests/test_selftest_failure.c $(LDFLAGS) -o $(SELFTEST_FAILURE_BIN)
 
-$(EXTERNAL_VECTOR_TEST_BIN): src/sm4.c src/gcm.c src/kdf.c tests/test_external_vectors.c
+$(EXTERNAL_VECTOR_TEST_BIN): src/sm4.c src/gcm.c src/kdf.c src/commissioning_confirmation.h tests/test_external_vectors.c
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -DTCSEC_TEST_CRYPTO_PRIMITIVES=1 \
 		src/sm4.c src/gcm.c src/kdf.c tests/test_external_vectors.c \
