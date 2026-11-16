@@ -35,11 +35,11 @@ func TestAuthorizedGroundInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Unix(1024, 0)
-	auth := GroundAuthorization{ClosureDigest: [32]byte{4}, ExpiresUnix: 1025}
+	auth := GroundAuthorization{ClosureDigest: [32]byte{4}, ExpiresUnix: 1025, AnchorName: [34]byte{0, 11, 9}}
 	info, _ := b.info()
 	packageBytes := bytes.Join([][]byte{envelope.Enc, envelope.Ciphertext, envelope.Signature}, nil)
 	digest := sha256.Sum256(packageBytes)
-	message := bytes.Join([][]byte{[]byte("TC-GROUND-INSTALL-V1\x00"), info, digest[:], auth.ClosureDigest[:]}, nil)
+	message := bytes.Join([][]byte{[]byte("TC-GROUND-INSTALL-V2\x00"), info, digest[:], auth.ClosureDigest[:], auth.AnchorName[:]}, nil)
 	wantRecord := sha256.Sum256(message)
 	auth.Signature = ed25519.Sign(private, binary.BigEndian.AppendUint64(message, uint64(auth.ExpiresUnix)))
 	verified, err := AuthorizeGroundInstall(b, envelope, auth, authority, now)
@@ -57,6 +57,11 @@ func TestAuthorizedGroundInstall(t *testing.T) {
 	}
 	if _, err := AuthorizeGroundInstall(b, envelope, auth, authority, time.Unix(auth.ExpiresUnix, 0)); !errors.Is(err, ErrLifecycle) {
 		t.Fatal("expired approval accepted")
+	}
+	wrongAnchor := auth
+	wrongAnchor.AnchorName[2] ^= 1
+	if _, err := AuthorizeGroundInstall(b, envelope, wrongAnchor, authority, now); !errors.Is(err, ErrLifecycle) {
+		t.Fatal("approval worked with a different NV anchor")
 	}
 	envelope.Ciphertext[0] ^= 1
 	if _, err := AuthorizeGroundInstall(b, envelope, auth, authority, now); !errors.Is(err, ErrLifecycle) {

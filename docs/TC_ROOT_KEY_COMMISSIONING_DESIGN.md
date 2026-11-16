@@ -58,7 +58,7 @@
 ## 4. 首装与放行
 
 1. **登记并审批。** 工装校验目标地面主机及板卡身份，核对设备可信状态及认证关测回执。审批绑定任务、设备、清单摘要、根版本和唯一首装事务号。需要重发时沿用同一事务及根集合，由授权制备进程从 TPM 保护的记录恢复对应材料。
-2. **本地安装，业务保持关闭。** 两端先写受保护的首装事务记录，再验证和解封各自的包。地面把 TPM 封装对象与对应关联、初始计数和事务状态作为一组提交。TPM 与数据库分步时，重启根据对象标识和已提交记录续办。星务完整写入受保护快照，读回校验三份候选记录，再推进可信提交锚。初始安全状态包含空重放窗口、零验证预算、无 Pending 状态及相同的任务清单摘要。密钥明文和中间缓冲区在各处理路径结束时清理。
+2. **本地安装，业务保持关闭。** 两端先写受保护的首装事务记录，再验证和解封各自的包。地面先在 SQLite 提交 TPM 封存对象、关联参数和事务绑定，再推进一次性 TPM NV 暂存锚。重启后核对已提交记录和锚，初始发送计数在后续认证放行时发布。星务完整写入受保护快照，读回校验三份候选记录，再推进可信提交锚。初始安全状态包含空重放窗口、零验证预算、无 Pending 状态及相同的任务清单摘要。密钥明文和中间缓冲区在各处理路径结束时清理。
 3. **断电后再核验。** 地面按正常启动路径加载本地记录。星务启动后在维护模式下用 `tcsec_init` 及 `load_state` 核验已提交快照，业务入口保持关闭。两端只使用重启后实际加载的 Current 和 Recovery 根完成双向密钥确认。分别派生专用确认密钥，确认消息绑定随机挑战、双方身份、事务号、任务清单摘要、根用途和确认方向。确认使用独立的用途域，避免推进生产计数、重放窗口和验证预算。操作员查看每种根的确认结果，确认报文由设备处理。[NIST 密钥确认](https://csrc.nist.gov/glossary/term/key_confirmation)
 4. **先放行星上，再放行地面。** 两端提交证据和密钥确认均有效后，由授权方发布绑定本事务的放行凭证。星上持久记录放行后开放收帧并返回认证回执。地面收到匹配回执，持久提交发送许可后开放正式组帧。回执丢失时查询同一事务的已提交结果。工装无需读取根密钥，也无需注册密码模块的运行回调。
 
@@ -104,19 +104,25 @@ sequenceDiagram
 
 本仓库的 `internal/commissioning` 提供软件参考实现，覆盖阶段迁移、权限判定、允许阶段的授权导入、HPKE 封装、签名校验和短期明文清理。原生 TPM 提供 `FillRandom`，调用方可作为受控制备的随机来源。平台必须实现记录鉴别、反回退、验证授权和证据、读写串行化以及提交确认。参考实现的主机测试使用测试凭据和内存记录。地面命令接线、TPM 签名和导入对象授权、星务维护协议、安全启动、调试锁定、实物掉电及关测回执还需目标平台集成验证。
 
-地面命令已接入非秘密清单、设备绑定的地面封装、签名安装授权及 TPM 导入对象。三份封存根和关联参数只进入本地暂存记录。待集成项包括设备台账登记、关测回执签发和验证、可信防回退锚、密钥确认、认证放行和运行关联发布。星务维护导入、受保护存储提交及真实掉电也须在目标 BSP 验收。
+地面命令已接入非秘密清单、设备绑定的地面封装、签名安装授权及 TPM 导入对象。三份封存根和关联参数进入本地暂存记录，并由一次性 TPM NV 锚绑定。待集成项包括设备台账登记、关测回执签发和验证、密钥确认、认证放行和运行关联发布。星务维护导入、受保护存储提交及真实掉电也须在目标 BSP 验收。
 
 ### 地面导入文档与签名
 
 版本 3 任务清单只含地面接口手册所列字段，清单摘要为 Go `encoding/json.Marshal` 规范输出的 SHA-256。字段按手册次序写入，顶层为 `format_version, mission_id, tenant_id, spacecraft_id, tc`，`tc` 内依次为 `current_spi, security_epoch, current_root_version, next_root_version, nonce_prefix_hex, recovery_spi, recovery_root_version, recovery_nonce_prefix_hex`。两个十六进制前缀先转小写，规范输出无多余空白。
 
-| 版本 1 YAML 文档 | 字段 |
+| YAML 文档及版本 | 字段 |
 | --- | --- |
-| 本地登记 | `format_version`、`node_id`、`tenant_id`、`device_id_hex`、`recipient_key_id_hex`、`import_handle`、`import_object_name_hex`、`storage_object_name_hex`、`envelope_issuer_p256_hex`、`install_authority_ed25519_hex`。设备 ID 和接收公钥指纹各 32 字节，TPM Name 各 34 字节，签名验证公钥分别为 65 字节未压缩 P-256 点及 32 字节 Ed25519 公钥。 |
-| 地面封装包 | `format_version`、`enc_hex`、`ciphertext_hex`、`signature_der_hex`。三个二进制字段分别为 65 字节封装公钥、64 字节认证密文、ECDSA DER 签名。 |
-| 安装授权 | `format_version`、`transaction_id_hex`、`closure_receipt_sha256`、`expires_unix`、`signature_hex`。事务号和关测回执摘要各 32 字节，有效期为 UTC Unix 秒，签名为 64 字节 Ed25519。 |
+| 本地登记 2 | `format_version`、`node_id`、`tenant_id`、`device_id_hex`、`recipient_key_id_hex`、`import_handle`、`import_object_name_hex`、`storage_object_name_hex`、`stage_anchor_index`、`stage_anchor_name_hex`、`envelope_issuer_p256_hex`、`install_authority_ed25519_hex`。设备 ID 和接收公钥指纹各 32 字节，TPM Name 各 34 字节，锚索引为 TPM NV 句柄，签名验证公钥分别为 65 字节未压缩 P-256 点及 32 字节 Ed25519 公钥。 |
+| 地面封装包 1 | `format_version`、`enc_hex`、`ciphertext_hex`、`signature_der_hex`。三个二进制字段分别为 65 字节封装公钥、64 字节认证密文、ECDSA DER 签名。 |
+| 安装授权 2 | `format_version`、`transaction_id_hex`、`closure_receipt_sha256`、`expires_unix`、`signature_hex`。事务号和关测回执摘要各 32 字节，有效期为 UTC Unix 秒，签名为 64 字节 Ed25519。 |
 
-安装审批方在核验关测回执及操作授权后签发安装授权。签名原文按顺序拼接 ASCII `TC-GROUND-INSTALL-V1`、一个 `00` 字节、第 3 节定义的地面封装绑定字节串、`SHA256(enc || ciphertext || DER 签名)`、关测回执的 SHA-256、8 字节大端截止时间。签名和截止时间通过才允许导入。暂存去重绑定对相同原文去掉末尾截止时间后计算 SHA-256。操作员可在同一受保护事务内续办，收到暂存成功后须完成冷启动确认和认证放行才能发送。
+安装审批方在核验关测回执及操作授权后签发安装授权。签名原文按顺序拼接 ASCII `TC-GROUND-INSTALL-V2`、一个 `00` 字节、第 3 节定义的地面封装绑定字节串、`SHA256(enc || ciphertext || DER 签名)`、关测回执的 SHA-256、34 字节未写入态 TPM NV Name、8 字节大端截止时间。签名和截止时间通过才允许导入。暂存去重绑定对相同原文去掉末尾截止时间后计算 SHA-256。操作员可在同一受保护事务内续办，收到暂存成功后须完成冷启动确认和认证放行才能发送。
+
+### 地面一次性暂存锚
+
+登记方在批准的 TPM/PCR 基线上定义一个 32 字节 SHA-256 普通 NV 索引，使用空读授权值。索引属性固定为 `PLATFORMCREATE | POLICY_DELETE | POLICYWRITE | WRITEALL | AUTHREAD | NO_DA`。写策略按 `PolicyPCR`、`PolicyCommandCode(TPM2_NV_Write)`、`PolicyNvWritten(false)` 顺序计算。定义时登记未写入态的 Name。写后 TPM 的 `WRITTEN` 位置位，应用核对规范化 Name，并通过绑定登记存储主密钥的带盐会话认证读回。策略控制写入次数及长度。删除保护阻止以重建同一索引回退首装状态。登记程序须将索引分配及恢复纳入设备台账。[TCG TPM 2.0 规范](https://www.trustedcomputinggroup.org/resources/documents/tpm-library-specification)
+
+锚保存 `SHA256("TC-GROUND-STAGED-V1" || 00 || 事务号 || 暂存去重绑定 || SHA256(暂存记录字节))`。SQLite 事务先落盘。若 TPM 尚未写入，续办时重新验证授权和封装、解封候选根并逐项比对首装根和关联参数，再写锚。若 TPM 已写入，必须有与锚完全一致的暂存记录，直接复核原承诺。TPM 写入回执丢失时复核认证读回。缺失、分叉或回退时保持停发，转入受控核查。该锚绑定首装暂存，运行态和放行还需各自的可信提交依据。
 
 | 验收项 | 最低预期 |
 | --- | --- |

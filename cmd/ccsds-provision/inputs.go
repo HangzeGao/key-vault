@@ -25,6 +25,8 @@ type enrollmentDocument struct {
 	ImportHandle uint32 `yaml:"import_handle"`
 	ImportName   string `yaml:"import_object_name_hex"`
 	StorageName  string `yaml:"storage_object_name_hex"`
+	AnchorIndex  uint32 `yaml:"stage_anchor_index"`
+	AnchorName   string `yaml:"stage_anchor_name_hex"`
 	Issuer       string `yaml:"envelope_issuer_p256_hex"`
 	Authority    string `yaml:"install_authority_ed25519_hex"`
 }
@@ -49,6 +51,7 @@ type installRequest struct {
 	binding      commissioning.Binding
 	issuer       *ecdsa.PublicKey
 	registration provider.RegisteredImportKey
+	anchor       provider.RegisteredCommissioningAnchor
 	authorized   *commissioning.AuthorizedGroundInstall
 }
 
@@ -56,19 +59,20 @@ func loadInstallRequest(enrollment io.Reader, envelopePath, authorizationPath st
 	var trust enrollmentDocument
 	var wire envelopeDocument
 	var approval authorizationDocument
-	if decodeDocument(enrollment, &trust) != nil || trust.Version != 1 || trust.Node == "" || trust.Tenant == "" {
+	if decodeDocument(enrollment, &trust) != nil || trust.Version != 2 || trust.Node == "" || trust.Tenant == "" {
 		return nil, errors.New("invalid commissioning enrollment")
 	}
 	if readDocument(envelopePath, &wire) != nil || wire.Version != 1 {
 		return nil, errors.New("invalid ground envelope")
 	}
-	if readDocument(authorizationPath, &approval) != nil || approval.Version != 1 {
+	if readDocument(authorizationPath, &approval) != nil || approval.Version != 2 {
 		return nil, errors.New("invalid installation authorization")
 	}
 	request := installRequest{
 		node: trust.Node, tenant: trust.Tenant,
 		binding:      commissioning.Binding{Purpose: commissioning.GroundRoots, ProfileDigest: digest},
 		registration: provider.RegisteredImportKey{Handle: trust.ImportHandle},
+		anchor:       provider.RegisteredCommissioningAnchor{Index: trust.AnchorIndex},
 	}
 	var authority [ed25519.PublicKeySize]byte
 	var auth commissioning.GroundAuthorization
@@ -78,6 +82,7 @@ func loadInstallRequest(enrollment io.Reader, envelopePath, authorizationPath st
 		!decodeHex(request.binding.Transaction[:], approval.Transaction) ||
 		!decodeHex(request.registration.ObjectName[:], trust.ImportName) ||
 		!decodeHex(request.registration.StorageName[:], trust.StorageName) ||
+		!decodeHex(request.anchor.Name[:], trust.AnchorName) ||
 		!decodeHex(issuer[:], trust.Issuer) || !decodeHex(authority[:], trust.Authority) ||
 		!decodeHex(auth.ClosureDigest[:], approval.ClosureDigest) {
 		return nil, errors.New("invalid commissioning identity or signature policy")
@@ -87,6 +92,8 @@ func loadInstallRequest(enrollment io.Reader, envelopePath, authorizationPath st
 		return nil, errors.New("invalid envelope issuer key")
 	}
 	request.issuer = &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
+	request.anchor.StorageName = request.registration.StorageName
+	auth.AnchorName = request.anchor.Name
 	enc, encErr := hex.DecodeString(wire.Enc)
 	ciphertext, cipherErr := hex.DecodeString(wire.Ciphertext)
 	signature, sigErr := hex.DecodeString(wire.Signature)

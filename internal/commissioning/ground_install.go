@@ -14,6 +14,7 @@ import (
 // the receipt and authenticating the operator's installation request.
 type GroundAuthorization struct {
 	ClosureDigest [32]byte
+	AnchorName    [2 + sha256.Size]byte
 	ExpiresUnix   int64
 	Signature     []byte
 }
@@ -30,14 +31,16 @@ func AuthorizeGroundInstall(binding Binding, envelope Envelope, auth GroundAutho
 	authority ed25519.PublicKey, now time.Time) (*AuthorizedGroundInstall, error) {
 	info, size := binding.info()
 	if binding.Purpose != GroundRoots || size == 0 || auth.ClosureDigest == ([32]byte{}) || auth.ExpiresUnix <= now.Unix() ||
+		binary.BigEndian.Uint16(auth.AnchorName[:]) != 0x000b ||
 		len(authority) != ed25519.PublicKeySize || len(envelope.Enc) != encSize || len(envelope.Ciphertext) != size+16 ||
 		len(envelope.Signature) == 0 || len(envelope.Signature) > maxSignature {
 		return nil, ErrLifecycle
 	}
 	packageDigest := groundPackageDigest(envelope)
-	message := append([]byte("TC-GROUND-INSTALL-V1\x00"), info...)
+	message := append([]byte("TC-GROUND-INSTALL-V2\x00"), info...)
 	message = append(message, packageDigest[:]...)
 	message = append(message, auth.ClosureDigest[:]...)
+	message = append(message, auth.AnchorName[:]...)
 	recordDigest := sha256.Sum256(message)
 	message = binary.BigEndian.AppendUint64(message, uint64(auth.ExpiresUnix))
 	if !ed25519.Verify(authority, message, auth.Signature) {

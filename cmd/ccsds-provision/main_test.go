@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -56,8 +57,9 @@ func TestStageDeviceBoundInstallation(t *testing.T) {
 		t.Fatal(err)
 	}
 	envelopeDigest := sha256.Sum256(bytes.Join([][]byte{envelope.Enc, envelope.Ciphertext, envelope.Signature}, nil))
-	message := bytes.Join([][]byte{[]byte("TC-GROUND-INSTALL-V1\x00TC-ROOT-ENVELOPE-V1\x00\x02"),
-		digest[:], device[:], recipient[:], txn[:], envelopeDigest[:], closure[:]}, nil)
+	anchorName := [34]byte{0, 11, 9}
+	message := bytes.Join([][]byte{[]byte("TC-GROUND-INSTALL-V2\x00TC-ROOT-ENVELOPE-V1\x00\x02"),
+		digest[:], device[:], recipient[:], txn[:], envelopeDigest[:], closure[:], anchorName[:]}, nil)
 	now := time.Unix(500, 0)
 	expires := now.Unix() + 100
 	signature := ed25519.Sign(private, binary.BigEndian.AppendUint64(message, uint64(expires)))
@@ -74,9 +76,10 @@ func TestStageDeviceBoundInstallation(t *testing.T) {
 		}
 		return path
 	}
-	trustPath := writeYAML("trust.yaml", enrollmentDocument{Version: 1, Node: "node", Tenant: "tenant",
+	trustPath := writeYAML("trust.yaml", enrollmentDocument{Version: 2, Node: "node", Tenant: "tenant",
 		DeviceID: hex.EncodeToString(device[:]), RecipientID: hex.EncodeToString(recipient[:]), ImportHandle: 0x81000002,
 		ImportName: hex.EncodeToString(make([]byte, 34)), StorageName: hex.EncodeToString(make([]byte, 34)),
+		AnchorIndex: 0x01500020, AnchorName: hex.EncodeToString(anchorName[:]),
 		Issuer: hex.EncodeToString(elliptic.Marshal(elliptic.P256(), issuer.X, issuer.Y)), Authority: hex.EncodeToString(authority)})
 	trustData, err := os.ReadFile(trustPath)
 	if err != nil {
@@ -85,7 +88,7 @@ func TestStageDeviceBoundInstallation(t *testing.T) {
 	wire := envelopeDocument{Version: 1, Enc: hex.EncodeToString(envelope.Enc),
 		Ciphertext: hex.EncodeToString(envelope.Ciphertext), Signature: hex.EncodeToString(envelope.Signature)}
 	packagePath := writeYAML("package.yaml", wire)
-	approvalPath := writeYAML("approval.yaml", authorizationDocument{Version: 1, Transaction: hex.EncodeToString(txn[:]),
+	approvalPath := writeYAML("approval.yaml", authorizationDocument{Version: 2, Transaction: hex.EncodeToString(txn[:]),
 		ClosureDigest: hex.EncodeToString(closure[:]), ExpiresUnix: expires, Signature: hex.EncodeToString(signature)})
 	request, err := loadInstallRequest(bytes.NewReader(trustData), packagePath, approvalPath, digest, now)
 	if err != nil {
@@ -95,24 +98,31 @@ func TestStageDeviceBoundInstallation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var calls int
+	keys := &installationTestKeys{material: make(map[string][]byte)}
 	err = request.authorized.Import(receiver, request.issuer, func(plain []byte) error {
-		payload, err := sealInstallation(context.Background(), associations, plain,
-			func(_ context.Context, _ suite.ID, id string, root []byte) (*keyresolver.Material, error) {
-				if !bytes.Equal(root, bytes.Repeat([]byte{[]byte{0x41, 0x43, 0x42}[calls]}, 16)) {
-					t.Fatal("incorrect Current, Next, or Recovery material")
-				}
-				calls++
-				return &keyresolver.Material{SealedMaterial: []byte(id)}, nil
-			})
+		payload, err := prepareInstallation(context.Background(), associations, plain, nil, keys)
 		if err != nil {
 			return err
 		}
 		var sealed [3]stagedAssociation
-		if !json.Valid(payload) || json.Unmarshal(payload, &sealed) != nil || calls != len(sealed) ||
+		if !json.Valid(payload) || json.Unmarshal(payload, &sealed) != nil || len(keys.material) != len(sealed) ||
 			sealed[0].VersionID == sealed[1].VersionID || sealed[2].Association.Direction != ccsds.DirectionTCRecoveryTx {
 			t.Fatal("invalid staged installation")
 		}
+		for i, expected := range []byte{0x41, 0x43, 0x42} {
+			if !bytes.Equal(keys.material[sealed[i].VersionID], bytes.Repeat([]byte{expected}, 16)) {
+				t.Fatal("incorrect Current, Next, or Recovery material")
+			}
+		}
+		verified, err := prepareInstallation(context.Background(), associations, plain, payload, keys)
+		if err != nil || !bytes.Equal(verified, payload) {
+			t.Fatalf("valid candidate rejected: %v", err)
+		}
+		keys.material[sealed[1].VersionID][0] ^= 1
+		if _, err := prepareInstallation(context.Background(), associations, plain, payload, keys); err == nil {
+			t.Fatal("resealed wrong root accepted")
+		}
+
 		return nil
 	})
 	if err != nil {
@@ -132,4 +142,18 @@ func TestStageDeviceBoundInstallation(t *testing.T) {
 	if _, err := loadInstallRequest(bytes.NewReader(trustData), packagePath, approvalPath, digest, now); err == nil {
 		t.Fatal("duplicate document field accepted")
 	}
+}
+
+type installationTestKeys struct{ material map[string][]byte }
+
+func (k *installationTestKeys) SealExternalKey(_ context.Context, _ suite.ID, id string, root []byte) (*keyresolver.Material, error) {
+	k.material[id] = bytes.Clone(root)
+	return &keyresolver.Material{SealedMaterial: []byte(id)}, nil
+}
+
+func (k *installationTestKeys) UnsealKey(_ context.Context, sealed []byte, id string) ([]byte, error) {
+	if string(sealed) != id {
+		return nil, errors.New("sealed object context mismatch")
+	}
+	return bytes.Clone(k.material[id]), nil
 }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -92,25 +93,30 @@ func run(ctx context.Context, options provisionOptions) error {
 	if !ok || app.AccessVerifier.TenantID() != profile.TenantID {
 		return errors.New("deployment provider or tenant mismatch")
 	}
-	var sealed []byte
-	err = tpm.WithImportKey(ctx, request.registration, func(key ecdh.KeyExchanger) error {
-		return request.authorized.Import(key, request.issuer, func(roots []byte) error {
-			installation, err := sealInstallation(ctx, associations, roots, app.Resolver.SealExternalKey)
-			if err != nil {
-				return err
-			}
-			sealed = installation
-			return nil
-		})
-	})
+	anchor, err := tpm.ReadCommissioningAnchor(ctx, request.anchor)
 	if err != nil {
-		return errors.New("device-bound root import failed")
+		return errors.New("registered installation anchor is unavailable")
 	}
-	if err := app.Store.StageGroundCommissioning(ctx, profile.TenantID, request.binding.Transaction, request.authorized.RecordDigest(), sealed); err != nil {
+	commitment, err := app.Store.StageGroundCommissioning(ctx, profile.TenantID, request.binding.Transaction,
+		request.authorized.RecordDigest(), anchor, func(existing []byte) ([]byte, error) {
+			var sealed []byte
+			err := tpm.WithImportKey(ctx, request.registration, func(key ecdh.KeyExchanger) error {
+				return request.authorized.Import(key, request.issuer, func(roots []byte) error {
+					var err error
+					sealed, err = prepareInstallation(ctx, associations, roots, existing, app.Resolver)
+					return err
+				})
+			})
+			return sealed, err
+		})
+	if err != nil {
 		return errors.New("cannot stage installation or existing installation conflicts")
 	}
+	if err := tpm.CommitCommissioningAnchor(ctx, request.anchor, commitment); err != nil {
+		return errors.New("staged installation anchor not confirmed")
+	}
 	slog.Info("CCSDS installation staged", "transaction", hex.EncodeToString(request.binding.Transaction[:]),
-		"profile_sha256", hex.EncodeToString(digest[:]), "state", "INSTALLED_LOCKED")
+		"profile_sha256", hex.EncodeToString(digest[:]), "stage_anchor_sha256", hex.EncodeToString(commitment[:]), "state", "INSTALLED_LOCKED")
 	return nil
 }
 
@@ -120,13 +126,21 @@ type stagedAssociation struct {
 	SealedMaterial []byte
 }
 
-func sealInstallation(ctx context.Context, associations []ccsds.SecurityAssociation, roots []byte,
-	seal func(context.Context, suite.ID, string, []byte) (*keyresolver.Material, error)) ([]byte, error) {
+type installationKeys interface {
+	SealExternalKey(context.Context, suite.ID, string, []byte) (*keyresolver.Material, error)
+	UnsealKey(context.Context, []byte, string) ([]byte, error)
+}
+
+func prepareInstallation(ctx context.Context, associations []ccsds.SecurityAssociation, roots, existing []byte,
+	keys installationKeys) ([]byte, error) {
 	const rootSize = 16
 	if len(associations) != 3 || len(roots) != 3*rootSize {
 		return nil, errors.New("invalid installation contents")
 	}
 	var staged [3]stagedAssociation
+	if existing != nil && json.Unmarshal(existing, &staged) != nil {
+		return nil, errors.New("invalid installation candidate")
+	}
 	// Associations are ordered Current, Next, Recovery. The envelope is
 	// ordered Current, Recovery, Next.
 	for pos, rootIndex := range [...]int{0, 2, 1} {
@@ -136,11 +150,23 @@ func sealInstallation(ctx context.Context, associations []ccsds.SecurityAssociat
 			return nil, err
 		}
 		versionID := fmt.Sprintf("%s-v%d", association.KeyID, association.KeyVersion)
-		material, err := seal(ctx, suiteID, versionID, roots[rootIndex*rootSize:(rootIndex+1)*rootSize])
-		if err != nil {
-			return nil, err
+		root := roots[rootIndex*rootSize : (rootIndex+1)*rootSize]
+		sealed := staged[pos].SealedMaterial
+		if existing == nil {
+			material, err := keys.SealExternalKey(ctx, suiteID, versionID, root)
+			if err != nil {
+				return nil, err
+			}
+			sealed = material.SealedMaterial
+		} else {
+			plain, err := keys.UnsealKey(ctx, sealed, versionID)
+			matches := err == nil && subtle.ConstantTimeCompare(plain, root) == 1
+			clear(plain)
+			if !matches {
+				return nil, errors.New("candidate root does not match the authorized envelope")
+			}
 		}
-		staged[pos] = stagedAssociation{Association: association, VersionID: versionID, SealedMaterial: material.SealedMaterial}
+		staged[pos] = stagedAssociation{Association: association, VersionID: versionID, SealedMaterial: sealed}
 	}
 	return json.Marshal(staged)
 }
