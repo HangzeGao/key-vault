@@ -31,7 +31,7 @@ func (w *nativeWireCapture) Write(data []byte) (int, error) {
 
 func (w *nativeWireCapture) Read(data []byte) (int, error) {
 	n, err := w.ReadWriteCloser.Read(data)
-	if w.command == tpm2.TPMCCGetRandom || w.command == tpm2.TPMCCUnseal {
+	if w.command == tpm2.TPMCCGetRandom || w.command == tpm2.TPMCCUnseal || w.command == tpm2.TPMCCECDHZGen {
 		w.responses[w.command] = append(w.responses[w.command], bytes.Clone(data[:n]))
 	}
 	if w.corruptRNG && w.command == tpm2.TPMCCGetRandom && n > 16 {
